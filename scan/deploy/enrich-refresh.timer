@@ -1,0 +1,15 @@
+[Unit]
+Description=gen0sec discovery enrich-refresh (every 30 min, offset from ct-mirror)
+
+[Timer]
+# ct-mirror fires 5min after boot then every 30min; enrich-refresh starts
+# 20min after boot and runs on the same 30min cadence, giving the ct-mirror
+# pass ~15 min to flush new hosts into domains.txt before we enrich them.
+# Persistent=true catches up after downtime.
+OnBootSec=20min
+OnUnitActiveSec=30min
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

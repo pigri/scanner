@@ -1,0 +1,16 @@
+[Unit]
+Description=gen0sec scan report worker (drains report_queue -> per-target reports)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pigri/gen0sec/redteam/scan
+# Source nvm explicitly so npx/node resolve under systemd's clean environment.
+ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; exec npx tsx src/report-worker.ts --sqlite scan.db --out-dir reports --watch --log logs/report-worker.service.log'
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+[Install]
+WantedBy=default.target

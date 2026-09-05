@@ -1,0 +1,14 @@
+[Unit]
+Description=gen0sec CT-mirror poll (every 30 min)
+
+[Timer]
+# CT logs typically batch-append every few minutes; 30-min cadence keeps the
+# mirror fresh without hammering the log servers. Persistent=true catches up
+# after downtime.
+OnBootSec=5min
+OnUnitActiveSec=30min
+Persistent=true
+RandomizedDelaySec=180
+
+[Install]
+WantedBy=timers.target

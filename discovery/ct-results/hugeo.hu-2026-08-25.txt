@@ -1,0 +1,18 @@
+# Certificate Transparency enumeration for hugeo.hu + geoservices.hu
+# 2026-08-25 12:20 UTC
+# Sources: Certspotter (crt.sh returned HTTP 502 — unreachable during window)
+
+# hugeo.hu
+*.hugeo.hu
+hugeo.hu
+opac3.library.hugeo.hu
+
+# geoservices.hu (related — same wildcard cert seen on fw.hugeo.hu)
+*.geoservices.hu
+geoservices.hu
+spamtitan.geoservices.hu
+
+# Additional (found via DNS brute + PTR):
+fw.hugeo.hu
+fw.geoservices.hu
+mail.geoservices.hu

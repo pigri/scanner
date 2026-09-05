@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly gen0sec full re-scan of all known hosts
+
+[Timer]
+# Sundays at 04:00 local. Persistent=true runs a missed job after downtime.
+OnCalendar=Sun *-*-* 04:00:00
+Persistent=true
+RandomizedDelaySec=1800
+
+[Install]
+WantedBy=timers.target

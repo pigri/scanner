@@ -1,0 +1,26 @@
+[Unit]
+Description=gen0sec scan queue worker %i (drains scan_queue -> scan-all)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pigri/gen0sec/redteam/scan
+# Run inside the 'scanvpn' network namespace so all scan egress leaves via the
+# Windscribe tunnel (wgscan), never the host IP. See scan-worker.service for the
+# full rationale: --user units lack CAP_SYS_ADMIN for NetworkNamespacePath=, so
+# we sudo (NOPASSWD) into the ns and drop back to pigri; the ExecStartPre guard
+# fails the unit closed if the namespace is absent.
+# Wait (up to 60s) for scanvpn-netns.service to bring the namespace up — with
+# Linger=yes this user unit can start before the system netns unit at boot. Fails
+# closed if the namespace never appears, so scans can't leak the host IP.
+ExecStartPre=/usr/bin/sudo /usr/bin/bash -c 'for i in $(seq 30); do /usr/sbin/ip netns pids scanvpn >/dev/null 2>&1 && exit 0; sleep 2; done; echo "scanvpn netns absent after 60s — refusing to start" >&2; exit 1'
+# Instance %i gets its own audit log. All instances safely share one WAL scan.db
+# (IMMEDIATE claim transactions prevent double-claiming a target).
+ExecStart=/usr/bin/sudo /usr/sbin/ip netns exec scanvpn /usr/sbin/runuser -u pigri -- /usr/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; ENVFILE="$PWD/.env.scan"; [ -r "$ENVFILE" ] && set -a && . "$ENVFILE" && set +a; exec npx tsx src/worker.ts --sqlite scan.db --scope scope.txt --watch --log logs/worker-%i.service.log'
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target

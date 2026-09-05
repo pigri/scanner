@@ -1,0 +1,12 @@
+bp-rbix-backup.mvm-informatika.hu
+bp-rbix-internet.mvm-informatika.hu
+bp-rbixx-lo0.mvm-informatika.hu
+bp-rdpx-backup.mvm-informatika.hu
+bp-rdpx-internet.mvm-informatika.hu
+bp-rdpx-lo0.mvm-informatika.hu
+guestnet3.mvm-informatika.hu
+mx1.mvm-informatika.hu
+mx3.mvm-informatika.hu
+mx4.mvm-informatika.hu
+mx5.mvm-informatika.hu
+ns.mvm-informatika.hu

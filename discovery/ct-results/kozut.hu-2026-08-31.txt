@@ -1,0 +1,7 @@
+kamera.kozut.hu
+kiafportal.kozut.hu
+kozut.hu
+mk-prod-ws-microsec-cert.kozut.hu
+mk-prod-ws-microsec.kozut.hu
+mk-test-ws-microsec-cert.kozut.hu
+mk-test-ws-microsec.kozut.hu

@@ -1,0 +1,51 @@
+
+> scan@0.1.0 scan-all
+> tsx src/scan-all.ts --targets top100.txt --scope scope.txt --sqlite scan.db
+
+
+=== httpx ===
+$ npx tsx src/httpx.ts --targets top100.txt --scope scope.txt --sqlite scan.db
+httpx done in 44.8s (exit 0)
+httpx -l /home/pigri/gen0sec/redteam/scan/runs/1/httpx-targets.txt -json -o /home/pigri/gen0sec/redteam/scan/runs/1/httpx.jsonl -sc -title -td -web-server -tech-detect -follow-redirects -threads 50
+httpx exited 0, output: /home/pigri/gen0sec/redteam/scan/runs/1/httpx.jsonl
+  sqlite: /home/pigri/gen0sec/redteam/scan/scan.db (+26 probes, run #1)
+
+=== nmap ===
+$ npx tsx src/nmap.ts --targets top100.txt --scope scope.txt --sqlite scan.db
+nmap done in 1761.0s (exit 0)
+nmap -Pn -sV -T3 --top-ports 1000 -iL /home/pigri/gen0sec/redteam/scan/runs/2/nmap-targets.txt -oX /home/pigri/gen0sec/redteam/scan/runs/2/nmap.xml
+100 up hosts, 25 open ports
+  raw xml: /home/pigri/gen0sec/redteam/scan/runs/2/nmap.xml
+  jsonl:   /home/pigri/gen0sec/redteam/scan/runs/2/nmap.jsonl
+  sqlite: /home/pigri/gen0sec/redteam/scan/scan.db (+25 ports, run #2)
+
+=== nuclei ===
+$ npx tsx src/nuclei.ts --targets top100.txt --scope scope.txt --sqlite scan.db
+nuclei done in 2967.3s (exit 0)
+nuclei -l /home/pigri/gen0sec/redteam/scan/runs/3/nuclei-targets.txt -jsonl -o /home/pigri/gen0sec/redteam/scan/runs/3/nuclei.jsonl -severity medium,high,critical -rate-limit 150 -stats
+nuclei exited 0, output: /home/pigri/gen0sec/redteam/scan/runs/3/nuclei.jsonl
+  sqlite: /home/pigri/gen0sec/redteam/scan/scan.db (+0 findings, run #3)
+
+=== takeover ===
+$ npx tsx src/takeover.ts --targets top100.txt --scope scope.txt --sqlite scan.db
+takeover done in 103.8s (exit 0)
+nuclei -l /home/pigri/gen0sec/redteam/scan/runs/4/takeover-targets.txt -jsonl -o /home/pigri/gen0sec/redteam/scan/runs/4/takeover.jsonl -tags takeover -rate-limit 100
+takeover exited 0, output: /home/pigri/gen0sec/redteam/scan/runs/4/takeover.jsonl
+  sqlite: /home/pigri/gen0sec/redteam/scan/scan.db (+0 findings, run #4)
+
+=== testssl ===
+$ npx tsx src/testssl.ts --targets top100.txt --scope scope.txt --sqlite scan.db
+testssl done in 1061.6s (exit -1)
+5/100
+FATAL: Expected ',' or ']' after array element in JSON at position 6988 (line 175 column 12)
+
+=== wpscan === skipped (no WordPress hosts in httpx.jsonl)
+
+=== gowitness ===
+$ npx tsx src/gowitness.ts --targets top100.txt --scope scope.txt --sqlite scan.db
+gowitness done in 0.5s (exit 0)
+gowitness file -f /home/pigri/gen0sec/redteam/scan/runs/8/gowitness-targets.txt --threads 20 --screenshot-path /home/pigri/gen0sec/redteam/scan/runs/8/screenshots
+gowitness exited 1, screenshots in /home/pigri/gen0sec/redteam/scan/runs/8/screenshots
+  sqlite: /home/pigri/gen0sec/redteam/scan/scan.db (+0 screenshots indexed, run #8)
+
+scan-all done. Artifacts:

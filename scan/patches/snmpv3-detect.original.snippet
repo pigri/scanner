@@ -1,0 +1,15 @@
+      function getVendor(msgHex) {
+        for (const [key, value] of Object.entries(known_vendors)) {
+          if (msgHex.includes(key)) {
+            msgHex = (typeof msgHex === "string") ? msgHex : (msgHex ? String(msgHex) : "");
+            if (!msgHex) return "Unknown";
+
+            if (msgHex.toLowerCase().includes(key.toLowerCase())) {
+              const m = msgHex.match(/8000([0-9a-fA-F]*?)0201/i);
+              const engineId = m && m[1] ? m[1] : null;
+              return value + (engineId ? (", Engine ID: " + engineId) : "");
+            }    }
+        }
+        const m = msgHex.match(/8000[0-9a-fA-F]*?0201/);
+        return "Enterprise: " + (m ? m[0] : "unknown");
+      }

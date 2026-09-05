@@ -1,0 +1,234 @@
+# gen0sec scan-worker + discovery image.
+#
+# Bundles every tool the scan/discovery pipelines invoke:
+#   scan-all stage 1  : httpx
+#   scan-all stage 2  : nmap (+ vulners.nse), rustscan, naabu, masscan (raw-SYN;
+#                       auto-skips over WG/tun interfaces), nmap-udp (-sU via
+#                       sudo), nuclei (+ templates), takeover, testssl.sh,
+#                       gowitness, katana, gau, waybackurls, dnsx, checkdmarc
+#   scan-all stage 3  : wpscan, nuclei -l urls.txt, kiterunner, secrets (gitleaks
+#                       + trufflehog + gapi-key-check + vendor-key-enrich),
+#                       headers, ffuf, content-sigs, sslyze, cve-rollup,
+#                       cname-takeover
+#   discovery         : ct-log (crt.sh/certspotter), ct-mirror (scrape-ct-log),
+#                       ddg-sweep (puppeteer + chromium), dns-brute, enrich,
+#                       refresh, gapi-key-check, vendor-key-enrich
+#
+# Runtime notes
+#   * masscan (raw SYN) needs CAP_NET_RAW: `docker run --cap-add=NET_RAW …`.
+#     It self-skips over WG/tun default interfaces (see src/masscan.ts) so
+#     running inside a WireGuard netns is safe — it emits no work.
+#   * nmap-udp (sudo nmap -sU) is wired to `sudo -n`. The image installs
+#     passwordless sudo for the `scan` user; if you run as root that's a no-op.
+#   * puppeteer/chromium is included for discovery/ddg-sweep. If you don't
+#     need the discovery half, comment out the "chromium" block and shave
+#     ~500 MB.
+#   * WireGuard/Windscribe VPN is NOT included. Provide egress via host
+#     networking, a --network=container:vpn-sidecar, or a Docker Compose
+#     network with a wg-quick sibling.
+#   * scan.db is expected as a bind-mounted writable file at /data/scan.db.
+#     recon.db (if used) mounts at /data/recon.db.
+
+# ============================================================
+# Stage 1 — Go builder. Compiles every ProjectDiscovery / recon Go binary
+# once and drops them in $GOPATH/bin for a slim copy into the final stage.
+# ============================================================
+FROM golang:1.26-bookworm AS gobuilder
+
+# GOTOOLCHAIN=auto lets `go install` download a newer stable Go toolchain
+# when a module's go.mod requires it (httpx pins go>=1.26, nuclei/naabu
+# similar). Without it we're stuck on the base image's Go version and any
+# module pinning newer breaks the build.
+ENV CGO_ENABLED=0 GOFLAGS="-buildvcs=false" GOTOOLCHAIN=auto
+
+# ProjectDiscovery ecosystem — the bulk of stage-1/-2 probing.
+RUN go install github.com/projectdiscovery/httpx/cmd/httpx@latest \
+ && go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest \
+ && go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest \
+ && go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest \
+ && go install github.com/projectdiscovery/katana/cmd/katana@latest \
+ && go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+
+# Rest of the Go recon toolchain.
+RUN go install github.com/sensepost/gowitness@latest \
+ && go install github.com/lc/gau/v2/cmd/gau@latest \
+ && go install github.com/tomnomnom/waybackurls@latest \
+ && go install github.com/tomnomnom/anew@latest \
+ && go install github.com/tomnomnom/qsreplace@latest \
+ && go install github.com/ffuf/ffuf/v2@latest \
+ && go install github.com/OJ/gobuster/v3@latest \
+ && go install github.com/hakluke/hakrawler@latest \
+ && go install github.com/haccer/subjack@latest \
+ && go install github.com/zricethezav/gitleaks/v8@latest
+
+# scrape-ct-log: the Certificate Transparency log scraper ct-mirror.ts spawns.
+RUN go install github.com/CaliDog/certstream-server-go/cmd/certstream-server-go@latest || true \
+ && go install github.com/google/certificate-transparency-go/client/ctclient@latest
+
+# kiterunner: distributed as a release tarball because upstream `go install`
+# is broken; we still grab it here so it lands in /go/bin next to the rest.
+ARG KR_VERSION=1.0.2
+RUN curl -fsSL "https://github.com/assetnote/kiterunner/releases/download/v${KR_VERSION}/kiterunner_${KR_VERSION}_linux_amd64.tar.gz" \
+      -o /tmp/kr.tgz \
+ && tar -xzf /tmp/kr.tgz -C /go/bin kr \
+ && chmod +x /go/bin/kr \
+ && rm /tmp/kr.tgz
+
+# trufflehog: same story — release tarball, drop next to the Go binaries.
+ARG TRUFFLEHOG_VERSION=3.90.9
+RUN curl -fsSL "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz" \
+      -o /tmp/th.tgz \
+ && tar -xzf /tmp/th.tgz -C /go/bin trufflehog \
+ && chmod +x /go/bin/trufflehog \
+ && rm /tmp/th.tgz
+
+# ============================================================
+# Stage 2 — Rust builder for rustscan (upstream Debian package lags several
+# versions; cargo install is the canonical path).
+# ============================================================
+# rustscan's transitively-pulled deps (icu_collections 2.3, idna_adapter 1.2)
+# push MSRV up quickly. Track latest stable rather than pinning a version we
+# have to bump every release; --locked would pin us to rustscan's own
+# Cargo.lock but that's still stale vs the current registry.
+FROM rust:bookworm AS rustbuilder
+RUN cargo install rustscan
+
+# ============================================================
+# Stage 3 — Final runtime image. Ubuntu 24.04 to match install-tools.sh's
+# tested baseline (nmap 7.94, masscan 1.3.2, testssl 3.2, ruby 3.2, python 3.12).
+# ============================================================
+FROM ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# --- system packages -----------------------------------------------------
+# port/host: nmap masscan
+# tls: testssl.sh sslscan
+# smb / netbios (LAN-oriented, harmless over WAN): smbmap smbclient enum4linux nbtscan arp-scan
+# generic: curl git sudo ca-certificates iproute2 dnsutils sqlite3 jq
+# net-tools: for the ip/route detection in masscan.ts
+# ruby-full + build deps: wpscan gem needs a full ruby toolchain
+# python3 + pipx: pipx installs the pinned CLI tools in isolated venvs
+# libc6-dev: some Go binaries link libc dynamically (nmap NSE too)
+# libnet-nbname-perl: enum4linux (Perl) prerequisite
+# fonts + chromium libs: puppeteer's headless Chrome needs these
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl git sudo tzdata unzip \
+      nmap masscan testssl.sh sslscan \
+      smbmap smbclient nbtscan arp-scan \
+      dirb nikto sqlmap wafw00f whatweb wfuzz \
+      libnet-nbname-perl \
+      iproute2 dnsutils net-tools \
+      sqlite3 jq \
+      python3 python3-pip pipx \
+      ruby-full ruby-dev build-essential \
+      libcurl4-openssl-dev libxml2 libxml2-dev libxslt1-dev libgmp-dev zlib1g-dev \
+      libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
+      libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 \
+      libasound2t64 libwayland-client0 \
+      fonts-liberation \
+ && rm -rf /var/lib/apt/lists/*
+
+# --- Node.js 24 (npm + tsx runtime) --------------------------------------
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+ && apt-get update && apt-get install -y --no-install-recommends nodejs \
+ && rm -rf /var/lib/apt/lists/* \
+ && npm i -g npm@latest
+
+# --- Ruby: wpscan --------------------------------------------------------
+RUN gem install wpscan --no-document
+
+# --- Python CLIs via pipx (checkdmarc + sslyze + arjun/uro/dirsearch) ---
+# pipx installs each tool in its own venv so system Python stays clean.
+ENV PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin
+RUN pipx install checkdmarc \
+ && pipx install sslyze \
+ && pipx install arjun \
+ && pipx install uro \
+ && pipx install dirsearch \
+ && pipx install git+https://github.com/cddmp/enum4linux-ng.git || true
+
+# --- enum4linux (Perl) — Ubuntu 24.04 dropped the apt package -----------
+RUN curl -fsSL https://raw.githubusercontent.com/CiscoCXSecurity/enum4linux/master/enum4linux.pl \
+      -o /usr/local/bin/enum4linux \
+ && chmod +x /usr/local/bin/enum4linux
+
+# --- testssl.sh compatibility symlink -----------------------------------
+# Ubuntu 24.04 ships the binary as `testssl` (no .sh); the wrappers in
+# src/testssl.ts check both names but this keeps `testssl.sh` resolvable
+# from anywhere on PATH for older scripts and docs.
+RUN [ -x /usr/bin/testssl ] && ln -sf /usr/bin/testssl /usr/local/bin/testssl.sh || true
+
+# --- Go tool binaries from the builder stage ----------------------------
+# Copies every httpx/nuclei/gitleaks/trufflehog/kr binary into /usr/local/bin
+# so they resolve without needing $HOME/go/bin on PATH.
+COPY --from=gobuilder /go/bin/ /usr/local/bin/
+
+# --- rustscan from the Rust builder --------------------------------------
+COPY --from=rustbuilder /usr/local/cargo/bin/rustscan /usr/local/bin/rustscan
+
+# --- vulners.nse ---------------------------------------------------------
+# nmap.ts calls with `--script vulners`; the script queries vulners.com
+# with product+version and tags findings as CVEs. Grabbing the file up
+# front so first-scan latency doesn't include this download.
+RUN mkdir -p /usr/share/nmap/scripts \
+ && curl -fsSL -o /usr/share/nmap/scripts/vulners.nse \
+      https://raw.githubusercontent.com/vulnersCom/nmap-vulners/master/vulners.nse \
+ && nmap --script-updatedb >/dev/null 2>&1 || true
+
+# --- Nuclei templates ----------------------------------------------------
+# The nuclei-updates-templates timer would refresh these later, but seeding
+# the image saves ~500 templates worth of Nuclei API rate limit on first run.
+RUN nuclei -update-templates -silent || true
+
+# --- passwordless sudo for the scan user --------------------------------
+# nmap-udp.ts calls `sudo -n nmap -sU …`; masscan.ts calls `sudo -n masscan`.
+# Create an unprivileged user with NOPASSWD sudo — safer than running the
+# whole worker as root inside the container.
+# ubuntu:24.04 ships a default `ubuntu` user at UID 1000. Delete it so we
+# own the number and can bind-mount host files without ownership confusion.
+RUN userdel -r ubuntu 2>/dev/null || true \
+ && useradd -m -u 1000 -s /bin/bash scan \
+ && echo 'scan ALL=(ALL) NOPASSWD: /usr/bin/nmap, /usr/bin/masscan, /usr/sbin/ip' \
+      > /etc/sudoers.d/scan-tools \
+ && chmod 0440 /etc/sudoers.d/scan-tools
+
+# --- application source --------------------------------------------------
+WORKDIR /app
+COPY package.json package-lock.json ./
+# npm ci uses the lockfile → identical deps every build. python3/make/g++
+# already installed above cover better-sqlite3's native compile.
+RUN npm ci
+
+COPY tsconfig.json ./
+COPY src ./src
+COPY --chown=scan:scan . /app
+
+# --- puppeteer's Chrome download ----------------------------------------
+# The discovery/ddg-sweep pipeline uses puppeteer. Trigger the Chrome
+# install once at build time so `npx tsx src/ddg-sweep.ts` doesn't have to
+# download it on first invocation (and won't fail if the network is
+# egress-restricted at runtime).
+RUN cd /app && npx --yes puppeteer browsers install chrome || true
+
+# --- fix ownership so the scan user can write outputs -------------------
+RUN chown -R scan:scan /app
+
+USER scan
+
+# runs/, logs/, bundles/ live under WORKDIR; scan.db + recon.db bind-mount
+# in at /data (writable). Configure via env at run time.
+ENV SCAN_DB=/data/scan.db \
+    RECON_DB=/data/recon.db \
+    SCOPE_TXT=/app/scope.txt \
+    PATH=/opt/pipx/venvs/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin
+
+VOLUME ["/data", "/app/runs", "/app/logs"]
+
+# Default: run the queue-draining worker in watch mode. Override with
+# `docker run … src/worker-one-shot.ts` etc. as needed.
+CMD ["npx", "tsx", "src/worker.ts", \
+     "--sqlite", "/data/scan.db", \
+     "--scope",  "/app/scope.txt", \
+     "--watch", \
+     "--log",    "/app/logs/worker.log"]

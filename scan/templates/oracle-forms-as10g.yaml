@@ -1,0 +1,61 @@
+id: oracle-forms-as10g
+
+info:
+  name: Oracle Application Server / Forms Services Exposure (incl. legacy 10g)
+  author: gen0sec
+  severity: high
+  description: |
+    Oracle Forms Services (Oracle Application Server / Fusion Middleware) is
+    reachable at /forms/frmservlet. Legacy 10g/11g deployments are end-of-life
+    and carry multiple unauthenticated RCE CVEs (Forms/Reports). The app is a
+    servlet at a sub-path, so scanners that only probe / (which often returns a
+    generic placeholder) miss it entirely.
+  reference:
+    - https://www.oracle.com/security-alerts/
+    - https://docs.oracle.com/cd/E28280_01/web.1111/b32122/toc.htm
+  classification:
+    cwe-id: CWE-1104
+  tags: oracle,forms,oas,fusion-middleware,eol,exposure
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/forms/frmservlet"
+      - "{{BaseURL}}/forms/frmservlet?ifcmd=status"
+      - "{{BaseURL}}/forms/lservlet"
+    stop-at-first-match: true
+    matchers-condition: or
+    matchers:
+      # Forms servlet landing page / applet bootstrap
+      - type: word
+        part: body
+        condition: or
+        words:
+          - "Oracle Forms Services"
+          - "frmall.jar"
+          - "frmall_jinit.jar"
+          - "formsMessageBundle"
+          - "oracle/forms/engine/Main"
+          - "Forms Services"
+      # Forms servlet heartbeat/status response (e.g. em_result=1|000)
+      - type: regex
+        part: body
+        regex:
+          - "em_result=[0-9]+\\|[0-9]+"
+      # Oracle AS / OHS server banner
+      - type: regex
+        part: header
+        regex:
+          - "Server:\\s*Oracle[- ]?(Application[- ]?Server|HTTP[- ]?Server|AS)"
+
+    extractors:
+      - type: regex
+        part: body
+        name: forms_applet_jar
+        group: 1
+        regex:
+          - "(frmall(?:_jinit)?\\.jar)"
+      - type: kval
+        part: header
+        kval:
+          - server

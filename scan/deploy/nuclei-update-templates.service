@@ -1,0 +1,19 @@
+[Unit]
+Description=gen0sec nuclei template refresh (community + custom)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# nuclei -update-templates pulls the projectdiscovery/nuclei-templates repo
+# into ~/nuclei-templates. Safe to run while scans are in-flight: nuclei loads
+# templates at process start, so an update mid-scan has no effect on the
+# running batch. Timeout 5min — enough for a repo pull, well under any
+# meaningful scan-worker interference window.
+#
+# ExecStartPost re-applies our local FP fixes (scan/patches/*.fixed.yaml)
+# after every refresh — otherwise the daily pull would clobber the
+# snmpv3-detect false-positive fix (and any future patch we ship).
+ExecStart=/bin/bash -lc 'cd %h/gen0sec/redteam/scan && mkdir -p logs && ~/go/bin/nuclei -update-templates -silent >>logs/nuclei-update-templates.log 2>&1'
+ExecStartPost=/bin/bash -lc 'cd %h/gen0sec/redteam/scan && ./scripts/apply-template-patches.sh >>logs/nuclei-update-templates.log 2>&1'
+TimeoutStartSec=300

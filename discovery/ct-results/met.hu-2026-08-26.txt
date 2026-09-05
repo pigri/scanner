@@ -1,0 +1,9 @@
+# Certificate Transparency enumeration for met.hu
+# 2026-08-26 UTC
+# Sources: Certspotter (crt.sh globally 502 since 2026-08-26)
+# Query: ct-log '%.met.hu' --source certspotter --suffix met.hu
+# Raw: 3 hosts · kept: 3 · new: 3
+
+met.hu
+dimop.met.hu
+wp.dimetra.met.hu

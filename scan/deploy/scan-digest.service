@@ -1,0 +1,11 @@
+[Unit]
+Description=gen0sec weekly digest — "what changed since last week"
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Emits reports/digest-<date>.{md,html}. Reads findings + cves, groups by
+# severity/host/tool, ships an HTML sibling for direct-open convenience.
+# Cheap — read-only against scan.db, no external API.
+ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; cd %h/gen0sec/redteam/scan && exec npx tsx src/digest.ts --sqlite scan.db --out-dir reports'
+TimeoutStartSec=300

@@ -1,0 +1,3 @@
+autodiscover.mvm-informatika.hu
+mail.mvm-informatika.hu
+mvm-informatika.hu

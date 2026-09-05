@@ -1,0 +1,57 @@
+id: oracle-apex-ords-version
+
+info:
+  name: Oracle APEX / ORDS Exposure and Version Disclosure
+  author: gen0sec
+  severity: medium
+  description: |
+    Oracle Application Express (APEX) fronted by Oracle REST Data Services (ORDS)
+    exposes its exact build version at /i/apex_version.txt, and the app is reachable
+    at /ords/f?p=. The bare host typically answers with an empty-body 3xx session
+    redirect, so generic fingerprinting sees only the reverse proxy and misses the
+    app entirely. Exact-version disclosure enables targeted CVE selection; APEX
+    builds below 21.2 are end-of-life and unpatched.
+  reference:
+    - https://apex.oracle.com/en/learn/resources/
+    - https://www.oracle.com/security-alerts/
+  classification:
+    cwe-id: CWE-200
+  tags: oracle,apex,ords,exposure,tech,disclosure
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/i/apex_version.txt"
+    stop-at-first-match: true
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "Application Express Version"
+      - type: status
+        status:
+          - 200
+    extractors:
+      - type: regex
+        part: body
+        name: apex_version
+        group: 1
+        regex:
+          - "Application Express Version:\\s*([0-9][0-9.]+)"
+
+  # Fallback: ORDS reachable even when the version file is blocked — the /ords/
+  # redirect Location carries the APEX f?p= app signature.
+  - method: GET
+    path:
+      - "{{BaseURL}}/ords/"
+    matchers-condition: and
+    matchers:
+      - type: regex
+        part: header
+        regex:
+          - "Location:\\s*.*ords/f\\?p="
+      - type: status
+        status:
+          - 301
+          - 302

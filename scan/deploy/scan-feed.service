@@ -1,0 +1,14 @@
+[Unit]
+Description=gen0sec daily recon refresh + enqueue new hosts
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Source nvm explicitly so npx/node resolve under systemd's clean environment.
+# 1) Refresh recon (CT logs + DNS brute + enrich) -> updates recon.db + domains.txt.
+ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; cd %h/gen0sec/redteam/discovery && exec npx tsx src/refresh.ts --suffix gov.hu'
+# 2) Enqueue newly-discovered hosts. --live-only probes with httpx first and
+#    queues only hosts that answer (drops resolvable-but-dead dev/admin names);
+#    default also skips already-scanned targets. The scan worker drains the rest.
+ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; cd %h/gen0sec/redteam/scan && mkdir -p logs && exec npx tsx src/enqueue.ts --from-file ../discovery/domains.txt --live-only --sqlite scan.db --log logs/feed.log'

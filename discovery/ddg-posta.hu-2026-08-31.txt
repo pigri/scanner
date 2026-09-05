@@ -1,0 +1,12 @@
+bolt.posta.hu
+candidate.uat.posta.hu
+eshop.posta.hu
+karrier.posta.hu
+magyar.posta.hu
+net.posta.hu
+newsletter.posta.hu
+posta.hu
+postaportal.posta.hu
+secure.posta.hu
+uat.posta.hu
+webcik.posta.hu

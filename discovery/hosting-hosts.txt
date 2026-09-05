@@ -1,0 +1,16 @@
+cpanel.itoss.hosting.gov.hu
+cpanel.kim.hosting.gov.hu
+cpcalendars.itoss.hosting.gov.hu
+cpcalendars.kim.hosting.gov.hu
+cpcontacts.itoss.hosting.gov.hu
+cpcontacts.kim.hosting.gov.hu
+cpk5.hosting.gov.hu
+hosting.gov.hu
+itoss.hosting.gov.hu
+kim.hosting.gov.hu
+mail.itoss.hosting.gov.hu
+mail.kim.hosting.gov.hu
+webdisk.itoss.hosting.gov.hu
+webdisk.kim.hosting.gov.hu
+webmail.itoss.hosting.gov.hu
+webmail.kim.hosting.gov.hu

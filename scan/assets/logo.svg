@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="128" height="128" role="img" aria-label="Operation Hussar">
+ <rect x="2" y="2" width="60" height="60" rx="15" fill="#ffffff" stroke="#c9d2de" stroke-width="1.5"/>
+ <g transform="translate(32,34) scale(0.84) translate(-32,-34)">
+ <defs>
+  <linearGradient id="hb" x1="0" y1="1" x2="1" y2="0">
+   <stop offset="0" stop-color="#2f6fce"/><stop offset="1" stop-color="#79aef0"/>
+  </linearGradient>
+  <linearGradient id="hg" x1="0" y1="0" x2="0" y2="1">
+   <stop offset="0" stop-color="#e8ac3c"/><stop offset="1" stop-color="#b0791f"/>
+  </linearGradient>
+ </defs>
+ <g stroke="#1d2c46" stroke-width="0.7" stroke-linejoin="round">
+  <path d="M18,50 Q42,26 57,9 Q30,38 12,55 Z" fill="url(#hb)"/>
+  <path d="M46,50 Q22,26 7,9 Q34,38 52,55 Z" fill="url(#hb)"/>
+  <path d="M15,52.5 L9,59.5" stroke="url(#hg)" stroke-width="3.8" stroke-linecap="round"/>
+  <path d="M49,52.5 L55,59.5" stroke="url(#hg)" stroke-width="3.8" stroke-linecap="round"/>
+  <circle cx="15" cy="52.5" r="3.7" fill="url(#hg)"/>
+  <circle cx="49" cy="52.5" r="3.7" fill="url(#hg)"/>
+  <circle cx="8.8" cy="59.5" r="2.4" fill="url(#hg)"/>
+  <circle cx="55.2" cy="59.5" r="2.4" fill="url(#hg)"/>
+ </g>
+ <path d="M32,4 l1.8,3.8 4.1,.55 -3,2.85 .85,4.1 -3.75,-2 -3.75,2 .85,-4.1 -3,-2.85 4.1,-.55 Z" fill="url(#hg)" stroke="#6b4e12" stroke-width="0.5"/>
+ </g>
+</svg>

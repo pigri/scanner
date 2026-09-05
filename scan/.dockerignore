@@ -1,0 +1,33 @@
+# Build outputs & caches — do not ship these into the image.
+node_modules
+runs
+logs
+reports
+bundles
+*.db
+*.db-shm
+*.db-wal
+masscan.jsonl
+masscan-targets.txt
+patches
+_e2e
+assets
+
+# Editor / OS junk.
+.git
+.gitignore
+.vscode
+.idea
+.DS_Store
+*.swp
+
+# The read-only UI Dockerfile lives here too — it's built separately.
+Dockerfile
+
+# Docs & one-off scripts that don't belong at runtime.
+scripts
+deploy
+_lo.db-shm
+_lo.db-wal
+queue-2q.db-shm
+queue-2q.db-wal

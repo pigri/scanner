@@ -1,0 +1,38 @@
+name: redteam
+
+# A dedicated bridge network for the lab, pinned to 10.52.0.0/24 with a fixed
+# host bridge name (br-lab) so the tap knows which interface to sniff.
+networks:
+  lab:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-lab
+    ipam:
+      config:
+        - subnet: 10.52.0.0/24
+          gateway: 10.52.0.1
+
+services:
+  # Read-only dashboard over scan.db (+ recon.db). Published only on loopback;
+  # front it with an SSH tunnel for remote access (it has no auth).
+  ui:
+    build:
+      context: ./scan
+      dockerfile: Dockerfile
+    image: redteam-ui
+    restart: unless-stopped
+    networks:
+      lab:
+        ipv4_address: 10.52.0.10
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      # scan.db is a live WAL database, so its directory is mounted read-write:
+      # SQLite must maintain the -shm/-wal shared-memory index to read a DB a
+      # writer may be updating. The UI opens every connection with an app-layer
+      # guard that allows only SELECT-class statements, so DB *content* is never
+      # mutated — the rw mount only permits WAL reader coordination.
+      - /storage/gen0sec-scan:/data/scan:rw
+      # recon.db is a read-only seed; the container copies it to a writable path
+      # at start (a WAL DB needs a writable directory for its -shm index).
+      - ./discovery/recon.db:/seed/recon.db:ro

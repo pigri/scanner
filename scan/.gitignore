@@ -1,0 +1,13 @@
+node_modules/
+screenshots/
+runs/
+*.jsonl
+*.xml
+*-targets.txt
+scope.txt
+*.db
+*.db-wal
+*.db-shm
+scan.log
+.env.scan
+

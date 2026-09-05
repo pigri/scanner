@@ -1,0 +1,178 @@
+
+> discovery@0.2.0 refresh
+> tsx src/refresh.ts --seclist top-5000 --ct-sources certspotter
+
+refresh start: 1532 hosts in domains.txt
+  parents (20): gov.hu, mfa.gov.hu, eeszt.gov.hu, hosting.gov.hu, poszeidon.gov.hu ...
+
+=== stage 1: CT logs ===
+
+$ npx tsx src/ct-log.ts gov.hu --source certspotter --suffix gov.hu --merge domains.txt -o /tmp/ct-gov.hu.txt
+querying certspotter: gov.hu
+    certspotter: 146 hosts
+  146 raw union · 134 kept · 35 new
+wrote 1567 hosts (35 new) to /tmp/ct-gov.hu.txt
+merged back into domains.txt (was 1532, now 1567)
+
+$ npx tsx src/ct-log.ts mfa.gov.hu --source certspotter --suffix gov.hu --merge domains.txt -o /tmp/ct-mfa.gov.hu.txt
+querying certspotter: mfa.gov.hu
+    certspotter: 22 hosts
+  22 raw union · 22 kept · 1 new
+wrote 1568 hosts (1 new) to /tmp/ct-mfa.gov.hu.txt
+merged back into domains.txt (was 1567, now 1568)
+
+$ npx tsx src/ct-log.ts eeszt.gov.hu --source certspotter --suffix gov.hu --merge domains.txt -o /tmp/ct-eeszt.gov.hu.txt
+querying certspotter: eeszt.gov.hu
+    certspotter: 2 hosts
+  2 raw union · 2 kept · 0 new
+wrote 1568 hosts (0 new) to /tmp/ct-eeszt.gov.hu.txt
+merged back into domains.txt (was 1568, now 1568)
+
+$ npx tsx src/ct-log.ts hosting.gov.hu --source certspotter --suffix gov.hu --merge domains.txt -o /tmp/ct-hosting.gov.hu.txt
+querying certspotter: hosting.gov.hu
+    certspotter: 18 hosts
+  18 raw union · 18 kept · 0 new
+wrote 1568 hosts (0 new) to /tmp/ct-hosting.gov.hu.txt
+merged back into domains.txt (was 1568, now 1568)
+
+$ npx tsx src/ct-log.ts poszeidon.gov.hu --source certspotter --suffix gov.hu --merge domains.txt -o /tmp/ct-poszeidon.gov.hu.txt
+querying certspotter: poszeidon.gov.hu
+    certspotter: 1 hosts
+  1 raw union · 1 kept · 1 new
+wrote 1569 hosts (1 new) to /tmp/ct-poszeidon.gov.hu.txt
+merged back into domains.txt (was 1568, now 1569)
+
+$ npx tsx src/ct-log.ts video.gov.hu --source certspotter --suffix gov.hu --merge domains.txt -o /tmp/ct-video.gov.hu.txt
+querying certspotter: video.gov.hu
+    certspotter: 22 hosts
+  22 raw union · 21 kept · 8 new
+wrote 1577 hosts (8 new) to /tmp/ct-video.gov.hu.txt
+merged back into domains.txt (was 1569, now 1577)
+
+$ npx tsx src/ct-log.ts im.gov.hu --source certspotter --suffix gov.hu --merge domains.txt -o /tmp/ct-im.gov.hu.txt
+querying certspotter: im.gov.hu
+    certspotter: 9 hosts
+  9 raw union · 9 kept · 3 new
+wrote 1580 hosts (3 new) to /tmp/ct-im.gov.hu.txt
+merged back into domains.txt (was 1577, now 1580)
+
+$ npx tsx src/ct-log.ts okfo.gov.hu --source certspotter --suffix gov.hu --merge domains.txt -o /tmp/ct-okfo.gov.hu.txt
+querying certspotter: okfo.gov.hu
+    certspotter: 52 hosts
+  52 raw union · 33 kept · 2 new
+wrote 1582 hosts (2 new) to /tmp/ct-okfo.gov.hu.txt
+merged back into domains.txt (was 1580, now 1582)
+
+$ npx tsx src/ct-log.ts nav.gov.hu --source certspotter --suffix gov.hu --merge domains.txt -o /tmp/ct-nav.gov.hu.txt
+querying certspotter: nav.gov.hu
+    certspotter: 21 hosts
+  21 raw union · 21 kept · 9 new
+wrote 1591 hosts (9 new) to /tmp/ct-nav.gov.hu.txt
+merged back into domains.txt (was 1582, now 1591)
+
+$ npx tsx src/ct-log.ts neak.gov.hu --source certspotter --suffix gov.hu --merge domains.txt -o /tmp/ct-neak.gov.hu.txt
+querying certspotter: neak.gov.hu
+    certspotter: 5 hosts
+  5 raw union · 5 kept · 1 new
+wrote 1592 hosts (1 new) to /tmp/ct-neak.gov.hu.txt
+merged back into domains.txt (was 1591, now 1592)
+
+$ npx tsx src/ct-log.ts klik.gov.hu --source certspotter --suffix gov.hu --merge domains.txt -o /tmp/ct-klik.gov.hu.txt
+querying certspotter: klik.gov.hu
+    certspotter: certspotter returned HTTP 429
+  0 raw union · 0 kept · 0 new
+wrote 1592 hosts (0 new) to /tmp/ct-klik.gov.hu.txt
+merged back into domains.txt (was 1592, now 1592)
+
+$ npx tsx src/ct-log.ts allamkincstar.gov.hu --source certspotter --suffix gov.hu --merge domains.txt -o /tmp/ct-allamkincstar.gov.hu.txt
+querying certspotter: allamkincstar.gov.hu
+    certspotter: certspotter returned HTTP 429
+  0 raw union · 0 kept · 0 new
+wrote 1592 hosts (0 new) to /tmp/ct-allamkincstar.gov.hu.txt
+merged back into domains.txt (was 1592, now 1592)
+
+$ npx tsx src/ct-log.ts palyazat.gov.hu --source certspotter --suffix gov.hu --merge domains.txt -o /tmp/ct-palyazat.gov.hu.txt
+querying certspotter: palyazat.gov.hu
+    certspotter: certspotter returned HTTP 429
+  0 raw union · 0 kept · 0 new
+wrote 1592 hosts (0 new) to /tmp/ct-palyazat.gov.hu.txt
+merged back into domains.txt (was 1592, now 1592)
+
+$ npx tsx src/ct-log.ts kormany.gov.hu --source certspotter --suffix gov.hu --merge domains.txt -o /tmp/ct-kormany.gov.hu.txt
+querying certspotter: kormany.gov.hu
+    certspotter: certspotter returned HTTP 429
+  0 raw union · 0 kept · 0 new
+wrote 1592 hosts (0 new) to /tmp/ct-kormany.gov.hu.txt
+merged back into domains.txt (was 1592, now 1592)
+
+$ npx tsx src/ct-log.ts kifu.gov.hu --source certspotter --suffix gov.hu --merge domains.txt -o /tmp/ct-kifu.gov.hu.txt
+querying certspotter: kifu.gov.hu
+    certspotter: certspotter returned HTTP 429
+  0 raw union · 0 kept · 0 new
+wrote 1592 hosts (0 new) to /tmp/ct-kifu.gov.hu.txt
+merged back into domains.txt (was 1592, now 1592)
+
+$ npx tsx src/ct-log.ts nkfih.gov.hu --source certspotter --suffix gov.hu --merge domains.txt -o /tmp/ct-nkfih.gov.hu.txt
+querying certspotter: nkfih.gov.hu
+    certspotter: certspotter returned HTTP 429
+  0 raw union · 0 kept · 0 new
+wrote 1592 hosts (0 new) to /tmp/ct-nkfih.gov.hu.txt
+merged back into domains.txt (was 1592, now 1592)
+
+$ npx tsx src/ct-log.ts kh.gov.hu --source certspotter --suffix gov.hu --merge domains.txt -o /tmp/ct-kh.gov.hu.txt
+querying certspotter: kh.gov.hu
+    certspotter: certspotter returned HTTP 429
+  0 raw union · 0 kept · 0 new
+wrote 1592 hosts (0 new) to /tmp/ct-kh.gov.hu.txt
+merged back into domains.txt (was 1592, now 1592)
+
+$ npx tsx src/ct-log.ts ih.gov.hu --source certspotter --suffix gov.hu --merge domains.txt -o /tmp/ct-ih.gov.hu.txt
+querying certspotter: ih.gov.hu
+    certspotter: certspotter returned HTTP 429
+  0 raw union · 0 kept · 0 new
+wrote 1592 hosts (0 new) to /tmp/ct-ih.gov.hu.txt
+merged back into domains.txt (was 1592, now 1592)
+
+$ npx tsx src/ct-log.ts telemedicina.gov.hu --source certspotter --suffix gov.hu --merge domains.txt -o /tmp/ct-telemedicina.gov.hu.txt
+querying certspotter: telemedicina.gov.hu
+    certspotter: certspotter returned HTTP 429
+  0 raw union · 0 kept · 0 new
+wrote 1592 hosts (0 new) to /tmp/ct-telemedicina.gov.hu.txt
+merged back into domains.txt (was 1592, now 1592)
+
+$ npx tsx src/ct-log.ts oktatasihivatal.gov.hu --source certspotter --suffix gov.hu --merge domains.txt -o /tmp/ct-oktatasihivatal.gov.hu.txt
+querying certspotter: oktatasihivatal.gov.hu
+    certspotter: certspotter returned HTTP 429
+  0 raw union · 0 kept · 0 new
+wrote 1592 hosts (0 new) to /tmp/ct-oktatasihivatal.gov.hu.txt
+merged back into domains.txt (was 1592, now 1592)
+
+=== stage 2: DNS brute ===
+
+$ npx tsx src/dns-brute.ts --parents parents.txt --seclist top-5000 --merge domains.txt -o brute-hosts.txt
+fetching SecLists top-5000 from https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/DNS/subdomains-top1million-5000.txt...
+saved /home/pigri/gen0sec/redteam/discovery/wordlists/top-5000.txt (30075 bytes)
+20 parents · 5000 words = 100000 queries
+resolver 1.1.1.1, concurrency 100
+detecting wildcards...
+5000/100000 · 71 hits · 240 q/s10000/100000 · 109 hits · 242 q/s15000/100000 · 125 hits · 234 q/s20000/100000 · 151 hits · 234 q/s25000/100000 · 156 hits · 235 q/s30000/100000 · 171 hits · 236 q/s35000/100000 · 193 hits · 228 q/s40000/100000 · 228 hits · 230 q/s45000/100000 · 273 hits · 233 q/s50000/100000 · 292 hits · 230 q/s55000/100000 · 302 hits · 231 q/s60000/100000 · 322 hits · 232 q/s65000/100000 · 335 hits · 233 q/s70000/100000 · 337 hits · 233 q/s75000/100000 · 339 hits · 234 q/s80000/100000 · 351 hits · 234 q/s85000/100000 · 373 hits · 235 q/s90000/100000 · 380 hits · 235 q/s95000/100000 · 385 hits · 235 q/s100000/100000 · 387 hits · 235 q/s
+
+done in 425s
+  100000 queries · 387 unique hits
+  hosts: /home/pigri/gen0sec/redteam/discovery/brute-hosts.txt
+  merged into /home/pigri/gen0sec/redteam/discovery/domains.txt: was 1592, now 1876 (+284)
+
+=== stage 3: enrich + phantom filter ===
+
+$ npx tsx src/enrich.ts domains.txt --concurrency 40
+enriching 1862 domains (concurrency 40)...
+25/1862 · resolved 16 · 16 IPs · 186.6 d/s50/1862 · resolved 40 · 43 IPs · 190.8 d/s75/1862 · resolved 65 · 69 IPs · 16.6 d/s100/1862 · resolved 90 · 94 IPs · 21.3 d/s125/1862 · resolved 115 · 119 IPs · 25.6 d/s150/1862 · resolved 140 · 144 IPs · 28.7 d/s175/1862 · resolved 165 · 169 IPs · 31.5 d/s200/1862 · resolved 190 · 194 IPs · 33.1 d/s225/1862 · resolved 215 · 219 IPs · 28.3 d/s250/1862 · resolved 238 · 242 IPs · 30.6 d/s275/1862 · resolved 262 · 266 IPs · 32.5 d/s300/1862 · resolved 284 · 288 IPs · 30.6 d/s325/1862 · resolved 309 · 313 IPs · 32.6 d/s350/1862 · resolved 332 · 337 IPs · 34.5 d/s375/1862 · resolved 357 · 362 IPs · 36.4 d/s400/1862 · resolved 382 · 388 IPs · 38.1 d/s425/1862 · resolved 407 · 413 IPs · 37.9 d/s450/1862 · resolved 431 · 437 IPs · 37.3 d/s475/1862 · resolved 456 · 462 IPs · 38.0 d/s500/1862 · resolved 481 · 488 IPs · 39.3 d/s525/1862 · resolved 506 · 514 IPs · 40.4 d/s550/1862 · resolved 531 · 543 IPs · 40.9 d/s575/1862 · resolved 556 · 568 IPs · 41.4 d/s600/1862 · resolved 581 · 593 IPs · 41.6 d/s625/1862 · resolved 603 · 616 IPs · 41.2 d/s650/1862 · resolved 622 · 642 IPs · 41.5 d/s675/1862 · resolved 643 · 664 IPs · 42.6 d/s700/1862 · resolved 667 · 688 IPs · 43.3 d/s725/1862 · resolved 692 · 718 IPs · 43.1 d/s750/1862 · resolved 717 · 747 IPs · 40.6 d/s775/1862 · resolved 742 · 772 IPs · 39.4 d/s800/1862 · resolved 767 · 798 IPs · 39.9 d/s825/1862 · resolved 792 · 823 IPs · 38.8 d/s850/1862 · resolved 817 · 848 IPs · 39.7 d/s875/1862 · resolved 842 · 873 IPs · 40.6 d/s900/1862 · resolved 867 · 898 IPs · 41.2 d/s925/1862 · resolved 892 · 923 IPs · 40.8 d/s950/1862 · resolved 917 · 949 IPs · 41.0 d/s975/1862 · resolved 942 · 974 IPs · 41.6 d/s1000/1862 · resolved 967 · 999 IPs · 41.9 d/s1025/1862 · resolved 990 · 1024 IPs · 41.9 d/s1050/1862 · resolved 1013 · 1048 IPs · 42.2 d/s1075/1862 · resolved 1038 · 1073 IPs · 42.6 d/s1100/1862 · resolved 1063 · 1098 IPs · 42.7 d/s1125/1862 · resolved 1087 · 1125 IPs · 43.0 d/s1150/1862 · resolved 1111 · 1149 IPs · 43.5 d/s1175/1862 · resolved 1136 · 1174 IPs · 44.1 d/s1200/1862 · resolved 1161 · 1202 IPs · 44.5 d/s1225/1862 · resolved 1186 · 1229 IPs · 44.2 d/s1250/1862 · resolved 1211 · 1257 IPs · 44.2 d/s1275/1862 · resolved 1235 · 1284 IPs · 44.5 d/s1300/1862 · resolved 1258 · 1307 IPs · 44.5 d/s1325/1862 · resolved 1283 · 1332 IPs · 44.6 d/s1350/1862 · resolved 1308 · 1357 IPs · 45.1 d/s1375/1862 · resolved 1331 · 1382 IPs · 45.5 d/s1400/1862 · resolved 1355 · 1406 IPs · 45.7 d/s1425/1862 · resolved 1380 · 1431 IPs · 45.9 d/s1450/1862 · resolved 1405 · 1456 IPs · 45.8 d/s1475/1862 · resolved 1430 · 1484 IPs · 44.3 d/s1500/1862 · resolved 1454 · 1508 IPs · 44.8 d/s1525/1862 · resolved 1478 · 1532 IPs · 44.9 d/s1550/1862 · resolved 1503 · 1558 IPs · 43.5 d/s1575/1862 · resolved 1528 · 1583 IPs · 42.8 d/s1600/1862 · resolved 1553 · 1608 IPs · 42.9 d/s1625/1862 · resolved 1576 · 1631 IPs · 42.7 d/s1650/1862 · resolved 1601 · 1656 IPs · 41.5 d/s1675/1862 · resolved 1626 · 1682 IPs · 41.5 d/s1700/1862 · resolved 1651 · 1709 IPs · 40.8 d/s1725/1862 · resolved 1675 · 1733 IPs · 41.1 d/s1750/1862 · resolved 1700 · 1759 IPs · 41.6 d/s1775/1862 · resolved 1724 · 1783 IPs · 42.0 d/s1800/1862 · resolved 1749 · 1809 IPs · 42.2 d/s1825/1862 · resolved 1772 · 1832 IPs · 42.4 d/s1850/1862 · resolved 1797 · 1857 IPs · 40.1 d/s1862/1862 · resolved 1809 · 1869 IPs · 38.8 d/s
+
+done in 47.9s
+  1862 domains -> 1809 resolved, 53 failed
+  1869 total IPs
+  jsonl: /home/pigri/gen0sec/redteam/discovery/enriched.jsonl
+  csv:   /home/pigri/gen0sec/redteam/discovery/enriched.csv
+filtered: 1809 resolvable, 53 phantoms
+
+done. 1532 -> 1809 (+277)

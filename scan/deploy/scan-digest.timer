@@ -1,0 +1,13 @@
+[Unit]
+Description=Weekly gen0sec digest (Sundays post-rescan)
+
+[Timer]
+# Fire ~08:00 Sunday — 4 hours after scan-rescan.timer at 04:00, enough for
+# the batch to complete on a typical estate. Persistent=true reruns if the
+# box was off Sunday morning.
+OnCalendar=Sun *-*-* 08:00:00
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

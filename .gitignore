@@ -1,0 +1,67 @@
+# Node / build
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# Live SQLite (WAL) — DB lives on shared storage; the checked-in .sql schema
+# is the source of truth.
+*.db
+*.db-wal
+*.db-shm
+*.db.bak
+*.bak
+
+# Per-run outputs and long-lived data — these live on shared storage and can
+# reach hundreds of GB.
+runs/
+reports/
+logs/
+screenshots/
+backups/
+captures/
+
+# Symlinks that point at the shared-storage roots above.
+scan/logs
+scan/reports
+scan/runs
+scan/scan.db
+
+# Third-party binaries and large data blobs.
+*.deb
+*.mmdb
+*.pcap
+*.pcapng
+
+# Ephemeral tool outputs
+*.jsonl
+*.xml
+*-targets.txt
+scan-batch-*.txt
+sweep.log
+sweep.stdout
+scan.log
+enriched.jsonl
+enriched.csv
+
+# Local scope / discovery outputs (rebuilt per run)
+scope.txt
+domains.txt
+phantoms.txt
+filtered-hosts.txt
+top100*.txt
+all-domains.txt*
+wp-targets.txt
+masscan*.txt
+masscan*.jsonl
+nmap-udp*
+rustscan-targets.txt
+
+# Secrets — token-bearing env files
+.env
+.env.*
+!.env.*.example
+
+# Editor / OS
+.DS_Store
+*.swp

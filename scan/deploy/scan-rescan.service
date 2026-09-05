@@ -1,0 +1,11 @@
+[Unit]
+Description=gen0sec weekly full re-scan (re-queue all known hosts)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Re-queue every known host (--requeue resets already-scanned rows to pending),
+# so the scan worker re-checks them — catches new nuclei templates / changed
+# services / new findings on hosts discovered earlier.
+ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; cd %h/gen0sec/redteam/scan && mkdir -p logs && exec npx tsx src/enqueue.ts --from-file ../discovery/domains.txt --requeue --live-only --sqlite scan.db --log logs/rescan.log'

@@ -1,0 +1,21 @@
+
+> scan@0.1.0 scan-all
+> tsx src/scan-all.ts --targets top100.txt --scope scope.txt --sqlite scan.db
+
+
+>>> STAGE 2 (parallel): testssl, gowitness
+
+>>> START testssl
+
+>>> START gowitness
+<<< DONE  gowitness in 0.6s (exit 0)
+[gowitness] gowitness scan file -f /home/pigri/gen0sec/redteam/scan/runs/9/gowitness-targets.txt -t 20 -s /home/pigri/gen0sec/redteam/scan/runs/9/screenshots --write-jsonl --write-jsonl-file /home/pigri/gen0sec/redteam/scan/runs/9/gowitness.jsonl
+[gowitness] gowitness exited 1, screenshots in /home/pigri/gen0sec/redteam/scan/runs/9/screenshots
+[gowitness]   sqlite: /home/pigri/gen0sec/redteam/scan/scan.db (+0 screenshots indexed, run #9)
+<<< DONE  testssl in 50.7s (exit 1)
+[testssl] testssl: 100 hosts, concurrency=4, timeout=180000ms
+[testssl] FATAL: Bad escaped character in JSON at position 22446 (line 468 column 50)
+
+=== wpscan === skipped (no WordPress hosts detected in httpx)
+
+scan-all pipeline finished in 50.7s

@@ -1,0 +1,51 @@
+
+> scan@0.1.0 scan-all
+> tsx src/scan-all.ts --targets top100-next.txt --scope scope.txt --sqlite scan.db
+
+
+>>> START httpx
+<<< DONE  httpx in 43.0s (exit 0)
+[httpx] httpx -l /home/pigri/gen0sec/redteam/scan/runs/15/httpx-targets.txt -json -o /home/pigri/gen0sec/redteam/scan/runs/15/httpx.jsonl -sc -title -td -web-server -tech-detect -follow-redirects -threads 50
+[httpx] httpx exited 0, output: /home/pigri/gen0sec/redteam/scan/runs/15/httpx.jsonl
+[httpx]   sqlite: /home/pigri/gen0sec/redteam/scan/scan.db (+6 probes, run #15)
+
+>>> STAGE 2 (parallel): nmap, nuclei, takeover, testssl, gowitness
+
+>>> START nmap
+
+>>> START nuclei
+
+>>> START takeover
+
+>>> START testssl
+
+>>> START gowitness
+<<< DONE  takeover in 111.9s (exit 0)
+[takeover] nuclei -l /home/pigri/gen0sec/redteam/scan/runs/18/takeover-targets.txt -jsonl -o /home/pigri/gen0sec/redteam/scan/runs/18/takeover.jsonl -tags takeover -rate-limit 100
+[takeover] takeover exited 0, output: /home/pigri/gen0sec/redteam/scan/runs/18/takeover.jsonl
+[takeover]   sqlite: /home/pigri/gen0sec/redteam/scan/scan.db (+0 findings, run #18)
+<<< DONE  testssl in 294.4s (exit 0)
+[testssl] --live-only filter: 100 → 6 targets
+[testssl] testssl: 6 hosts, concurrency=6, timeout=180000ms
+[testssl]   5/6 · 0.03 hosts/s  6/6 · 0.02 hosts/s
+[testssl] testssl done in 294.0s: 6/6. Output: /home/pigri/gen0sec/redteam/scan/runs/16/testssl.jsonl
+[testssl]   sqlite: /home/pigri/gen0sec/redteam/scan/scan.db (+4 findings, run #16)
+<<< DONE  nmap in 384.2s (exit 0)
+[nmap] nmap -Pn -sV -T3 --top-ports 1000 -iL /home/pigri/gen0sec/redteam/scan/runs/20/nmap-targets.txt -oX /home/pigri/gen0sec/redteam/scan/runs/20/nmap.xml
+[nmap] 100 up hosts, 2 open ports
+[nmap]   raw xml: /home/pigri/gen0sec/redteam/scan/runs/20/nmap.xml
+[nmap]   jsonl:   /home/pigri/gen0sec/redteam/scan/runs/20/nmap.jsonl
+[nmap]   sqlite: /home/pigri/gen0sec/redteam/scan/scan.db (+2 ports, run #20)
+<<< DONE  gowitness in 892.4s (exit 0)
+[gowitness]   chrome: /home/pigri/.cache/puppeteer/chrome/linux-152.0.7977.42/chrome-linux64/chrome
+[gowitness] gowitness scan file -f /home/pigri/gen0sec/redteam/scan/runs/17/gowitness-targets.txt -t 20 -s /home/pigri/gen0sec/redteam/scan/runs/17/screenshots --chrome-path /home/pigri/.cache/puppeteer/chrome/linux-152.0.7977.42/chrome-linux64/chrome --write-jsonl --write-jsonl-file /home/pigri/gen0sec/redteam/scan/runs/17/gowitness.jsonl
+[gowitness] gowitness exited 0, screenshots in /home/pigri/gen0sec/redteam/scan/runs/17/screenshots
+[gowitness]   sqlite: /home/pigri/gen0sec/redteam/scan/scan.db (+3 screenshots indexed, run #17)
+<<< DONE  nuclei in 4412.5s (exit 0)
+[nuclei] nuclei -l /home/pigri/gen0sec/redteam/scan/runs/19/nuclei-targets.txt -jsonl -o /home/pigri/gen0sec/redteam/scan/runs/19/nuclei.jsonl -severity info,low,medium,high,critical -rate-limit 150 -stats
+[nuclei] nuclei exited 0, output: /home/pigri/gen0sec/redteam/scan/runs/19/nuclei.jsonl
+[nuclei]   sqlite: /home/pigri/gen0sec/redteam/scan/scan.db (+43 findings, run #19)
+
+=== wpscan === skipped (no WordPress hosts detected in httpx)
+
+scan-all pipeline finished in 4455.6s

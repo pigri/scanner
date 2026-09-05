@@ -1,0 +1,41 @@
+{
+  "name": "discovery",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sweep": "tsx src/ddg-sweep.ts",
+    "enrich": "tsx src/enrich.ts",
+    "visualize": "tsx src/visualize.ts",
+    "asn-prefixes": "tsx src/asn-prefixes.ts",
+    "ripe-search": "tsx src/ripe-search.ts",
+    "ct-mirror": "tsx src/ct-mirror.ts",
+    "ct-log": "tsx src/ct-log.ts",
+    "ptr-sweep": "tsx src/ptr-sweep.ts",
+    "dns-brute": "tsx src/dns-brute.ts",
+    "wildcard-check": "tsx src/wildcard-check.ts",
+    "refresh": "tsx src/refresh.ts",
+    "db-init": "tsx src/db-init.ts",
+    "query": "tsx src/query.ts",
+    "subfinder": "tsx src/subfinder.ts",
+    "amass": "tsx src/amass.ts",
+    "fierce": "tsx src/fierce.ts",
+    "dnsenum": "tsx src/dnsenum.ts",
+    "theharvester": "tsx src/theharvester.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "maxmind": "^5.0.7",
+    "puppeteer": "^24.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^26.2.0",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  }
+}

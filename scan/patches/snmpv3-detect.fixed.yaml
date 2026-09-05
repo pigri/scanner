@@ -1,0 +1,105 @@
+id: snmpv3-detect
+
+info:
+  name: SNMPv3 Fingerprint - Detect
+  author: matejsmycka
+  severity: info
+  description: |
+    SNMPv3 can leak information about the device even without proper authentication.Use `nmap -sU <ADDRESS> -p 161 --script snmp-info` to get more information.Engine IDs can help to determine one device with multiple interfaces.
+  reference:
+    - https://support.huawei.com/enterprise/en/doc/EDOC1100174721/46bd64e2/snmpv3
+    - https://pure.tudelft.nl/ws/portalfiles/portal/103172599/3487552.3487848.pdf
+    - https://svn.nmap.org/nmap/nselib/data/enterprise_numbers.txt
+    - http://docs.logmatrix.com/nervecenter/guides/NC-SNMPv3-EngineIDs.pdf
+  metadata:
+    verified: true
+    max-request: 1
+    shodan-query: product:"SNMP"
+  tags: js,udp,network,snmp
+
+javascript:
+  - pre-condition: |
+      isUDPPortOpen(Host, Port);
+
+    code: |
+      const c = require("nuclei/net");
+      const b = require('nuclei/bytes');
+
+      const conn = c.Open('udp', `${Host}:${Port}`, `${Timeout}`);
+      // SNMPv3: F=r U="" E= C="" GetRequest(12)
+      let payload = "303a020103300f02024a69020300ffe30401040201030410300e0400020100020100040004000400301204000400a00c020237f00201000201003000";
+      conn.SendHex(payload);
+      let resp = conn.RecvFull(128);
+      const hexBuffer = new b.Buffer();
+      hexBuffer.Write(resp);
+      const respHex = hexBuffer.Hex()
+
+
+      const known_vendors = {
+        "80000009": "Cisco",
+        "80003a8c": "MikroTik",
+        "800007db": "Huawei",
+        "8000040e": "SageCom SAS",
+        "80001f88": "net-snmp",
+        "80000B2f": "Thomson Inc",
+        "8000113d": "Broadcom Corporation",
+        "8000124c": "Ambit Microsystems Corporation",
+        "800011ae": "Netgear",
+        "800063a2": "H3C",
+        "8000130a": "Juniper Networks, Inc.",
+        "80003044": "Fortinet Inc",
+      }
+      function getVendor(msgHex) {
+        // gen0sec local fix: silent-UDP false-positive filter.
+        // Reject anything that is not a plausible SNMPv3 response. A real
+        // reply is an ASN.1 SEQUENCE starting with 30, contains version=3
+        // (020103), and carries a non-empty engine ID beginning with 8000.
+        // Without these checks the template fires on every host that either
+        // never responded (msgHex="") or responded with a scrubbed WAF echo
+        // that lacks a valid engine identifier — the "Enterprise: unknown"
+        // pathology across 18 gov.hu hosts in our estate.
+        msgHex = (typeof msgHex === "string") ? msgHex : (msgHex ? String(msgHex) : "");
+        if (!msgHex) return "";                             // empty response  → no detection
+        if (msgHex.length < 60) return "";                  // too short to be a valid SNMPv3 msg
+        if (!msgHex.toLowerCase().startsWith("30")) return "";      // not an ASN.1 SEQUENCE
+        if (msgHex.toLowerCase().indexOf("020103") === -1) return "";  // no SNMP version=3 marker
+
+        for (const [key, value] of Object.entries(known_vendors)) {
+          if (msgHex.toLowerCase().includes(key.toLowerCase())) {
+            const m = msgHex.match(/8000([0-9a-fA-F]*?)0201/i);
+            const engineId = m && m[1] ? m[1] : null;
+            return value + (engineId ? (", Engine ID: " + engineId) : "");
+          }
+        }
+        // Unknown vendor but structurally-valid SNMPv3 response — extract
+        // the engine ID prefix and require at least 4 hex chars of vendor
+        // enterprise number after the 8000 marker before reporting.
+        const m = msgHex.match(/8000([0-9a-fA-F]{4,}?)0201/);
+        if (!m) return "";
+        return "Enterprise: 8000" + m[1];
+      }
+      getVendor(respHex);
+
+    args:
+      Host: "{{Host}}"
+      Port: 161
+      Timeout: 2
+
+    matchers:
+      - type: dsl
+        dsl:
+          # gen0sec local fix: require the JS function to have returned a
+          # non-empty result. Original template was "success == true" which
+          # only checks the JS ran without throwing — every timeout on a
+          # firewalled UDP 161 port satisfied that, producing 100% FP rate
+          # on our estate. Empty-string return now signals "no valid SNMPv3".
+          - "success == true && len(response) > 0"
+
+    extractors:
+      - type: regex
+        group: 1
+        regex:
+          - "(.*)"
+# digest removed by gen0sec local FP fix (was: 4b0a0048304602210094aea547…)
+# See scan/patches/snmpv3-detect.patch for the reproducible modification.
+# digest: 4b0a00483046022100dc8b78f6f29636cf5213d1cd787a1f241ea5cdf9c32308b9ecf1df349ab104730221008dac2c86e0381cb59cb59d440b0bdac6b7202ac43719e39fe604f72f38b7d2d9:825b96b84d94b649d186668af002ae89

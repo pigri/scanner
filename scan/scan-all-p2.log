@@ -1,0 +1,24 @@
+
+> scan@0.1.0 scan-all
+> tsx src/scan-all.ts --targets top100.txt --scope scope.txt --sqlite scan.db
+
+
+>>> STAGE 2 (parallel): testssl, gowitness
+
+>>> START testssl
+
+>>> START gowitness
+<<< DONE  gowitness in 0.6s (exit 0)
+[gowitness] gowitness scan file -f /home/pigri/gen0sec/redteam/scan/runs/11/gowitness-targets.txt -t 20 -s /home/pigri/gen0sec/redteam/scan/runs/11/screenshots --write-jsonl --write-jsonl-file /home/pigri/gen0sec/redteam/scan/runs/11/gowitness.jsonl
+[gowitness] gowitness exited 1, screenshots in /home/pigri/gen0sec/redteam/scan/runs/11/screenshots
+[gowitness]   sqlite: /home/pigri/gen0sec/redteam/scan/scan.db (+0 screenshots indexed, run #11)
+<<< DONE  testssl in 500.9s (exit 0)
+[testssl] --live-only filter: 100 → 27 targets
+[testssl] testssl: 27 hosts, concurrency=6, timeout=180000ms
+[testssl]   5/27 · 0.04 hosts/s  10/27 · 0.05 hosts/s  15/27 · 0.05 hosts/s  20/27 · 0.05 hosts/s  25/27 · 0.05 hosts/s  27/27 · 0.05 hosts/s
+[testssl] testssl done in 500.4s: 27/27. Output: /home/pigri/gen0sec/redteam/scan/runs/12/testssl.jsonl
+[testssl]   sqlite: /home/pigri/gen0sec/redteam/scan/scan.db (+195 findings, run #12)
+
+=== wpscan === skipped (no WordPress hosts detected in httpx)
+
+scan-all pipeline finished in 500.9s

@@ -1,0 +1,22 @@
+[Unit]
+Description=gen0sec CT-mirror update (scrape-ct-log -> enqueue new scope-matched hosts)
+After=network-online.target
+Wants=network-online.target
+# scanvpn-netns.service is a system unit; user systemd can't Requires= it.
+# The ExecStartPre below polls for the namespace and fails closed if it's
+# absent, matching the pattern in scan-worker.service.
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/pigri/gen0sec/redteam/discovery
+# Runs inside the scanvpn network namespace so CT-log pulls exit via the same
+# tunnel the scan worker uses — keeps outbound recon on a consistent egress IP.
+# Wait up to 60s for the ns to appear (same guard the scan worker uses).
+ExecStartPre=/usr/bin/sudo /usr/bin/bash -c 'for i in $(seq 30); do /usr/sbin/ip netns pids scanvpn >/dev/null 2>&1 && exit 0; sleep 2; done; echo "scanvpn netns absent after 60s — refusing to start" >&2; exit 1'
+# nvm must be sourced explicitly under systemd's clean environment.
+# scrape-ct-log resolves via ~/.local/bin (added to PATH inside the shell).
+ExecStart=/usr/bin/sudo /usr/sbin/ip netns exec scanvpn /usr/sbin/runuser -u pigri -- \
+  /usr/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; export PATH="$HOME/.local/bin:$PATH"; mkdir -p logs && exec npx tsx src/ct-mirror.ts update >> logs/ct-mirror.log 2>&1'
+
+[Install]
+WantedBy=default.target

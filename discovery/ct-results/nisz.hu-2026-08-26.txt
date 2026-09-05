@@ -1,0 +1,37 @@
+# Certificate Transparency enumeration for nisz.hu
+# 2026-08-26 UTC
+# Sources: Certspotter (crt.sh globally 502 since 2026-08-26)
+# Query: ct-log '%.nisz.hu' --source certspotter --suffix nisz.hu
+# Raw union: 37 hosts · kept (nisz.hu suffix): 24 · new: 21
+
+nisz.hu
+
+# apex + core
+acmeteszt.nisz.hu
+cloud.nisz.hu
+efo.nisz.hu
+felho.nisz.hu
+hr.nisz.hu
+karrier.nisz.hu
+karrier2.nisz.hu
+k8s.nisz.hu
+centrex.nisz.hu
+
+# MDM
+mdm01.nisz.hu
+mdm02.nisz.hu
+
+# szeusz.nisz.hu (cPanel / mail cluster)
+szeusz.nisz.hu
+cpanel.szeusz.nisz.hu
+cpcalendars.szeusz.nisz.hu
+cpcontacts.szeusz.nisz.hu
+mail.szeusz.nisz.hu
+webmail.szeusz.nisz.hu
+
+# odipvgxa.nisz.hu (matrix/dimension cluster)
+dimension.odipvgxa.nisz.hu
+matrix.odipvgxa.nisz.hu
+
+# test
+teszt-cpkk.nisz.hu

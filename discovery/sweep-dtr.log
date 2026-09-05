@@ -1,0 +1,3 @@
+2026-08-18T18:58:58.224Z START — seeded 0 domains from /home/pigri/gen0sec/redteam/discovery/dtr-domains.txt
+2026-08-18T18:58:58.225Z plan: 15 queries x 4 regions = 60 combos, 10 pages each
+2026-08-18T18:58:58.386Z egress IP: 116.202.114.219

@@ -1,0 +1,7 @@
+fogalmazo.ugyeszseg.hu
+kozmapalyazat.ugyeszseg.hu
+sso-teszt.ugyeszseg.hu
+udules-teszt.ugyeszseg.hu
+udules.ugyeszseg.hu
+ugyeszseg.hu
+visszaigazolas.ugyeszseg.hu

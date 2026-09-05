@@ -1,0 +1,33 @@
+[Unit]
+Description=gen0sec scan queue worker (drains scan_queue -> scan-all)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pigri/gen0sec/redteam/scan
+# VPN egress: every scan (nmap/httpx/nuclei) must exit through the Windscribe
+# tunnel, never the host IP. The tunnel lives in the 'scanvpn' network namespace
+# (iface wgscan), so we run the whole worker tree inside it. This is a --user
+# unit, which has no CAP_SYS_ADMIN, so NetworkNamespacePath= is unavailable;
+# instead we sudo (NOPASSWD) into the ns and immediately drop back to pigri.
+# Guard: refuse to start if the namespace is absent (fail-closed — a missing ns
+# would otherwise be the one way scans could leak the host IP). Note even a DOWN
+# tunnel cannot leak: inside scanvpn the only default route is via wgscan, so a
+# dead handshake just fails the scan rather than falling back to the host.
+# Wait (up to 60s) for scanvpn-netns.service to bring the namespace up — with
+# Linger=yes this user unit can start before the system netns unit at boot. Fails
+# closed if the namespace never appears, so scans can't leak the host IP.
+ExecStartPre=/usr/bin/sudo /usr/bin/bash -c 'for i in $(seq 30); do /usr/sbin/ip netns pids scanvpn >/dev/null 2>&1 && exit 0; sleep 2; done; echo "scanvpn netns absent after 60s — refusing to start" >&2; exit 1'
+# Source nvm explicitly so npx/node resolve under systemd's clean environment
+# (nvm lives in ~/.bashrc, which a login shell does not source). The worker puts
+# Go tools ($HOME/go/bin) on its scan-all child PATH itself.
+ExecStart=/usr/bin/sudo /usr/sbin/ip netns exec scanvpn /usr/sbin/runuser -u pigri -- /usr/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; ENVFILE="$PWD/.env.scan"; [ -r "$ENVFILE" ] && set -a && . "$ENVFILE" && set +a; exec npx tsx src/worker.ts --sqlite scan.db --scope scope.txt --watch --log logs/worker.service.log'
+Restart=on-failure
+RestartSec=10
+# Let an in-flight batch finish on stop before SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target

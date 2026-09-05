@@ -1,0 +1,9 @@
+eing-dem.foldhivatal.hu
+eing-lab.foldhivatal.hu
+eing-mgmt.foldhivatal.hu
+eing-migr.foldhivatal.hu
+eing-okt.foldhivatal.hu
+eing-test.foldhivatal.hu
+eing-uat.foldhivatal.hu
+eing.foldhivatal.hu
+foldhivatal.hu

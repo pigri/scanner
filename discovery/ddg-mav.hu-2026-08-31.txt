@@ -1,0 +1,4 @@
+intranet.mav.hu
+iur.mav.hu
+jegy.mav.hu
+vonatinfo.mav.hu

@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily nuclei template refresh
+
+[Timer]
+# Fire ~30 min before scan-feed.timer so any daily discovery-driven scans pick
+# up the day's new templates. Persistent=true reruns a missed job after downtime.
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target
