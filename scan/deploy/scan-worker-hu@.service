@@ -1,0 +1,23 @@
+[Unit]
+Description=gen0sec scan queue worker HU %i (drains scan_queue -> scan-all via scanvpn-hu)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pigri/gen0sec/redteam/scan
+# HU-egress worker fleet. Uses the 'scanvpn-hu' netns (Windscribe-HU) so
+# HU-geo-blocked targets (nebih.gov.hu et al.) actually respond. Only claims
+# rows whose target ends in .gov.hu or .hu — everything else is left to the
+# foreign-egress fleet (scan-worker@). The two fleets partition scan_queue by
+# suffix so no row is double-claimed or unclaimed.
+# See scan-worker.service for the netns / sudo / fail-closed rationale — same
+# pattern here, just against scanvpn-hu.
+ExecStartPre=/usr/bin/sudo /usr/bin/bash -c 'for i in $(seq 30); do /usr/sbin/ip netns pids scanvpn-hu >/dev/null 2>&1 && exit 0; sleep 2; done; echo "scanvpn-hu netns absent after 60s — refusing to start" >&2; exit 1'
+ExecStart=/usr/bin/sudo /usr/sbin/ip netns exec scanvpn-hu /usr/sbin/runuser -u pigri -- /usr/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; ENVFILE="$PWD/.env.scan"; [ -r "$ENVFILE" ] && set -a && . "$ENVFILE" && set +a; exec npx tsx src/worker.ts --sqlite scan.db --scope scope.txt --watch --claim-suffix .gov.hu --claim-suffix .hu --log logs/worker-hu-%i.service.log'
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target
