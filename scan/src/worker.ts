@@ -22,6 +22,8 @@ interface Opts {
   logFile: string | null;
   watch: boolean;
   pollSec: number;
+  claimSuffixes: string[];
+  claimNotSuffixes: string[];
   extraArgs: string[];
   help?: boolean;
 }
@@ -29,7 +31,8 @@ interface Opts {
 function parseArgs(argv: string[]): Opts {
   const opts: Opts = {
     db: resolveDbArg(argv), batchSize: 25, maxBatches: 0, scope: null, strict: false,
-    logFile: null, watch: false, pollSec: 10, extraArgs: [],
+    logFile: null, watch: false, pollSec: 10,
+    claimSuffixes: [], claimNotSuffixes: [], extraArgs: [],
   };
   let passthrough = false;
   for (let i = 2; i < argv.length; i++) {
@@ -45,6 +48,8 @@ function parseArgs(argv: string[]): Opts {
     else if (a === '--log') opts.logFile = next();
     else if (a === '--watch') opts.watch = true;
     else if (a === '--poll-interval') opts.pollSec = parseInt(next(), 10);
+    else if (a === '--claim-suffix') opts.claimSuffixes.push(next());
+    else if (a === '--claim-not-suffix') opts.claimNotSuffixes.push(next());
     else if (a === '-h' || a === '--help') opts.help = true;
   }
   return opts;
@@ -67,6 +72,10 @@ Options:
   --watch                daemon mode: when the queue drains, poll for new work
                          instead of exiting. Runs until SIGINT/SIGTERM.
   --poll-interval <sec>  seconds to sleep between polls in --watch (default: 10)
+  --claim-suffix <s>     only claim targets ending in <s> (repeatable).
+                         e.g. --claim-suffix .gov.hu --claim-suffix .hu
+  --claim-not-suffix <s> never claim targets ending in <s> (repeatable).
+                         Used with a matching HU worker to split the fleet.
   --                     everything after is passed to scan-all verbatim
                          (e.g. -- --sqlite scan.db  is already set)
 
@@ -119,9 +128,19 @@ async function main(): Promise<void> {
   const batchDir = path.dirname(logFile); // batch target files live by the log
 
   const log = createLogger({ file: logFile });
-  const db = openDb(opts.db);
+  // Filter this worker's claim() to a subset of scan_queue by target suffix.
+  // Used by the split HU/foreign-egress fleets so HU-geo-blocked targets only
+  // get claimed by workers egressing via scanvpn-hu.
+  const db = openDb(opts.db,
+    (opts.claimSuffixes.length || opts.claimNotSuffixes.length)
+      ? { scanQueueFilter: { includeSuffixes: opts.claimSuffixes, excludeSuffixes: opts.claimNotSuffixes } }
+      : {},
+  );
   const startAll = Date.now();
-  log.info(`scan worker start: db=${path.resolve(opts.db)} batch-size=${opts.batchSize} max-batches=${opts.maxBatches || '∞'} scope=${opts.scope ?? '(none)'} watch=${opts.watch}`);
+  const filterDesc = (opts.claimSuffixes.length || opts.claimNotSuffixes.length)
+    ? ` claim-filter={include=[${opts.claimSuffixes.join(',')}] exclude=[${opts.claimNotSuffixes.join(',')}]}`
+    : '';
+  log.info(`scan worker start: db=${path.resolve(opts.db)} batch-size=${opts.batchSize} max-batches=${opts.maxBatches || '∞'} scope=${opts.scope ?? '(none)'} watch=${opts.watch}${filterDesc}`);
   log.info(`logging to ${path.resolve(logFile)}`);
 
   // WAL maintenance: without a checkpoint the WAL grows unbounded when a

@@ -26,7 +26,16 @@ export interface QueueOps {
   stats(): QueueStats;
 }
 
-export function makeQueue(raw: Database.Database, table: string): QueueOps {
+// Suffix-based filter for claimBatch. Used to split the worker fleet by
+// geographical egress: HU workers claim only .gov.hu / .hu targets (matched by
+// includeSuffixes); the foreign-egress fleet claims everything else via
+// excludeSuffixes. Empty arrays disable the corresponding filter.
+export interface QueueFilter {
+  includeSuffixes?: readonly string[];
+  excludeSuffixes?: readonly string[];
+}
+
+export function makeQueue(raw: Database.Database, table: string, filter: QueueFilter = {}): QueueOps {
   // table is an internal constant, never user input — but validate anyway since
   // it is interpolated into SQL.
   if (!/^[a-z_][a-z0-9_]*$/.test(table)) throw new Error(`invalid queue table name: ${table}`);
@@ -38,7 +47,23 @@ export function makeQueue(raw: Database.Database, table: string): QueueOps {
       priority=excluded.priority, status='pending', queued_at=excluded.queued_at,
       started_at=NULL, finished_at=NULL, run_id=NULL, error=NULL
   `);
-  const claimSelectStmt = raw.prepare(`SELECT id, target, priority FROM ${table} WHERE status='pending' ORDER BY priority DESC, id LIMIT ?`);
+  // Build the claim SELECT with optional suffix filters baked in. Suffixes are
+  // normalized to LIKE patterns: '.gov.hu' → target LIKE '%.gov.hu' OR target='gov.hu'.
+  // The apex-match branch (target=X) covers the bare-domain enqueue case.
+  const inc = (filter.includeSuffixes ?? []).map((s) => s.replace(/^\.+/, '').toLowerCase());
+  const exc = (filter.excludeSuffixes ?? []).map((s) => s.replace(/^\.+/, '').toLowerCase());
+  const claimWhere: string[] = [`status='pending'`];
+  const claimParams: string[] = [];
+  if (inc.length) {
+    const ors: string[] = [];
+    for (const s of inc) { ors.push(`target LIKE ? OR target = ?`); claimParams.push(`%.${s}`, s); }
+    claimWhere.push(`(${ors.join(' OR ')})`);
+  }
+  if (exc.length) {
+    for (const s of exc) { claimWhere.push(`target NOT LIKE ? AND target <> ?`); claimParams.push(`%.${s}`, s); }
+  }
+  const claimSql = `SELECT id, target, priority FROM ${table} WHERE ${claimWhere.join(' AND ')} ORDER BY priority DESC, id LIMIT ?`;
+  const claimSelectStmt = raw.prepare(claimSql);
   const claimUpdateStmt = raw.prepare(`UPDATE ${table} SET status='in_progress', started_at=? WHERE id=?`);
   const markDoneStmt = raw.prepare(`UPDATE ${table} SET status='done', finished_at=?, run_id=? WHERE id=?`);
   const markFailedStmt = raw.prepare(`UPDATE ${table} SET status='failed', finished_at=?, error=?, attempts=attempts+1 WHERE id=?`);
@@ -58,7 +83,7 @@ export function makeQueue(raw: Database.Database, table: string): QueueOps {
 
   // .immediate acquires the write lock up front → no double-claim across workers.
   const claimTx = raw.transaction((size: number, atIso: string): ClaimedRow[] => {
-    const rows = claimSelectStmt.all(size) as ClaimedRow[];
+    const rows = claimSelectStmt.all(...claimParams, size) as ClaimedRow[];
     for (const r of rows) claimUpdateStmt.run(atIso, r.id);
     return rows;
   }).immediate;

@@ -16,7 +16,8 @@ WorkingDirectory=/home/pigri/gen0sec/redteam/scan
 ExecStartPre=/usr/bin/sudo /usr/bin/bash -c 'for i in $(seq 30); do /usr/sbin/ip netns pids scanvpn >/dev/null 2>&1 && exit 0; sleep 2; done; echo "scanvpn netns absent after 60s — refusing to start" >&2; exit 1'
 # Instance %i gets its own audit log. All instances safely share one WAL scan.db
 # (IMMEDIATE claim transactions prevent double-claiming a target).
-ExecStart=/usr/bin/sudo /usr/sbin/ip netns exec scanvpn /usr/sbin/runuser -u pigri -- /usr/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; ENVFILE="$PWD/.env.scan"; [ -r "$ENVFILE" ] && set -a && . "$ENVFILE" && set +a; exec npx tsx src/worker.ts --sqlite scan.db --scope scope.txt --watch --log logs/worker-%i.service.log'
+# See scan-worker.service for the claim-not-suffix rationale (HU/foreign split).
+ExecStart=/usr/bin/sudo /usr/sbin/ip netns exec scanvpn /usr/sbin/runuser -u pigri -- /usr/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; ENVFILE="$PWD/.env.scan"; [ -r "$ENVFILE" ] && set -a && . "$ENVFILE" && set +a; exec npx tsx src/worker.ts --sqlite scan.db --scope scope.txt --watch --claim-not-suffix .gov.hu --claim-not-suffix .hu --log logs/worker-%i.service.log'
 Restart=on-failure
 RestartSec=10
 KillSignal=SIGTERM

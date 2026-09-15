@@ -22,7 +22,10 @@ ExecStartPre=/usr/bin/sudo /usr/bin/bash -c 'for i in $(seq 30); do /usr/sbin/ip
 # Source nvm explicitly so npx/node resolve under systemd's clean environment
 # (nvm lives in ~/.bashrc, which a login shell does not source). The worker puts
 # Go tools ($HOME/go/bin) on its scan-all child PATH itself.
-ExecStart=/usr/bin/sudo /usr/sbin/ip netns exec scanvpn /usr/sbin/runuser -u pigri -- /usr/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; ENVFILE="$PWD/.env.scan"; [ -r "$ENVFILE" ] && set -a && . "$ENVFILE" && set +a; exec npx tsx src/worker.ts --sqlite scan.db --scope scope.txt --watch --log logs/worker.service.log'
+# --claim-not-suffix .gov.hu / .hu: the foreign-egress fleet skips Hungarian
+# targets so the HU-egress fleet (scan-worker-hu@) claims them exclusively.
+# nebih.gov.hu and peers geo-block non-HU IPs — foreign attempts get WAF-eaten.
+ExecStart=/usr/bin/sudo /usr/sbin/ip netns exec scanvpn /usr/sbin/runuser -u pigri -- /usr/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; ENVFILE="$PWD/.env.scan"; [ -r "$ENVFILE" ] && set -a && . "$ENVFILE" && set +a; exec npx tsx src/worker.ts --sqlite scan.db --scope scope.txt --watch --claim-not-suffix .gov.hu --claim-not-suffix .hu --log logs/worker.service.log'
 Restart=on-failure
 RestartSec=10
 # Let an in-flight batch finish on stop before SIGKILL.

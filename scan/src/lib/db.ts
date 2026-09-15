@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
-import { makeQueue, type QueueEntry, type ClaimedRow, type QueueStats, type QueueOps } from './queue.js';
+import { makeQueue, type QueueEntry, type ClaimedRow, type QueueStats, type QueueOps, type QueueFilter } from './queue.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -145,7 +145,15 @@ function loadSchema(): string {
   return fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
 }
 
-export function openDb(dbPath: string): Db {
+// scanQueueFilter narrows what the scan worker's claim() sees — the HU fleet
+// passes includeSuffixes=['gov.hu','hu'], the foreign fleet passes
+// excludeSuffixes=['gov.hu','hu']. report_queue is never filtered (reports are
+// pure DB reads, no network egress).
+export interface OpenDbOptions {
+  scanQueueFilter?: QueueFilter;
+}
+
+export function openDb(dbPath: string, options: OpenDbOptions = {}): Db {
   const raw = new Database(dbPath);
   raw.pragma('foreign_keys = ON');
   // WAL + busy_timeout let multiple scanner/report workers write concurrently:
@@ -216,7 +224,7 @@ export function openDb(dbPath: string): Db {
     "SELECT COALESCE(severity, 'unknown') AS severity, COUNT(*) AS n FROM findings GROUP BY severity ORDER BY n DESC"
   );
 
-  const scanQueue = makeQueue(raw, 'scan_queue');
+  const scanQueue = makeQueue(raw, 'scan_queue', options.scanQueueFilter);
   const reportQueue = makeQueue(raw, 'report_queue');
 
   return {
