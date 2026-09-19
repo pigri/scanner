@@ -98,6 +98,11 @@ CREATE TABLE IF NOT EXISTS risk_scores (
 CREATE INDEX IF NOT EXISTS idx_risk_target   ON risk_scores(target);
 CREATE INDEX IF NOT EXISTS idx_risk_score    ON risk_scores(score);
 CREATE INDEX IF NOT EXISTS idx_risk_computed ON risk_scores(computed_at);
+-- Covering index for the UI's per-target MAX(computed_at)/MIN/MAX aggregations.
+-- risk_scores grows unbounded (hourly × N targets), so full-scan aggregates got
+-- expensive (~3.5M rows → 2.4s per GROUP BY). This index lets the planner
+-- stream ordered rows per target and return score straight from the index.
+CREATE INDEX IF NOT EXISTS idx_risk_target_ca_score ON risk_scores(target, computed_at, score);
 
 -- Local work queue: hosts to scan, prioritized. A worker claims batches
 -- of `pending` rows, runs scan-all on them, then marks `done` or `failed`.

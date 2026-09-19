@@ -121,7 +121,7 @@ interface LogicalFinding {
 let logicalCache: { rows: LogicalFinding[]; at: number } | null = null;
 function logicalFindings(): LogicalFinding[] {
   const now = Date.now();
-  if (logicalCache && now - logicalCache.at < 10000) return logicalCache.rows;
+  if (logicalCache && now - logicalCache.at < 60000) return logicalCache.rows;
   const rows = scan
     .prepare(
       `WITH logical AS MATERIALIZED (
@@ -152,7 +152,7 @@ interface TargetRow {
 let targetsCache: { rows: TargetRow[]; at: number } | null = null;
 function targetRows(): TargetRow[] {
   const now = Date.now();
-  if (targetsCache && now - targetsCache.at < 10000) return targetsCache.rows;
+  if (targetsCache && now - targetsCache.at < 60000) return targetsCache.rows;
   const rows = scan
     .prepare(
       `WITH latest AS MATERIALIZED (
