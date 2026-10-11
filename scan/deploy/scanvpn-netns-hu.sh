@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Recreate the 'scanvpn-hu' network namespace + wgscan-hu WireGuard interface so
+# the HU-egress scan workers (scan-worker-hu@) leave via the Windscribe HU
+# tunnel and never the host IP. This is the HU twin of scanvpn-netns.sh; the two
+# namespaces are independent and the fleet is split by target suffix (see
+# scan-worker-hu@.service / scan-worker@.service).
+#
+# WHY THIS EXISTS: the "Split scan-worker fleet by target country" change added
+# scan-worker-hu@.service, whose ExecStartPre fails closed until the 'scanvpn-hu'
+# netns is present — but shipped no unit to create that netns. With it missing,
+# the HU workers loop forever in start-pre and every .gov.hu / .hu target sits
+# unclaimed in scan_queue. This script + scanvpn-netns-hu.service close that gap.
+#
+# WireGuard is namespace-aware: we create wgscan-hu in the INIT netns (so its
+# encrypted UDP transport socket egresses via the host's real network to reach
+# the endpoint) and then move ONLY the inner interface into the scanvpn-hu netns.
+# Everything a scan does is confined to scanvpn-hu, whose sole default route is
+# wgscan-hu -- so even a dead tunnel fails closed rather than leaking the host IP.
+#
+# NOTE: WireGuard is UDP-only. If the tunnel never completes a handshake (wg show
+# => "latest handshake" absent, 0 B received) while TCP egress still works, the
+# usual cause is the host firewall dropping the UDP *return* traffic, not a bad
+# config. On the Hetzner stateless firewall that means a missing inbound rule for
+# "udp, source port 443" — see deploy/README.md.
+set -euo pipefail
+
+NS=scanvpn-hu
+IF=wgscan-hu
+CONF=/etc/wireguard/scanvpn-hu.conf
+MTU=1320   # Windscribe WireGuard MTU; not carried in the .conf, so set here.
+
+# Address(es) and DNS are read straight from $CONF so this script never carries a
+# per-key assignment (the keys rotate, and the repo is public). wg-quick strip
+# removes [Interface] Address/DNS before `wg setconf`, so we re-apply them here.
+read_conf_field() {   # field name -> comma-separated value from [Interface]
+  awk -F= -v f="$1" '
+    tolower($1) ~ "^[[:space:]]*"tolower(f)"[[:space:]]*$" {
+      sub(/^[^=]*=/, ""); gsub(/[[:space:]]/, ""); print; exit }' "$CONF"
+}
+
+down() {
+  ip netns del "$NS" 2>/dev/null || true
+  # If a prior run failed after creating wgscan-hu but before moving it, the
+  # iface lingers in the init netns -- clean that up too.
+  ip link del "$IF" 2>/dev/null || true
+}
+
+up() {
+  [ -r "$CONF" ] || { echo "scanvpn-netns-hu: $CONF not readable" >&2; exit 1; }
+  local addrs dns has_v6=0
+  addrs=$(read_conf_field Address | tr ',' ' ')
+  dns=$(read_conf_field DNS | tr ',' ' ')
+  [ -n "$addrs" ] || { echo "scanvpn-netns-hu: no Address in $CONF" >&2; exit 1; }
+
+  down                                   # idempotent: clear any stale state first
+  ip netns add "$NS"
+  ip link add "$IF" type wireguard
+  wg setconf "$IF" <(wg-quick strip "$CONF")   # PrivateKey/Peer/PSK/Endpoint/keepalive
+  ip link set "$IF" netns "$NS"                 # move inner iface; UDP socket stays in init netns
+  ip -n "$NS" link set "$IF" mtu "$MTU"
+  for a in $addrs; do
+    ip -n "$NS" addr add "$a" dev "$IF"
+    case "$a" in *:*) has_v6=1 ;; esac
+  done
+  ip -n "$NS" link set "$IF" up
+  ip -n "$NS" route add default dev "$IF"              # IPv4 default
+  if [ "$has_v6" -eq 1 ]; then ip -n "$NS" -6 route add default dev "$IF"; fi
+  # ip netns exec bind-mounts this over /etc/resolv.conf for anything run in the ns.
+  install -d -m 0755 /etc/netns/"$NS"
+  : > /etc/netns/"$NS"/resolv.conf
+  for d in ${dns:-}; do printf 'nameserver %s\n' "$d" >> /etc/netns/"$NS"/resolv.conf; done
+}
+
+case "${1:-up}" in
+  up)   up ;;
+  down) down ;;
+  *)    echo "usage: $0 {up|down}" >&2; exit 1 ;;
+esac
