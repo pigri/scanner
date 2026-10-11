@@ -15,11 +15,16 @@ StartLimitBurst=30
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/sbin/scanvpn-netns-hu.sh up
-# Fail the unit (-> ExecStop tears the netns down) if the tunnel never handshakes,
-# so a present-but-dead tunnel can't let scan-worker-hu@ drain the queue through a
-# black hole. Adds up to ~16s to startup while it provokes and confirms a handshake.
+# Fail the unit if the tunnel never handshakes, so a present-but-dead tunnel can't
+# let scan-worker-hu@ drain the queue through a black hole. Worst case ~30s while
+# it provokes and polls for a handshake (8 x [ping -W2 + sleep 2]) — well under
+# the default TimeoutStartSec=90s.
 ExecStartPost=/usr/local/sbin/scanvpn-netns-hu.sh check
-ExecStop=/usr/local/sbin/scanvpn-netns-hu.sh down
+# ExecStopPost (not ExecStop): runs unconditionally, including when ExecStartPost
+# fails before the unit ever reaches "active" — which ExecStop= would skip. check()
+# also tears down on its own failure path; this is the backstop and the normal-stop
+# teardown.
+ExecStopPost=/usr/local/sbin/scanvpn-netns-hu.sh down
 Restart=on-failure
 RestartSec=10
 
