@@ -15,6 +15,17 @@ WorkingDirectory=/home/pigri/gen0sec/redteam/discovery
 # discovers are still scanned via the VPN by the workers; only the public-log
 # fetch runs here.
 #
+# Per-shard per-run entry cap (ct-mirror.ts CT_MAX_ENTRIES, default 500k). Raised
+# to 5M to catch up a large historical backlog: argon2026h2 was ~355M entries
+# behind log head, which at 500k/run every 30min is ~15 days — in-scope certs
+# only appear near the head, so new CT findings were effectively paused until
+# caught up. 5M/shard/run reaches the head in ~1.5 days. The mirror iterates in
+# 20k-entry chunks and checkpoints after each, so a longer run resumes safely and
+# intermediate files stay small; a run may exceed the 30min timer window, but
+# OnUnitActiveSec counts from run end (no overlap) and systemd won't start a
+# second oneshot instance. Safe to leave high at steady state: far fewer than 5M
+# certs append per interval, so it just fetches whatever is new.
+Environment=CT_MAX_ENTRIES=5000000
 # nvm must be sourced explicitly under systemd's clean environment.
 # scrape-ct-log resolves via ~/.local/bin (added to PATH inside the shell).
 ExecStart=/usr/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; export PATH="$HOME/.local/bin:$PATH"; mkdir -p logs && exec npx tsx src/ct-mirror.ts update >> logs/ct-mirror.log 2>&1'
