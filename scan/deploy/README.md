@@ -19,6 +19,63 @@ a target. SQLite stays the single source of truth (one writer at a time).
 Run everything under **systemd (user services)** so they restart on failure and
 survive logout.
 
+## VPN egress namespaces (REQUIRED — the workers fail closed without them)
+
+The scan workers egress through WireGuard network namespaces so scan traffic
+never leaves the host IP, and the fleet is split by target country (commit
+"Split scan-worker fleet by target country"):
+
+| Worker unit            | netns        | Claims                      | Egress        |
+| ---------------------- | ------------ | --------------------------- | ------------- |
+| `scan-worker@`         | `scanvpn`    | everything **except** `.hu` | Windscribe    |
+| `scan-worker-hu@`      | `scanvpn-hu` | **only** `.gov.hu` / `.hu`  | Windscribe-HU |
+
+Each worker's `ExecStartPre` **fails closed** (refuses to start) until its netns
+exists, so the netns units below are a hard prerequisite. If `scanvpn-hu` is
+missing, `scan-worker-hu@` hangs forever in `start-pre` and every `.hu` target
+sits unclaimed in `scan_queue` — no new findings, and the UI News page shows
+nothing new.
+
+These are **system** units (netns creation needs root), installed outside the
+repo tree:
+
+```bash
+# HU egress namespace (scanvpn-hu) — needs /etc/wireguard/scanvpn-hu.conf present
+sudo install -m 0755 scanvpn-netns-hu.sh /usr/local/sbin/scanvpn-netns-hu.sh
+sudo install -m 0644 scanvpn-netns-hu.service /etc/systemd/system/scanvpn-netns-hu.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now scanvpn-netns-hu.service
+
+# verify: the namespace exists and routes default via wgscan-hu
+ip netns list | grep scanvpn-hu
+sudo ip netns exec scanvpn-hu ip route
+# the stuck HU workers clear start-pre on their own (Restart=on-failure loop):
+systemctl --user is-active scan-worker-hu@1 scan-worker-hu@2
+```
+
+The foreign `scanvpn`/`scanvpn-netns.service` pair is already installed on the
+host (not yet tracked here — a follow-up should capture it alongside this one).
+
+`scanvpn-netns-hu.sh` reads the tunnel's address(es) and DNS straight from
+`/etc/wireguard/scanvpn-hu.conf`, so rotating the Windscribe key means replacing
+only that file and restarting `scanvpn-netns-hu` — no edit to the script.
+
+### Troubleshooting: tunnel comes up but never handshakes
+
+If `sudo ip netns exec scanvpn-hu wg show wgscan-hu` shows **no "latest
+handshake" and 0 B received** (handshake init sent, nothing back) while ordinary
+TCP egress still works, the cause is almost always the **host firewall dropping
+the UDP return traffic**, not a bad key or a down server.
+
+WireGuard is **UDP-only**, and the host's stateless firewall (Hetzner Robot)
+does not auto-allow return packets: outbound "allow all" lets the handshake
+*init* leave, and TCP replies get back in via the usual `tcp established`
+(dport 32768-65535, flag `ack`) rule — but there is **no UDP equivalent**, so the
+server's reply (UDP, **source port 443**) hits the default `discard`. Fix is an
+**incoming** rule: `udp`, source port `443`, action `accept` (match on source
+port — the host's WG listen port is random per restart). Commit that rule into
+whatever manages the firewall, or the next apply silently re-breaks every tunnel.
+
 ## Install (user service, no root)
 
 ```bash
