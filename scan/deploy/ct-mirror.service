@@ -21,10 +21,12 @@ WorkingDirectory=/home/pigri/gen0sec/redteam/discovery
 # only appear near the head, so new CT findings were effectively paused until
 # caught up. 5M/shard/run reaches the head in ~1.5 days. The mirror iterates in
 # 20k-entry chunks and checkpoints after each, so a longer run resumes safely and
-# intermediate files stay small; a run may exceed the 30min timer window, but
-# OnUnitActiveSec counts from run end (no overlap) and systemd won't start a
-# second oneshot instance. Safe to leave high at steady state: far fewer than 5M
-# certs append per interval, so it just fetches whatever is new.
+# intermediate files stay small. A run may exceed the 30min timer window, but
+# systemd never runs two instances of this (non-templated) service, so a trigger
+# that lands mid-run is merged, not stacked — no overlap. (OnUnitActiveSec is
+# start-relative, so after a long run the next fire is back-to-back rather than a
+# 30min idle gap — fine for catch-up.) Safe to leave high at steady state: far
+# fewer than 5M certs append per interval, so it just fetches whatever is new.
 Environment=CT_MAX_ENTRIES=5000000
 # nvm must be sourced explicitly under systemd's clean environment.
 # scrape-ct-log resolves via ~/.local/bin (added to PATH inside the shell).
