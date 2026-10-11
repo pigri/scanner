@@ -45,7 +45,6 @@ cms.im.gov.hu
 cms.palyazat.gov.hu
 cn.nav.gov.hu
 conf.video.gov.hu
-conference.allamkincstar.gov.hu
 confluence.nav.gov.hu
 connect.ih.gov.hu
 connect.okfo.gov.hu
@@ -146,7 +145,6 @@ kf.im.gov.hu
 kh.allamkincstar.gov.hu
 kiev.mfa.gov.hu
 kim.gov.hu
-kim.hosting.gov.hu
 kk.gov.hu
 kk.neak.gov.hu
 kkk.gov.hu
@@ -232,7 +230,6 @@ ns2.mfa.gov.hu
 ns2.okfo.gov.hu
 ntp.gov.hu
 ntp2.gov.hu
-ocsp.allamkincstar.gov.hu
 office.eeszt.gov.hu
 old.video.gov.hu
 opendata.gov.hu
@@ -258,6 +255,7 @@ portal.okfo.gov.hu
 portal.video.gov.hu
 portal1.video.gov.hu
 post.nav.gov.hu
+posta.oktatasihivatal.gov.hu
 postfix.okfo.gov.hu
 pp.palyazat.gov.hu
 preprod.okfo.gov.hu
