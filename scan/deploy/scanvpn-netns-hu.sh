@@ -78,8 +78,40 @@ up() {
   fi
 }
 
+# Verify the tunnel actually handshakes, for use as the unit's ExecStartPost. The
+# netns-presence guard in scan-worker-hu@.service only proves the namespace
+# exists, not that egress works — so a present-but-dead tunnel (e.g. the host
+# firewall dropping UDP return traffic) would let workers drain the queue through
+# a black hole and mark targets done with no findings. By gating here, a failed
+# check fails this oneshot unit, its ExecStop runs down(), the netns disappears,
+# and the workers' presence guard keeps them out until the tunnel is genuinely up.
+#
+# WireGuard is lazy without PersistentKeepalive: it won't handshake until a packet
+# needs sending. So we provoke one (a ping into the tunnel; its success is
+# irrelevant) and then poll wg's last-handshake timestamp. Setting
+# "PersistentKeepalive = 25" in the .conf makes the tunnel self-maintain and this
+# probe a near-instant confirmation instead of the trigger.
+check() {
+  local dns probe hs now
+  dns=$(read_conf_field DNS | tr ',' ' ' | awk '{print $1}')
+  probe=${dns:-1.1.1.1}   # a routed-through-the-tunnel target to provoke a handshake
+  for _ in $(seq 8); do
+    ip netns exec "$NS" ping -c1 -W2 "$probe" >/dev/null 2>&1 || true
+    hs=$(ip netns exec "$NS" wg show "$IF" latest-handshakes 2>/dev/null | awk '{print $2; exit}')
+    now=$(date +%s)
+    if [ -n "$hs" ] && [ "$hs" -gt 0 ] && [ "$(( now - hs ))" -lt 180 ]; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "scanvpn-netns-hu: $IF has no recent WireGuard handshake — tunnel is not passing traffic." >&2
+  echo "scanvpn-netns-hu: WireGuard is UDP-only; check the host firewall allows inbound udp src-port 443 (see deploy/README.md)." >&2
+  return 1
+}
+
 case "${1:-up}" in
-  up)   up ;;
-  down) down ;;
-  *)    echo "usage: $0 {up|down}" >&2; exit 1 ;;
+  up)    up ;;
+  check) check ;;
+  down)  down ;;
+  *)     echo "usage: $0 {up|check|down}" >&2; exit 1 ;;
 esac
