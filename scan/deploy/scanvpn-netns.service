@@ -1,0 +1,33 @@
+[Unit]
+Description=scanvpn WireGuard network namespace (foreign VPN egress for scan-worker)
+Documentation=man:wg(8) man:ip-netns(8)
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+# The WireGuard endpoint hostname (from scanvpn.conf) must resolve at setup time.
+# After= below already orders this past network/DNS bring-up, so the retry loop
+# (ExecStart fails -> Restart) is only a backstop; size it to cover the full
+# StartLimitIntervalSec window (30 tries * RestartSec 10s ~= 300s) so a slow
+# boot-time DNS doesn't exhaust the burst in ~50s and fail the unit for good.
+StartLimitIntervalSec=300
+StartLimitBurst=30
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/scanvpn-netns.sh up
+# Fail the unit if the tunnel never handshakes, so a present-but-dead tunnel can't
+# let scan-worker@ drain the queue through a black hole or silently freeze the CT
+# mirror / recon refresh on DNS failures. Worst case ~30s while it provokes and
+# polls for a handshake (8 x [ping -W2 + sleep 2]) — well under the default
+# TimeoutStartSec=90s.
+ExecStartPost=/usr/local/sbin/scanvpn-netns.sh check
+# ExecStopPost (not ExecStop): runs unconditionally, including when ExecStartPost
+# fails before the unit ever reaches "active" — which ExecStop= would skip. check()
+# also tears down on its own failure path; this is the backstop and the normal-stop
+# teardown.
+ExecStopPost=/usr/local/sbin/scanvpn-netns.sh down
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

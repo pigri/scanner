@@ -40,25 +40,29 @@ These are **system** units (netns creation needs root), installed outside the
 repo tree:
 
 ```bash
+# Foreign egress namespace (scanvpn) — needs /etc/wireguard/scanvpn.conf present
+sudo install -m 0755 scanvpn-netns.sh /usr/local/sbin/scanvpn-netns.sh
+sudo install -m 0644 scanvpn-netns.service /etc/systemd/system/scanvpn-netns.service
+
 # HU egress namespace (scanvpn-hu) — needs /etc/wireguard/scanvpn-hu.conf present
 sudo install -m 0755 scanvpn-netns-hu.sh /usr/local/sbin/scanvpn-netns-hu.sh
 sudo install -m 0644 scanvpn-netns-hu.service /etc/systemd/system/scanvpn-netns-hu.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now scanvpn-netns-hu.service
 
-# verify: the namespace exists and routes default via wgscan-hu
-ip netns list | grep scanvpn-hu
+sudo systemctl daemon-reload
+sudo systemctl enable --now scanvpn-netns.service scanvpn-netns-hu.service
+
+# verify: each namespace exists and routes default via its wg interface
+ip netns list | grep -E 'scanvpn($| )|scanvpn-hu'
+sudo ip netns exec scanvpn    ip route
 sudo ip netns exec scanvpn-hu ip route
-# the stuck HU workers clear start-pre on their own (Restart=on-failure loop):
-systemctl --user is-active scan-worker-hu@1 scan-worker-hu@2
+# the stuck workers clear start-pre on their own (Restart=on-failure loop):
+systemctl --user is-active scan-worker@1 scan-worker@2 scan-worker-hu@1 scan-worker-hu@2
 ```
 
-The foreign `scanvpn`/`scanvpn-netns.service` pair is already installed on the
-host (not yet tracked here — a follow-up should capture it alongside this one).
-
-`scanvpn-netns-hu.sh` reads the tunnel's address(es) and DNS straight from
-`/etc/wireguard/scanvpn-hu.conf`, so rotating the Windscribe key means replacing
-only that file and restarting `scanvpn-netns-hu` — no edit to the script.
+Both scripts read the tunnel's address(es) and DNS straight from their
+`/etc/wireguard/scanvpn{,-hu}.conf`, so rotating the Windscribe key means
+replacing only that file and restarting the matching `scanvpn-netns{,-hu}` unit —
+no edit to the script.
 
 ### Troubleshooting: tunnel comes up but never handshakes
 
@@ -76,13 +80,21 @@ server's reply (UDP, **source port 443**) hits the default `discard`. Fix is an
 port — the host's WG listen port is random per restart). Commit that rule into
 whatever manages the firewall, or the next apply silently re-breaks every tunnel.
 
-`scanvpn-netns-hu.service` now **fails closed on a dead tunnel**: its
-`ExecStartPost` (`scanvpn-netns-hu.sh check`) provokes a handshake and verifies
-it; if none appears the check tears the netns down itself and fails the unit (its
-`ExecStopPost=down` is the backstop — `ExecStop=` would be skipped on a start that
-never reached "active"), so `scan-worker-hu@`'s netns-presence guard keeps the
-workers out and a present-but-dead tunnel can no longer drain the queue into empty
-`done`s.
+Both `scanvpn-netns.service` and `scanvpn-netns-hu.service` now **fail closed on
+a dead tunnel**: their `ExecStartPost` (`scanvpn-netns{,-hu}.sh check`) provokes a
+handshake and verifies it; if none appears the check tears the netns down itself
+and fails the unit (its `ExecStopPost=down` is the backstop — `ExecStop=` would be
+skipped on a start that never reached "active"), so the matching worker's
+netns-presence guard keeps the workers out and a present-but-dead tunnel can no
+longer drain the queue into empty `done`s.
+
+This matters beyond the scan workers: each namespace's **only resolver is the
+in-tunnel DNS** (the `.conf`'s `DNS=`, reachable only through the wg interface), so
+a present-but-dead tunnel also makes every in-namespace lookup fail "Could not
+resolve host" — which silently freezes the CT mirror (`ct-mirror.service`) and the
+daily recon refresh (`scan-feed`) with no systemd-level error. Failing the netns
+unit closed is what surfaces that instead of letting it rot unnoticed.
+
 Set `PersistentKeepalive = 25` in the `.conf` to make the tunnel self-maintain a
 handshake (the check then just confirms it, rather than having to trigger it).
 
