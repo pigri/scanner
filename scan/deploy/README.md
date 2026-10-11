@@ -76,6 +76,14 @@ server's reply (UDP, **source port 443**) hits the default `discard`. Fix is an
 port — the host's WG listen port is random per restart). Commit that rule into
 whatever manages the firewall, or the next apply silently re-breaks every tunnel.
 
+`scanvpn-netns-hu.service` now **fails closed on a dead tunnel**: its
+`ExecStartPost` (`scanvpn-netns-hu.sh check`) provokes a handshake and verifies
+it; if none appears, the unit fails, `ExecStop` tears the netns down, and
+`scan-worker-hu@`'s netns-presence guard keeps the workers out — so a
+present-but-dead tunnel can no longer drain the queue into empty `done`s.
+Set `PersistentKeepalive = 25` in the `.conf` to make the tunnel self-maintain a
+handshake (the check then just confirms it, rather than having to trigger it).
+
 ## Install (user service, no root)
 
 ```bash
