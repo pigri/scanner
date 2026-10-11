@@ -35,7 +35,7 @@ MTU=1320   # Windscribe WireGuard MTU; not carried in the .conf, so set here.
 read_conf_field() {   # field name -> comma-separated value from [Interface]
   awk -F= -v f="$1" '
     tolower($1) ~ "^[[:space:]]*"tolower(f)"[[:space:]]*$" {
-      sub(/^[^=]*=/, ""); gsub(/[[:space:]]/, ""); print; exit }' "$CONF"
+      sub(/^[^=]*=/, ""); sub(/#.*/, ""); gsub(/[[:space:]]/, ""); print; exit }' "$CONF"
 }
 
 down() {
@@ -47,7 +47,7 @@ down() {
 
 up() {
   [ -r "$CONF" ] || { echo "scanvpn-netns-hu: $CONF not readable" >&2; exit 1; }
-  local addrs dns has_v6=0
+  local addrs dns has_v6=0 has_v4=0
   addrs=$(read_conf_field Address | tr ',' ' ')
   dns=$(read_conf_field DNS | tr ',' ' ')
   [ -n "$addrs" ] || { echo "scanvpn-netns-hu: no Address in $CONF" >&2; exit 1; }
@@ -60,15 +60,22 @@ up() {
   ip -n "$NS" link set "$IF" mtu "$MTU"
   for a in $addrs; do
     ip -n "$NS" addr add "$a" dev "$IF"
-    case "$a" in *:*) has_v6=1 ;; esac
+    case "$a" in *:*) has_v6=1 ;; *) has_v4=1 ;; esac
   done
   ip -n "$NS" link set "$IF" up
-  ip -n "$NS" route add default dev "$IF"              # IPv4 default
+  if [ "$has_v4" -eq 1 ]; then ip -n "$NS" route add default dev "$IF"; fi
   if [ "$has_v6" -eq 1 ]; then ip -n "$NS" -6 route add default dev "$IF"; fi
   # ip netns exec bind-mounts this over /etc/resolv.conf for anything run in the ns.
-  install -d -m 0755 /etc/netns/"$NS"
-  : > /etc/netns/"$NS"/resolv.conf
-  for d in ${dns:-}; do printf 'nameserver %s\n' "$d" >> /etc/netns/"$NS"/resolv.conf; done
+  # Without a nameserver here every in-ns lookup fails silently, so if the conf
+  # carried no DNS, warn loudly and leave any existing resolv.conf untouched
+  # rather than truncating it to an empty (resolution-dead) file.
+  if [ -n "$dns" ]; then
+    install -d -m 0755 /etc/netns/"$NS"
+    : > /etc/netns/"$NS"/resolv.conf
+    for d in $dns; do printf 'nameserver %s\n' "$d" >> /etc/netns/"$NS"/resolv.conf; done
+  else
+    echo "scanvpn-netns-hu: WARNING: no DNS in $CONF; in-namespace name resolution will not work" >&2
+  fi
 }
 
 case "${1:-up}" in
