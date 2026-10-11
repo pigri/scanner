@@ -62,7 +62,8 @@ systemctl --user is-active scan-worker@1 scan-worker@2 scan-worker-hu@1 scan-wor
 Both scripts read the tunnel's address(es) and DNS straight from their
 `/etc/wireguard/scanvpn{,-hu}.conf`, so rotating the Windscribe key means
 replacing only that file and restarting the matching `scanvpn-netns{,-hu}` unit —
-no edit to the script.
+no edit to the script. Re-add the `PersistentKeepalive = 25` line to the new conf
+(the Windscribe export drops it); see the troubleshooting note below for why.
 
 ### Troubleshooting: tunnel comes up but never handshakes
 
@@ -95,8 +96,14 @@ resolve host" — which silently freezes the CT mirror (`ct-mirror.service`) and
 daily recon refresh (`scan-feed`) with no systemd-level error. Failing the netns
 unit closed is what surfaces that instead of letting it rot unnoticed.
 
-Set `PersistentKeepalive = 25` in the `.conf` to make the tunnel self-maintain a
-handshake (the check then just confirms it, rather than having to trigger it).
+Set `PersistentKeepalive = 25` in **both** `scanvpn.conf` and `scanvpn-hu.conf` —
+treat it as a required default, not an optional extra. The Windscribe `.conf`
+export omits it, so it has to be re-added by hand after every key rotation; a conf
+that is missing it comes up fine but then lets an idle tunnel's handshake age out,
+forcing the netns `check` to re-trigger one on each start. With it, the tunnel
+self-maintains the handshake and the check just confirms it. `up()` loads the
+value straight from the conf via `wg setconf`, so restarting the matching
+`scanvpn-netns{,-hu}` unit after adding the line is all it takes to apply it.
 
 ## Install (user service, no root)
 
