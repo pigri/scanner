@@ -82,9 +82,13 @@ up() {
 # netns-presence guard in scan-worker-hu@.service only proves the namespace
 # exists, not that egress works — so a present-but-dead tunnel (e.g. the host
 # firewall dropping UDP return traffic) would let workers drain the queue through
-# a black hole and mark targets done with no findings. By gating here, a failed
-# check fails this oneshot unit, its ExecStop runs down(), the netns disappears,
-# and the workers' presence guard keeps them out until the tunnel is genuinely up.
+# a black hole and mark targets done with no findings. By gating here, a dead
+# tunnel means the netns is torn down, so the workers' presence guard keeps them
+# out until the tunnel is genuinely up. On failure check() runs down() itself
+# (prompt, and independent of systemd semantics); the unit's ExecStopPost=down is
+# the backstop. NOTE: cleanup must not hang off ExecStop= — a Type=oneshot unit
+# whose ExecStartPost fails goes straight to "failed" without ever being "active",
+# and systemd skips ExecStop= in that case (only ExecStopPost= runs unconditionally).
 #
 # WireGuard is lazy without PersistentKeepalive: it won't handshake until a packet
 # needs sending. So we provoke one (a ping into the tunnel; its success is
@@ -97,7 +101,10 @@ check() {
   probe=${dns:-1.1.1.1}   # a routed-through-the-tunnel target to provoke a handshake
   for _ in $(seq 8); do
     ip netns exec "$NS" ping -c1 -W2 "$probe" >/dev/null 2>&1 || true
-    hs=$(ip netns exec "$NS" wg show "$IF" latest-handshakes 2>/dev/null | awk '{print $2; exit}')
+    # First peer only: the Windscribe conf is single-peer. `|| true` so a transient
+    # `wg show` error is retried like a missing handshake, not treated as fatal
+    # (pipefail would otherwise abort the whole retry loop on one hiccup).
+    hs=$(ip netns exec "$NS" wg show "$IF" latest-handshakes 2>/dev/null | awk '{print $2; exit}') || true
     now=$(date +%s)
     if [ -n "$hs" ] && [ "$hs" -gt 0 ] && [ "$(( now - hs ))" -lt 180 ]; then
       return 0
@@ -106,6 +113,8 @@ check() {
   done
   echo "scanvpn-netns-hu: $IF has no recent WireGuard handshake — tunnel is not passing traffic." >&2
   echo "scanvpn-netns-hu: WireGuard is UDP-only; check the host firewall allows inbound udp src-port 443 (see deploy/README.md)." >&2
+  down   # tear the dead tunnel down ourselves so the stale netns can't linger and
+         # fool scan-worker-hu@'s presence-only guard into draining the queue.
   return 1
 }
 
