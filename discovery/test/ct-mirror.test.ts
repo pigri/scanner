@@ -1,4 +1,12 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import http from 'node:http';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import type { AddressInfo } from 'node:net';
+import Database from 'better-sqlite3';
+import { describe, it, expect, vi, afterEach, beforeAll, afterAll, beforeEach } from 'vitest';
 import { X509Certificate, createHash, generateKeyPairSync, createSign } from 'node:crypto';
 import {
   extractCn,
@@ -243,5 +251,109 @@ describe('axiom ingest', () => {
     vi.stubEnv('AXIOM_URL', 'https://axiom.test');
     await ingestFromEnv([{ a: 1 }]);
     expect(fetchMock.mock.calls[0]![0]).toBe('https://axiom.test/v1/datasets/ds/ingest');
+  });
+});
+
+// End-to-end error-path shapes: run the real CLI against a temp ct.db, a local
+// fake CT log (get-sth) and a local fake Axiom endpoint. PR 3's monitors key off
+// `result == "error"`, so these shapes are pinned here.
+describe('ct-mirror CLI error events', () => {
+  const srcPath = fileURLToPath(new URL('../src/ct-mirror.ts', import.meta.url));
+  let dir: string;
+  let server: http.Server;
+  let port: number;
+  let posts: { url: string; auth: string | undefined; body: any[] }[];
+
+  beforeAll(async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ct-mirror-test-'));
+    posts = [];
+    server = http.createServer((req, res) => {
+      if (req.url === '/okshard/ct/v1/get-sth') {
+        res.end(JSON.stringify({ tree_size: 1000, timestamp: 1 }));
+      } else if (req.url?.startsWith('/v1/datasets/')) {
+        let raw = '';
+        req.on('data', (c) => { raw += c; });
+        req.on('end', () => {
+          posts.push({ url: req.url!, auth: req.headers.authorization, body: JSON.parse(raw) });
+          res.end('{}');
+        });
+      } else {
+        res.statusCode = 500;
+        res.end('nope');
+      }
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    port = (server.address() as AddressInfo).port;
+    const db = new Database(path.join(dir, 'ct.db'));
+    db.exec(fs.readFileSync(fileURLToPath(new URL('../src/lib/schema-ct.sql', import.meta.url)), 'utf8'));
+    const ins = db.prepare('INSERT INTO ct_shards(label, log_url, baseline_tree_size, last_entry_id, updated_at) VALUES(?,?,?,?,?)');
+    ins.run('a-ok', `http://127.0.0.1:${port}/okshard/`, 10, 400, 'u');
+    ins.run('b-bad', `http://127.0.0.1:${port}/badshard/`, 10, 77, 'u');
+    db.close();
+    fs.writeFileSync(path.join(dir, 'scope.txt'), 'example.com\n');
+  });
+  afterAll(async () => {
+    await new Promise((r) => server.close(r));
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  beforeEach(() => { posts.length = 0; });
+
+  function run(cmd: string): Promise<{ code: number | null; stdout: string }> {
+    return new Promise((resolve) => {
+      const child = spawn(process.execPath, ['--import', 'tsx', srcPath, cmd], {
+        env: {
+          ...process.env,
+          CT_DB: path.join(dir, 'ct.db'),
+          SCOPE_TXT: path.join(dir, 'scope.txt'),
+          SCAN_DB: path.join(dir, 'missing-scan.db'),
+          AXIOM_INGEST_TOKEN: 'tok',
+          AXIOM_DATASET: 'ds',
+          AXIOM_URL: `http://127.0.0.1:${port}`,
+        },
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      let stdout = '';
+      child.stdout.on('data', (c) => { stdout += c; });
+      child.on('close', (code) => resolve({ code, stdout }));
+    });
+  }
+
+  function expectErrorShape(ev: any, runType: string) {
+    expect(ev).toMatchObject({ event: 'ct_status', run_type: runType, shard: 'b-bad', result: 'error', last_entry_id: 77 });
+    expect(typeof ev.error).toBe('string');
+    expect(ev.error.length).toBeGreaterThan(0);
+    expect(ev).not.toHaveProperty('tree_size');
+    expect(ev).not.toHaveProperty('lag');
+  }
+
+  it('heartbeat: failing shard gets an error event, ok shard still ok', async () => {
+    const { code } = await run('heartbeat');
+    expect(code).toBe(0);
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.auth).toBe('Bearer tok');
+    const byShard = Object.fromEntries(posts[0]!.body.map((e) => [e.shard, e]));
+    expectErrorShape(byShard['b-bad'], 'heartbeat');
+    expect(byShard['a-ok']).toMatchObject({
+      run_type: 'heartbeat', result: 'ok', last_entry_id: 400, tree_size: 1000, lag: 600,
+    });
+  });
+
+  it('status: throwing shard lands in errors and does not abort the other', async () => {
+    const { code, stdout } = await run('status');
+    expect(code).toBe(0);
+    const out = JSON.parse(stdout);
+    expect(out.shards.map((s: any) => s.label)).toEqual(['a-ok']);
+    expect(out.errors).toHaveLength(1);
+    expect(out.errors[0]).toMatchObject({ label: 'b-bad', last_entry_id: 77 });
+    expect(out.errors[0].error.length).toBeGreaterThan(0);
+  });
+
+  it('update: failing shard emits an error event without tree_size/lag', async () => {
+    const { code } = await run('update');
+    expect(code).toBe(0);
+    expect(posts).toHaveLength(1);
+    const bad = posts[0]!.body.find((e) => e.shard === 'b-bad');
+    expectErrorShape(bad, 'update');
+    expect(bad).toHaveProperty('entries_fetched', 0);
   });
 });
