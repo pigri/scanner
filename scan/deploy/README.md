@@ -151,6 +151,23 @@ journalctl --user -u scan-feed -f            # last recon+enqueue run
 systemctl --user start scan-feed             # run the daily cycle right now (test)
 ```
 
+### CT-mirror liveness heartbeat + failure alert
+
+`ct-mirror-heartbeat.timer` (every 15 min, wall-clock `*:07/15`) emits per-shard
+`ct_status` events to Axiom; `ct-mirror-alert.service` is the `OnFailure=` target of
+`ct-mirror.service` and emits an error event when an update run fails. Both read
+`AXIOM_INGEST_TOKEN` / `AXIOM_DATASET` (optional `AXIOM_URL`) from `scan/.env.scan`
+(see `scan/.env.scan.example`); until those are set, alerting is a no-op.
+
+```bash
+for u in ct-mirror.service ct-mirror-heartbeat.service ct-mirror-heartbeat.timer \
+         ct-mirror-alert.service; do
+  ln -sf ~/gen0sec/redteam/scan/deploy/$u ~/.config/systemd/user/$u
+done
+systemctl --user daemon-reload      # required: ct-mirror.service gained OnFailure=
+systemctl --user enable --now ct-mirror-heartbeat.timer
+```
+
 The flow end to end:
 
 ```

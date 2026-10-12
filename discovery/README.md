@@ -217,8 +217,8 @@ npm run ct-mirror -- query --suffix nisz.hu
 npm run ct-mirror -- query --since "$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
-Systemd wiring — 30-min timer inside the `scanvpn` netns, unit files live
-in `../scan/deploy/`:
+Systemd wiring — 30-min timer on the host network (public CT logs need no VPN
+egress), unit files live in `../scan/deploy/`:
 
 ```
 ln -sfv $PWD/../scan/deploy/ct-mirror.service ~/.config/systemd/user/
