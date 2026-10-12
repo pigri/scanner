@@ -9,6 +9,9 @@
 //   init <label> <log-url>            Register a shard; baseline = current STH
 //   update                            Pull delta for every shard, filter, enqueue
 //   shards                            List configured shards + progress
+//   status                            Print per-shard lag vs live log head (JSON)
+//   heartbeat                         Emit per-shard ct_status events to Axiom
+//   emit-failure                      Emit one error ct_status event (OnFailure=)
 //   query [--suffix s]                Query the local mirror
 //   dedupe-scan                       (No-op stub; ct_names UNIQUE handles it)
 //
@@ -18,17 +21,20 @@
 //   SCOPE_TXT      path to scope.txt           (default: ../scan/scope.txt)
 //   SCRAPE_BIN     scrape-ct-log binary        (default: scrape-ct-log on PATH)
 //   CT_MAX_ENTRIES     cap per-shard per-update  (default: 500000; safety net)
+//   AXIOM_INGEST_TOKEN / AXIOM_DATASET / AXIOM_URL   Axiom emission (see lib/axiom.ts;
+//                      unset token or dataset -> emission is skipped)
 //   CT_CHUNK_ENTRIES   scrape-ct-log call size    (default: 20000; keeps the
 //                      intermediate JSON file under Node's ~512MB string limit)
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import Database from 'better-sqlite3';
 import {
   parseEntry, scopedMatches, normaliseSuffix,
   type ScrapeEnvelope,
 } from './lib/ct-mirror.js';
+import { ingestFromEnv, type AxiomEvent } from './lib/axiom.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -125,6 +131,98 @@ interface ShardRow {
   updated_at: string;
 }
 
+export interface ShardStatus {
+  label: string;
+  last_entry_id: number;
+  tree_size: number;
+  lag: number;
+  updated_at: string;
+}
+
+// Pure: how far a shard's cursor is behind the log head. The cursor can exceed
+// a momentarily-stale tree head, so lag is clamped at 0.
+export function shardStatus(row: ShardRow, treeSize: number): ShardStatus {
+  return {
+    label: row.label,
+    last_entry_id: row.last_entry_id,
+    tree_size: treeSize,
+    lag: Math.max(0, treeSize - row.last_entry_id),
+    updated_at: row.updated_at,
+  };
+}
+
+// Pure: one ct_status event per shard status.
+export function buildStatusEvents(
+  runType: 'update' | 'heartbeat',
+  statuses: readonly ShardStatus[],
+  time: string = new Date().toISOString(),
+): AxiomEvent[] {
+  return statuses.map((s) => ({
+    _time: time, event: 'ct_status', run_type: runType,
+    shard: s.label, last_entry_id: s.last_entry_id, tree_size: s.tree_size, lag: s.lag,
+    result: 'ok',
+  }));
+}
+
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+// Never throws: emission must not fail the caller.
+async function emit(events: AxiomEvent[]): Promise<void> {
+  try {
+    await ingestFromEnv(events);
+  } catch (err) {
+    console.error(`warn: ct_status emission failed: ${errMsg(err)}`);
+  }
+}
+
+// Read-only: current status for every shard, fetching the live STH for each.
+// A shard whose STH fetch fails is reported with an error instead of a status.
+function collectStatuses(): { statuses: ShardStatus[]; errors: { label: string; error: string; last_entry_id: number }[] } {
+  const db = openCtDb();
+  try {
+    const rows = db.prepare('SELECT * FROM ct_shards ORDER BY label').all() as ShardRow[];
+    const statuses: ShardStatus[] = [];
+    const errors: { label: string; error: string; last_entry_id: number }[] = [];
+    for (const r of rows) {
+      try {
+        statuses.push(shardStatus(r, fetchSth(r.log_url).tree_size));
+      } catch (err) {
+        errors.push({ label: r.label, error: errMsg(err), last_entry_id: r.last_entry_id });
+      }
+    }
+    return { statuses, errors };
+  } finally {
+    db.close();
+  }
+}
+
+function statusCmd(): void {
+  const { statuses, errors } = collectStatuses();
+  console.log(JSON.stringify({ generated_at: new Date().toISOString(), shards: statuses, errors }, null, 2));
+}
+
+async function heartbeatCmd(): Promise<void> {
+  const { statuses, errors } = collectStatuses();
+  const now = new Date().toISOString();
+  const events = buildStatusEvents('heartbeat', statuses, now);
+  for (const e of errors) {
+    events.push({
+      _time: now, event: 'ct_status', run_type: 'heartbeat', shard: e.label,
+      last_entry_id: e.last_entry_id, result: 'error', error: e.error,
+    });
+  }
+  await emit(events);
+}
+
+async function emitFailureCmd(): Promise<void> {
+  await emit([{
+    _time: new Date().toISOString(), event: 'ct_status', run_type: 'update',
+    result: 'error', error: 'unit failed; see journal',
+  }]);
+}
+
 function initCmd(label: string, logUrl: string): void {
   const db = openCtDb();
   const sth = fetchSth(logUrl);
@@ -177,6 +275,7 @@ interface UpdateStats {
   newHostsForScan: number;
   newDomainsAdded: number;
   newLastEntryId: number;
+  treeSize: number;
 }
 
 // Atomically union `hosts` into the newline-separated file at `filePath`,
@@ -221,9 +320,10 @@ function updateShardOnce(
   const stats: UpdateStats = {
     shard: shard.label, fetched: 0, parsed: 0, parseFailures: 0,
     scopeMatched: 0, newHostsForScan: 0, newDomainsAdded: 0,
-    newLastEntryId: shard.last_entry_id,
+    newLastEntryId: shard.last_entry_id, treeSize: 0,
   };
   const sth = fetchSth(shard.log_url);
+  stats.treeSize = sth.tree_size;
   const startCursor = shard.last_entry_id + 1;
   const totalAvailable = sth.tree_size - startCursor;
   if (totalAvailable <= 0) return stats;
@@ -341,7 +441,7 @@ function updateShardOnce(
   return stats;
 }
 
-function updateCmd(): void {
+async function updateCmd(): Promise<void> {
   const db = openCtDb();
   const scanDb = openScanDb();
   const suffixes = loadScopeSuffixes();
@@ -355,6 +455,7 @@ function updateCmd(): void {
     process.exit(1);
   }
   console.error(`scope: ${suffixes.length} suffix(es); shards: ${shards.length}; max per shard: ${maxPerShard}; chunk: ${chunkSize}`);
+  const events: AxiomEvent[] = [];
   for (const s of shards) {
     try {
       const stats = updateShardOnce(db, scanDb, s, suffixes, maxPerShard, chunkSize);
@@ -363,12 +464,22 @@ function updateCmd(): void {
         `scope-matched=${stats.scopeMatched} enqueued=${stats.newHostsForScan} ` +
         `domains+=${stats.newDomainsAdded} → last_entry=${stats.newLastEntryId}`,
       );
+      const st = shardStatus({ ...s, last_entry_id: stats.newLastEntryId }, stats.treeSize);
+      events.push({
+        ...buildStatusEvents('update', [st])[0]!, entries_fetched: stats.fetched,
+      });
     } catch (err) {
-      console.error(`  ${s.label}: FAILED — ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`  ${s.label}: FAILED — ${errMsg(err)}`);
+      events.push({
+        _time: new Date().toISOString(), event: 'ct_status', run_type: 'update',
+        shard: s.label, last_entry_id: s.last_entry_id, entries_fetched: 0,
+        result: 'error', error: errMsg(err),
+      });
     }
   }
   db.close();
   scanDb?.close();
+  await emit(events);
 }
 
 function queryCmd(argv: string[]): void {
@@ -410,6 +521,9 @@ Commands:
   init <label> <log-url>   Register a shard; baseline = current tree_size
   update                   Pull delta for every shard; parse, filter, enqueue
   shards                   List configured shards + progress
+  status                   Print per-shard lag vs live log head (JSON)
+  heartbeat                Emit per-shard ct_status events to Axiom (no cursor change)
+  emit-failure             Emit one error ct_status event (for systemd OnFailure=)
   query [--suffix s] [--since iso]
                            Query the local name history
 
@@ -419,6 +533,8 @@ Environment:
   SCOPE_TXT       scope.txt path (default: ../scan/scope.txt)
   SCRAPE_BIN      scrape-ct-log binary (default: on PATH)
   CT_MAX_ENTRIES  per-shard per-update cap (default: 500000)
+  AXIOM_INGEST_TOKEN, AXIOM_DATASET, AXIOM_URL
+                  Axiom emission; unset token/dataset skips it (default URL: https://api.axiom.co)
 
 Examples:
   # Seed one Google Argon 2026h1 shard, then run a first update:
@@ -433,7 +549,7 @@ Examples:
 `);
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const cmd = argv[0];
   if (!cmd || cmd === '-h' || cmd === '--help') { usage(); process.exit(cmd ? 0 : 1); }
@@ -442,11 +558,17 @@ function main(): void {
     if (rest.length < 2) { console.error('usage: ct-mirror init <label> <log-url>'); process.exit(1); }
     initCmd(rest[0]!, rest[1]!);
   } else if (cmd === 'update') {
-    updateCmd();
+    await updateCmd();
   } else if (cmd === 'shards') {
     shardsCmd();
   } else if (cmd === 'query') {
     queryCmd(rest);
+  } else if (cmd === 'status') {
+    statusCmd();
+  } else if (cmd === 'heartbeat') {
+    await heartbeatCmd();
+  } else if (cmd === 'emit-failure') {
+    await emitFailureCmd();
   } else {
     console.error(`unknown command: ${cmd}\n`);
     usage();
@@ -454,4 +576,11 @@ function main(): void {
   }
 }
 
-main();
+// Only run when executed directly, so tests can import the pure helpers.
+const entry = process.argv[1];
+if (entry && import.meta.url === pathToFileURL(fs.realpathSync(entry)).href) {
+  main().catch((err) => {
+    console.error(`FATAL: ${errMsg(err)}`);
+    process.exit(1);
+  });
+}
