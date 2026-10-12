@@ -23,9 +23,10 @@ WorkingDirectory=/home/pigri/gen0sec/redteam/discovery
 # 20k-entry chunks and checkpoints after each, so a longer run resumes safely and
 # intermediate files stay small. A run may exceed the 30min timer window, but
 # systemd never runs two instances of this (non-templated) service, so a trigger
-# that lands mid-run is merged, not stacked — no overlap. (OnUnitActiveSec is
-# start-relative, so after a long run the next fire is back-to-back rather than a
-# 30min idle gap — fine for catch-up.) Safe to leave high at steady state: far
+# that lands mid-run is merged, not stacked — no overlap. (The OnCalendar timer
+# ticks at :00/:30; a tick during a long run is dropped, and the next fire is the
+# following half-hour tick — a <=30min gap, not a +30min-from-start gap — so
+# catch-up runs stay effectively back-to-back.) Safe to leave high at steady state: far
 # fewer than 5M certs append per interval, so it just fetches whatever is new.
 Environment=CT_MAX_ENTRIES=5000000
 # nvm must be sourced explicitly under systemd's clean environment.

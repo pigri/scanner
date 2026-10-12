@@ -2,11 +2,13 @@
 Description=gen0sec CT-mirror poll (every 30 min)
 
 [Timer]
-# CT logs typically batch-append every few minutes; 30-min cadence keeps the
-# mirror fresh without hammering the log servers. Persistent=true catches up
-# after downtime.
-OnBootSec=5min
-OnUnitActiveSec=30min
+# CT logs typically batch-append every few minutes; a 30-min cadence keeps the
+# mirror fresh without hammering the log servers. OnCalendar (wall-clock, fires
+# at :00 and :30) rather than OnUnitActiveSec: a monotonic OnUnitActiveSec timer
+# loses its anchor on a user-manager restart and silently stops firing, whereas a
+# calendar timer always recomputes its next elapse. Persistent=true catches up a
+# run missed while the box was off.
+OnCalendar=*:00/30
 Persistent=true
 RandomizedDelaySec=180
 
