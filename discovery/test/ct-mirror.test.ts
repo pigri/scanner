@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { X509Certificate, createHash, generateKeyPairSync, createSign } from 'node:crypto';
 import {
   extractCn,
@@ -10,6 +10,8 @@ import {
   parseEntry,
   type ParsedEntry,
 } from '../src/lib/ct-mirror.js';
+import { ingest, ingestFromEnv } from '../src/lib/axiom.js';
+import { shardStatus, buildStatusEvents } from '../src/ct-mirror.js';
 
 // Minimal helper: generate a self-signed cert with the given CN + SAN dnsNames.
 // Uses node's built-in KeyObject.export('spki'/'pkcs8') + a hand-rolled X.509
@@ -148,5 +150,98 @@ describe('scopedMatches (integration on ParsedEntry)', () => {
       dnsNames: ['example.com', 'unrelated.net'],
     };
     expect(scopedMatches(parsed, suffixes)).toEqual([]);
+  });
+});
+
+describe('shardStatus', () => {
+  const row = {
+    label: 'argon2026h1', log_url: 'https://ct.example/log/',
+    baseline_tree_size: 100, last_entry_id: 900, updated_at: '2026-01-01T00:00:00.000Z',
+  };
+  it('computes lag as tree_size - last_entry_id', () => {
+    expect(shardStatus(row, 1000)).toEqual({
+      label: 'argon2026h1', last_entry_id: 900, tree_size: 1000, lag: 100,
+      updated_at: '2026-01-01T00:00:00.000Z',
+    });
+  });
+  it('clamps negative lag to 0 when the cursor exceeds a stale tree head', () => {
+    expect(shardStatus(row, 850).lag).toBe(0);
+  });
+});
+
+describe('buildStatusEvents (heartbeat)', () => {
+  it('builds one ct_status event per shard with run_type heartbeat', () => {
+    const evs = buildStatusEvents('heartbeat', [
+      { label: 'a', last_entry_id: 5, tree_size: 15, lag: 10, updated_at: 'u' },
+      { label: 'b', last_entry_id: 20, tree_size: 10, lag: 0, updated_at: 'u' },
+    ], '2026-01-01T00:00:00.000Z');
+    expect(evs).toHaveLength(2);
+    expect(evs[0]).toMatchObject({
+      _time: '2026-01-01T00:00:00.000Z', event: 'ct_status', run_type: 'heartbeat',
+      shard: 'a', last_entry_id: 5, tree_size: 15, lag: 10, result: 'ok',
+    });
+    expect(evs[1]).toMatchObject({ shard: 'b', lag: 0 });
+  });
+});
+
+describe('axiom ingest', () => {
+  afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+
+  it('POSTs a JSON array with bearer auth and defaults _time', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+    await ingest([{ event: 'ct_status', shard: 'a' }, { event: 'x', _time: 'T' }],
+      { dataset: 'ds', token: 'tok', url: 'https://axiom.test/' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe('https://axiom.test/v1/datasets/ds/ingest');
+    expect(init.method).toBe('POST');
+    expect(init.headers.Authorization).toBe('Bearer tok');
+    expect(init.headers['Content-Type']).toBe('application/json');
+    const body = JSON.parse(init.body);
+    expect(Array.isArray(body)).toBe(true);
+    expect(body[0].shard).toBe('a');
+    expect(typeof body[0]._time).toBe('string');
+    expect(body[1]._time).toBe('T');
+  });
+
+  it('uses https://api.axiom.co when url is omitted', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+    await ingest([{ a: 1 }], { dataset: 'ds', token: 't' });
+    expect(fetchMock.mock.calls[0]![0]).toBe('https://api.axiom.co/v1/datasets/ds/ingest');
+  });
+
+  it('does not throw on a non-2xx response', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 500 }));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(ingest([{ a: 1 }], { dataset: 'ds', token: 't' })).resolves.toBeUndefined();
+  });
+
+  it('does not throw when fetch rejects', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('boom')));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(ingest([{ a: 1 }], { dataset: 'ds', token: 't' })).resolves.toBeUndefined();
+  });
+
+  it('is a no-op (with a warning) when env is unset', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubEnv('AXIOM_INGEST_TOKEN', '');
+    vi.stubEnv('AXIOM_DATASET', '');
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(ingestFromEnv([{ a: 1 }])).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('ingestFromEnv honours AXIOM_URL', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubEnv('AXIOM_INGEST_TOKEN', 'tok');
+    vi.stubEnv('AXIOM_DATASET', 'ds');
+    vi.stubEnv('AXIOM_URL', 'https://axiom.test');
+    await ingestFromEnv([{ a: 1 }]);
+    expect(fetchMock.mock.calls[0]![0]).toBe('https://axiom.test/v1/datasets/ds/ingest');
   });
 });
