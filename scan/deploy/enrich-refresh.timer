@@ -2,12 +2,14 @@
 Description=gen0sec discovery enrich-refresh (every 30 min, offset from ct-mirror)
 
 [Timer]
-# ct-mirror fires 5min after boot then every 30min; enrich-refresh starts
-# 20min after boot and runs on the same 30min cadence, giving the ct-mirror
-# pass ~15 min to flush new hosts into domains.txt before we enrich them.
-# Persistent=true catches up after downtime.
-OnBootSec=20min
-OnUnitActiveSec=30min
+# ct-mirror fires at :00/:30; enrich-refresh fires at :15/:45, giving the
+# ct-mirror pass ~15 min to flush new hosts into domains.txt before we enrich
+# them. OnCalendar (wall-clock) rather than OnUnitActiveSec: a monotonic
+# OnUnitActiveSec timer loses its anchor on a user-manager restart and silently
+# stops firing; a calendar timer always recomputes its next elapse.
+# Persistent=true catches up a run missed while the box was off. The 120s jitter
+# is far smaller than the 15-min offset, so the ordering after ct-mirror holds.
+OnCalendar=*:15/30
 Persistent=true
 RandomizedDelaySec=120
 
