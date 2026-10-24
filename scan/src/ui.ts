@@ -15,6 +15,7 @@ import { resolveDbArg } from './lib/db-arg.js';
 import { filterAndFacet } from './lib/target-filter.js';
 import { CERT_ORG_SQL } from './lib/cert-org.js';
 import { TARGET_AGG_SQL } from './lib/target-agg.js';
+import { NEWS_FIRSTS_SQL } from './lib/news-sql.js';
 
 interface Opts {
   scanDb: string;
@@ -896,8 +897,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
       args.push(`%${search}%`, `%${search}%`, `%${search}%`);
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-    const firsts = `SELECT target, tool, severity, category, title, cve, MIN(seen_at) first_seen
-                    FROM findings GROUP BY target, tool, severity, category, title`;
+    const firsts = NEWS_FIRSTS_SQL;
     const rows = scan
       .prepare(
         `SELECT * FROM (${firsts}) ${where}
