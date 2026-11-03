@@ -535,7 +535,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
     const certs = tableExists(scan, 'certificates')
       ? scan
           .prepare(
-            `SELECT common_name, san_json, issuer, not_after, key_algo, key_size, self_signed
+            `SELECT common_name, organization, org_unit, locality, country, san_json, issuer, not_after, key_algo, key_size, self_signed
              FROM certificates WHERE target=? ORDER BY not_after`,
           )
           .all(t)
@@ -1528,7 +1528,11 @@ async function renderTarget(t){
   if(d.cves.length)panels.push(el('div',{class:'panel'},el('h2',{},'CVEs ('+d.cves.length+')'),
     table(['CVE','Sev','CVSS','Tools','Exploit'],d.cves.map(c=>[cveLink(c.cve_id),sevPill(c.severity),String(esc(c.cvss)),esc(c.tools),c.exploit?el('span',{class:'pill sev-critical'},'yes'):''],),[2])));
   if(d.certs.length)panels.push(el('div',{class:'panel'},el('h2',{},'Certificates ('+d.certs.length+')'),
-    table(['CN','Issuer','Expires','Key','SelfSigned'],d.certs.map(c=>[esc(c.common_name),esc(c.issuer),esc(c.not_after),esc(c.key_algo)+' '+esc(c.key_size),c.self_signed?'yes':'']))));
+    table(['CN','Organization','Location','Issuer','Expires','Key','SelfSigned'],d.certs.map(c=>[
+      esc(c.common_name),
+      esc([c.organization,c.org_unit].filter(Boolean).join(' / ')),
+      esc([c.locality,c.country].filter(Boolean).join(', ')),
+      esc(c.issuer),esc(c.not_after),esc(c.key_algo)+' '+esc(c.key_size),c.self_signed?'yes':'']))));
   if(d.dns.length)panels.push(el('div',{class:'panel'},el('h2',{},'DNS ('+d.dns.length+')'),
     table(['Type','Value','TTL'],d.dns.map(r=>[esc(r.type),el('span',{class:'mono'},r.value),String(esc(r.ttl))]))));
   setView(...panels);

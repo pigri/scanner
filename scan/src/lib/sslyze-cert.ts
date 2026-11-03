@@ -63,9 +63,9 @@ function keyAlgo(algorithm: string | undefined): string | null {
   return (base || algorithm).toUpperCase();
 }
 
-function commonName(subject: SslyzeName | undefined): string | null {
+function subjectAttr(subject: SslyzeName | undefined, oidName: string): string | null {
   for (const a of subject?.attributes ?? []) {
-    if (a.oid?.name === 'commonName' && a.value) return a.value;
+    if (a.oid?.name === oidName && a.value) return a.value;
   }
   return null;
 }
@@ -93,7 +93,11 @@ export function toCertRecords(result: SslyzeCertResult): CertInput[] {
         target,
         port,
         certIndex,
-        commonName: commonName(leaf.subject),
+        commonName: subjectAttr(leaf.subject, 'commonName'),
+        organization: subjectAttr(leaf.subject, 'organizationName'),
+        orgUnit: subjectAttr(leaf.subject, 'organizationalUnitName'),
+        locality: subjectAttr(leaf.subject, 'localityName'),
+        country: subjectAttr(leaf.subject, 'countryName'),
         san,
         issuer: issuerDn,
         notBefore: leaf.not_valid_before ?? null,
