@@ -357,12 +357,13 @@ Runs `nuclei -tags takeover -rate-limit 100`. Cheap subdomain-takeover check. Fi
 ```
 npm run scan-all -- --targets hosts.txt --scope scope.txt --sqlite scan.db
 ```
-Orchestrates the full pipeline in order: **httpx → nmap → nuclei → takeover → testssl → wpscan (only WordPress hosts from httpx) → gowitness.**
+Orchestrates the full pipeline in order: **httpx → nmap → nuclei → takeover → testssl → wpscan (only WordPress hosts from httpx) → gowitness.** After stage 2 (httpx and port scans populated) and before the stage-3 `cve-rollup`, `version-match` compares detected service/product versions against the offline NVD mirror (`/storage/gen0sec-scan/nvd.db`) and writes `tool='version-match'` CVE findings; a missing mirror is a no-op. The mirror is refreshed nightly (01:30) by the `nvd-sync.timer` unit (see `deploy/README.md`); `npm run nvd-sync` and `npm run version-match` run them by hand.
 
 Skip stages with `SKIP=<name,name>`:
 ```
 SKIP=wpscan,testssl npm run scan-all -- ...
 ```
+`SKIP=version-match` turns the version-to-CVE matching off.
 
 `--sqlite` flows down to every stage automatically.
 
