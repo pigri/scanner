@@ -1355,7 +1355,7 @@ async function renderOverview(){
   const bar=el('div',{class:'sevbar'});
   for(const s of SEV){const w=(d.severity[s]||0)/totalSev*100;if(w>0)bar.append(el('span',{style:'width:'+w+'%;background:'+SEVCOL[s],title:s+': '+d.severity[s]}));}
   const sevRows=el('div',{class:'toolbar'});
-  for(const s of SEV)sevRows.append(el('div',{},sevPill(s),' ',el('b',{},num(d.severity[s]||0))));
+  for(const s of SEV)sevRows.append(el('div',{title:num(d.severity[s]||0)+' '+s+' findings'},sevPill(s),' ',el('b',{},num(d.severity[s]||0))));
   const sevPanel=el('div',{class:'panel'},el('h2',{},'Findings by severity'),sevRows,bar);
   // exploitable panel (CVEs with a known exploit)
   let exploitPanel='';
@@ -1411,10 +1411,11 @@ let tState={...T_DEFAULT};
 async function renderTargets(){
   const d=await api('targets',{q:tState.q,severity:tState.severities.join(','),cve:tState.cve,org:tState.org,minScore:tState.minScore,maxScore:tState.maxScore,sort:tState.sort,offset:tState.offset,limit:tState.limit});
   // severity facet chips — targets having ≥1 finding of that severity
-  const sevChips=el('div',{class:'toolbar'},el('span',{class:'muted'},'has severity:'),...SEV.map(s=>{
+  const sevChips=el('div',{class:'toolbar'},el('span',{class:'muted'},'hosts with:'),...SEV.map(s=>{
     const on=tState.severities.includes(s);
-    return el('a',{class:'daychip'+(on?' on':''),onclick:()=>{tState.severities=on?tState.severities.filter(x=>x!==s):[...tState.severities,s];tState.offset=0;renderTargets();}},
-      el('span',{class:'gdot',style:'background:'+SEVCOL[s]}),' '+s+' ('+num(d.sevCounts?d.sevCounts[s]||0:0)+')');
+    const c=d.sevCounts?d.sevCounts[s]||0:0;
+    return el('a',{class:'daychip'+(on?' on':''),title:num(c)+(c===1?' host':' hosts')+' with a '+s+' finding',onclick:()=>{tState.severities=on?tState.severities.filter(x=>x!==s):[...tState.severities,s];tState.offset=0;renderTargets();}},
+      el('span',{class:'gdot',style:'background:'+SEVCOL[s]}),' '+s+' ('+num(c)+')');
   }),el('span',{class:'muted'},num(d.total)+' targets'));
   const cveSel=fsel(tState.cve,[{value:'',label:'CVE: any'},{value:'1',label:'has CVE'},{value:'0',label:'no CVE'}],v=>{tState.cve=v;tState.offset=0;renderTargets();});
   const orgSel=fsel(tState.org,[{value:'',label:'org: any'},...(d.orgs||[]).map(o=>({value:o.org,label:o.org+' ('+num(o.c)+')'}))],v=>{tState.org=v;tState.offset=0;renderTargets();});
