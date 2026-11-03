@@ -45,9 +45,10 @@ Dependency graph:
                         sslyze (modern TLS audit: Heartbleed/ROBOT/CCS/SSLv3/TLS1.x),
                         cve-rollup (aggregate findings.cve → cves table),
                         cname-takeover (dangling-CNAME check vs 29 providers),
-                        data-integrity (self-heal report_queue + cve rollup drift),
                         enum4linux-ng + smbmap + rpcclient (--live-only, gated on
                         nmap-detected port 445/139)
+  Tail (sequential):    data-integrity (self-heal report_queue + cve rollup drift;
+                        runs after all of Stage 3 has finished)
 
 Each stage inherits --scope / --strict / --targets / --sqlite.
 
@@ -195,9 +196,6 @@ Env vars:
     const cta: string[] = ['tsx', 'src/cname-takeover.ts', ...common, '--', '--all'];
     stage3.push(['cname-takeover', cta]);
   }
-  // data-integrity — self-heal (report_queue orphans + cve rollup drift).
-  // Runs last so it observes the batch's completed state.
-  if (runOne('data-integrity')) stage3.push(['data-integrity', ['tsx', 'src/data-integrity.ts', '--sqlite', opts.sqlite ?? 'scan.db']]);
 
   // SMB layer — each wrapper uses --live-only to filter to hosts the ports table
   // has seen listening on 445/139. If nmap surfaced no SMB in the current batch's
@@ -221,6 +219,14 @@ Env vars:
     } else {
       await Promise.all(stage3.map(([name, args]) => step(name, tsx, args)));
     }
+  }
+
+  // data-integrity — self-heal (report_queue orphans + cve rollup drift).
+  // Sequential tail after stage 3 so it observes the batch's completed state,
+  // including cve-rollup's output.
+  if (runOne('data-integrity')) {
+    console.error('\n>>> TAIL: data-integrity');
+    await step('data-integrity', tsx, ['tsx', 'src/data-integrity.ts', '--sqlite', opts.sqlite ?? 'scan.db']);
   }
 
   const totalDt = ((Date.now() - pipelineStart) / 1000).toFixed(1);
