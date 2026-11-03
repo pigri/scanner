@@ -81,6 +81,15 @@ CREATE INDEX IF NOT EXISTS idx_findings_target   ON findings(target);
 CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings(severity);
 CREATE INDEX IF NOT EXISTS idx_findings_cve      ON findings(cve);
 CREATE INDEX IF NOT EXISTS idx_findings_seen     ON findings(seen_at);
+-- Covering index for the UI's News aggregation (GROUP BY the logical-finding key
+-- target/tool/severity/category/title, MIN(seen_at)). The five group keys come
+-- first so groups are contiguous, then seen_at so MIN is the first row of each
+-- group, then cve (the only other selected column) so the index fully covers the
+-- query. Serves the whole grouped scan in index order — no temp B-tree, no table
+-- reads — turning an ~8 s cold full-scan into sub-200 ms. Same rationale as
+-- idx_risk_target_ca_score below.
+CREATE INDEX IF NOT EXISTS idx_findings_logical
+  ON findings(target, tool, severity, category, title, seen_at, cve);
 -- idx_findings_review (partial index on needs_review = 1) is created inside
 -- openDb() so it can follow the ALTER-TABLE migration on legacy DBs that
 -- predate the column. Do NOT reference needs_review here — schema.sql runs
