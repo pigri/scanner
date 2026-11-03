@@ -127,6 +127,19 @@ describe('queryCertspotter', () => {
       }),
     ).rejects.toThrow(/429/);
   });
+
+  it('with maxRetries 0 (no token) makes exactly one attempt and does not back off', async () => {
+    let n = 0;
+    const slept: number[] = [];
+    const fetchImpl: FetchImpl = async () => { n++; return resp(429, ''); };
+    await expect(
+      queryCertspotter('%.gov.hu', {
+        timeoutMs: 1000, maxRetries: 0, fetchImpl, sleep: async (ms) => { slept.push(ms); },
+      }),
+    ).rejects.toThrow(/429/);
+    expect(n).toBe(1);
+    expect(slept).toEqual([]);
+  });
 });
 
 describe('queryAll', () => {

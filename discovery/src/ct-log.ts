@@ -64,7 +64,9 @@ Options:
 
 Environment:
   CERTSPOTTER_TOKEN      Certspotter API token for higher rate limits (sent as
-                         'Authorization: Bearer'); anonymous queries are 429'd.
+                         'Authorization: Bearer'). Without one, certspotter is
+                         tried once with no backoff (retrying an anonymous 429
+                         only wastes time); a token enables retries.
   CT_CRTSH_DISABLED=1    Skip crt.sh (escape hatch if it starts 502ing again).
 
 Examples:
@@ -97,6 +99,9 @@ async function main(): Promise<void> {
       timeoutMs: opts.timeoutMs,
       crtshEnabled,
       token,
+      // Anonymous certspotter 429s are a steady-state limit; retrying wastes
+      // time per parent. Only retry when a token lifts that limit.
+      certspotterMaxRetries: token ? undefined : 0,
       log,
     });
     let kept = 0, newHosts = 0;

@@ -148,6 +148,13 @@ export async function queryAll(
     timeoutMs: number;
     crtshEnabled: boolean;
     token?: string | undefined;
+    /**
+     * Retry budget for certspotter. Retrying only helps with a token: an
+     * anonymous 429 is a steady-state rate limit that will not clear within a
+     * run, so backing off just wastes wall-clock (× every parent). ct-log
+     * passes 0 when no token is set.
+     */
+    certspotterMaxRetries?: number | undefined;
     log?: ((s: string) => void) | undefined;
     deps?: Partial<CtDeps> | undefined;
   },
@@ -156,7 +163,8 @@ export async function queryAll(
   const crtsh = opts.deps?.crtsh ?? ((p: string, t: number) => queryCrtSh(p, { timeoutMs: t }));
   const certspotter =
     opts.deps?.certspotter ??
-    ((p: string, t: number) => queryCertspotter(p, { timeoutMs: t, token: opts.token }));
+    ((p: string, t: number) =>
+      queryCertspotter(p, { timeoutMs: t, token: opts.token, maxRetries: opts.certspotterMaxRetries }));
 
   const all = new Set<string>();
   const attempt = async (name: string, fn: () => Promise<string[]>) => {
