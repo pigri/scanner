@@ -16,6 +16,7 @@ interface Opts {
   fromFile: string | null;
   args: string[];
   skipScanned: boolean;
+  includeArchived: boolean;
   reset: boolean;
   requeue: boolean;
   liveOnly: boolean;
@@ -23,8 +24,8 @@ interface Opts {
   help?: boolean;
 }
 
-function parseArgs(argv: string[]): Opts {
-  const opts: Opts = { db: resolveDbArg(argv), fromRisk: null, fromFile: null, args: [], skipScanned: true, reset: false, requeue: false, liveOnly: false, logFile: null };
+export function parseArgs(argv: string[]): Opts {
+  const opts: Opts = { db: resolveDbArg(argv), fromRisk: null, fromFile: null, args: [], skipScanned: true, includeArchived: false, reset: false, requeue: false, liveOnly: false, logFile: null };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i]!;
     const next = () => argv[++i]!;
@@ -35,11 +36,19 @@ function parseArgs(argv: string[]): Opts {
     else if (a === '--from-risk') opts.fromRisk = parseInt(next(), 10);
     else if (a === '--from-file') opts.fromFile = next();
     else if (a === '--include-scanned') opts.skipScanned = false;
+    else if (a === '--include-archived') opts.includeArchived = true;
     else if (a === '--reset') opts.reset = true;
     else if (a === '-h' || a === '--help') opts.help = true;
     else opts.args.push(a);
   }
   return opts;
+}
+
+// Scanned hosts are skipped unless --include-scanned/--requeue; archived hosts
+// unless --include-archived.
+export function shouldSkip(target: string, opts: Opts, scanned: ReadonlySet<string>, archived: ReadonlySet<string>): boolean {
+  if (opts.skipScanned && scanned.has(target)) return true;
+  return !opts.includeArchived && archived.has(target);
 }
 
 function usage(): void {
@@ -62,6 +71,9 @@ Options:
   --requeue                re-queue targets even if already present: reset their
                            status to pending (implies --include-scanned). Used by
                            the weekly full re-scan to re-check known hosts.
+  --include-archived       include hosts archived for non-resolving DNS
+                           (default: skip them). The weekly re-scan sets it so
+                           a host that resolves again is picked up.
   --reset                  wipe the queue before enqueuing (dangerous)
   positional args          add these targets with priority 0
 
@@ -104,6 +116,8 @@ async function main(): Promise<void> {
       )
     : new Set<string>();
 
+  const archivedSet = opts.includeArchived ? new Set<string>() : db.archivedTargets();
+
   const entries: QueueEntry[] = [];
 
   if (opts.fromRisk) {
@@ -115,7 +129,7 @@ async function main(): Promise<void> {
       LIMIT ?
     `).all(opts.fromRisk) as { target: string; score: number }[];
     for (const r of rows) {
-      if (!opts.skipScanned || !scannedSet.has(r.target)) {
+      if (!shouldSkip(r.target, opts, scannedSet, archivedSet)) {
         entries.push({ target: r.target, priority: r.score });
       }
     }
@@ -127,14 +141,14 @@ async function main(): Promise<void> {
     const N = lines.length;
     for (let i = 0; i < lines.length; i++) {
       const t = lines[i]!;
-      if (opts.skipScanned && scannedSet.has(t)) continue;
+      if (shouldSkip(t, opts, scannedSet, archivedSet)) continue;
       entries.push({ target: t, priority: N - i });
     }
     log.info(`--from-file ${opts.fromFile}: ${lines.length} lines → ${entries.length} to enqueue`);
   }
 
   for (const t of opts.args) {
-    if (opts.skipScanned && scannedSet.has(t)) continue;
+    if (shouldSkip(t, opts, scannedSet, archivedSet)) continue;
     entries.push({ target: t, priority: 0 });
   }
 
@@ -170,4 +184,6 @@ async function main(): Promise<void> {
   log.close();
 }
 
-main().catch((err: unknown) => { console.error('FATAL:', err instanceof Error ? err.message : String(err)); process.exit(1); });
+if (process.argv[1] && process.argv[1].endsWith('enqueue.ts')) {
+  main().catch((err: unknown) => { console.error('FATAL:', err instanceof Error ? err.message : String(err)); process.exit(1); });
+}

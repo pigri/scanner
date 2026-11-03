@@ -152,3 +152,47 @@ describe('certificates subject columns', () => {
   });
 });
 
+
+describe('host_state', () => {
+  const T1 = '2026-11-01T00:00:00Z';
+  const T2 = '2026-11-02T00:00:00Z';
+
+  it('creates the host_state table', () => {
+    const tables = db.raw.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r: any) => r.name);
+    expect(tables).toContain('host_state');
+  });
+
+  it('archives non-resolvers and keeps resolvers active', () => {
+    db.applyHostResolution(['up.example', 'dead.example'], new Set(['up.example']), T1, 1);
+    const rows = db.hostStates();
+    expect(rows.find((r) => r.target === 'up.example')).toMatchObject({ active: 1, reason: null });
+    expect(rows.find((r) => r.target === 'dead.example')).toMatchObject({ active: 0, reason: 'dns', dns_fail_count: 1 });
+  });
+
+  it('archivedTargets round-trips', () => {
+    expect(db.archivedTargets().size).toBe(0);
+    db.applyHostResolution(['up.example', 'dead.example'], new Set(['up.example']), T1, 1);
+    expect([...db.archivedTargets()]).toEqual(['dead.example']);
+  });
+
+  it('un-archives a host that resolves on a later run', () => {
+    db.applyHostResolution(['dead.example'], new Set(), T1, 1);
+    expect(db.archivedTargets().has('dead.example')).toBe(true);
+    db.applyHostResolution(['dead.example'], new Set(['dead.example']), T2, 1);
+    expect(db.archivedTargets().has('dead.example')).toBe(false);
+    expect(db.hostStates()[0]).toMatchObject({ active: 1, dns_fail_count: 0, last_resolved: T2 });
+  });
+
+  it('accrues dns_fail_count across runs and honours the threshold', () => {
+    db.applyHostResolution(['flaky.example'], new Set(), T1, 2);
+    expect(db.archivedTargets().size).toBe(0);
+    expect(db.hostStates()[0]!.dns_fail_count).toBe(1);
+    db.applyHostResolution(['flaky.example'], new Set(), T2, 2);
+    expect(db.archivedTargets().has('flaky.example')).toBe(true);
+  });
+
+  it('is a no-op for an empty batch', () => {
+    db.applyHostResolution([], new Set(['x.example']), T1, 1);
+    expect(db.hostStates()).toEqual([]);
+  });
+});

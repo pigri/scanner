@@ -260,3 +260,17 @@ CREATE TABLE IF NOT EXISTS screenshots (
 );
 CREATE INDEX IF NOT EXISTS idx_shots_target ON screenshots(target);
 CREATE INDEX IF NOT EXISTS idx_shots_seen   ON screenshots(seen_at);
+
+-- Per-host archive state. A host whose DNS stops resolving is archived
+-- (active=0): hidden from default listings and skipped by enqueue.
+CREATE TABLE IF NOT EXISTS host_state (
+  target            TEXT PRIMARY KEY,
+  active            INTEGER NOT NULL DEFAULT 1,   -- 0 = archived
+  reason            TEXT,                         -- 'dns' when archived for non-resolution
+  dns_fail_count    INTEGER NOT NULL DEFAULT 0,
+  last_checked      TEXT,
+  last_resolved     TEXT,
+  first_archived_at TEXT,
+  updated_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_host_state_active ON host_state(active);

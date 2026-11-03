@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, writeLines, resolveOutputPath } from './lib/runner.js';
 import { openDb, type DnsRecordRow } from './lib/db.js';
+import { parseDnsxResolved, shouldApplyResolution, DNS_ARCHIVE_THRESHOLD } from './lib/host-state.js';
 
 // Fields dnsx emits per JSON row when queried with -all.
 interface DnsxRow {
@@ -89,7 +90,8 @@ Everything after '--' passes to dnsx verbatim.`));
       db.insertDnsRecord(row, now, runId);
       count++;
     };
-    for (const line of fs.readFileSync(outFile, 'utf8').split('\n')) {
+    const outText = fs.readFileSync(outFile, 'utf8');
+    for (const line of outText.split('\n')) {
       const t = line.trim();
       if (!t) continue;
       try {
@@ -110,6 +112,19 @@ Everything after '--' passes to dnsx verbatim.`));
           if (val) push(target, target, 'SOA', val, row.ttl);
         }
       } catch { /* ignore */ }
+    }
+    // Archive state comes from this run's answers only: dns_records keeps stale
+    // A rows for dead hosts. A failed or empty run proves nothing, so it must
+    // not archive the whole batch. dnsx emits a row only for a name that
+    // resolves, so a batch with no resolving host archives nothing. That is the
+    // deliberate safe direction: exit 0 with empty output cannot be told from a
+    // resolver outage by row count.
+    const { rows, resolved } = parseDnsxResolved(outText);
+    if (shouldApplyResolution(r.code, rows)) {
+      db.applyHostResolution(targets, resolved, now, DNS_ARCHIVE_THRESHOLD);
+    } else {
+      if (r.code === 0) console.error(`  host_state unchanged: ${targets.length} input hosts, dnsx returned 0 records (all-dead batch or empty output)`);
+      console.error(`  host_state: skipped (dnsx exit ${r.code}, ${rows} output rows)`);
     }
     db.finishRun(runId, { targetsCount: targets.length, findingsCount: count, at: new Date().toISOString() });
     db.close();
