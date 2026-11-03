@@ -6,9 +6,9 @@ Wants=network-online.target
 # host is enriched within one cycle. Runs in the MAIN namespace (not scanvpn):
 # recon DNS needs no VPN egress, and the netns's in-tunnel resolver is
 # flaky/rate-limited — resolving there is what ratcheted live hosts into
-# phantoms.txt. enrich defaults to the pinned public resolvers
-# (1.1.1.1 / 8.8.8.8 / 9.9.9.9), so this pass and the daily scan-feed pass now
-# agree on what resolves, regardless of tunnel state.
+# phantoms.txt. This matches the daily scan-feed pass, which already resolves
+# in the main namespace, so the two now agree on what resolves (they disagreed
+# while this ran in the netns). The resolver set itself is enrich's own default.
 
 [Service]
 Type=oneshot

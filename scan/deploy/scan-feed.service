@@ -9,11 +9,11 @@ Type=oneshot
 # 1) Refresh recon (CT logs + DNS brute + enrich) -> writes file outputs
 #    (domains.txt, enriched.{jsonl,csv}, brute-hosts.txt, phantoms.txt,
 #    refresh-summary.json). refresh.ts takes no --sqlite, so this does NOT
-#    update recon.db (a manual-only legacy store). Runs in the main namespace
-#    and enrich defaults to the pinned public resolvers (1.1.1.1 / 8.8.8.8 /
-#    9.9.9.9) — the same resolvers as the 30-min enrich-refresh pass, so the two
-#    now agree on what resolves (they used to disagree: this ran main-ns while
-#    enrich-refresh resolved inside the rate-limited scanvpn netns).
+#    update recon.db (a manual-only legacy store). Runs in the main namespace,
+#    as does the 30-min enrich-refresh pass, so the two now agree on what
+#    resolves (they used to disagree: this ran main-ns while enrich-refresh
+#    resolved inside the rate-limited scanvpn netns). The resolver set is
+#    enrich's own default.
 ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; cd %h/gen0sec/redteam/discovery && exec npx tsx src/refresh.ts --suffix gov.hu'
 # 2) Enqueue newly-discovered hosts. --live-only probes with httpx first and
 #    queues only hosts that answer (drops resolvable-but-dead dev/admin names);
