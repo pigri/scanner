@@ -77,6 +77,15 @@ export interface HostResolution {
 type Sleep = (ms: number) => Promise<void>;
 const realSleep: Sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Backoff delay with jitter. Deterministic lockstep retries would re-create
+ * the synchronised burst that overloads the resolver — the exact failure this
+ * module exists to prevent — so the delay is spread over a ±50% band.
+ */
+export function backoffDelay(attempt: number, baseMs: number, rng: () => number = Math.random): number {
+  return Math.round(baseMs * attempt * (0.5 + rng()));
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return Promise.race([
     promise,
@@ -93,7 +102,10 @@ async function resolveRecord(
   sleep: Sleep,
 ): Promise<{ records: string[]; error?: string }> {
   let last: (Error & { code?: string }) | null = null;
-  for (let attempt = 1; attempt <= opts.maxTries; attempt++) {
+  // Clamp: a maxTries below 1 would skip the loop entirely and report every
+  // host as failed with zero queries — a silent mass-eviction trap.
+  const tries = Math.max(1, Math.floor(opts.maxTries));
+  for (let attempt = 1; attempt <= tries; attempt++) {
     const r = pool.next();
     try {
       const recs = await withTimeout(
@@ -108,8 +120,8 @@ async function resolveRecord(
       if (!isRetryableDnsError(errObj)) {
         return { records: [], error: `${kind}:${errObj.code || errObj.message}` };
       }
-      if (attempt < opts.maxTries) {
-        await sleep((opts.backoffMs ?? 150) * attempt);
+      if (attempt < tries) {
+        await sleep(backoffDelay(attempt, opts.backoffMs ?? 150));
       }
     }
   }

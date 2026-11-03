@@ -59,7 +59,7 @@ function parseArgs(argv: string[]): Opts {
       const v = next();
       opts.resolvers = v === 'system' ? null : v.split(',').map((s) => s.trim()).filter(Boolean);
     }
-    else if (a === '--max-tries') opts.maxTries = parseInt(next(), 10);
+    else if (a === '--max-tries') opts.maxTries = Math.max(1, parseInt(next(), 10) || 1);
     else if (a === '--no-ipv6') opts.ipv6 = false;
     else if (a === '--no-ptr') opts.ptr = false;
     else if (a === '--refresh-mmdb') opts.refresh = true;

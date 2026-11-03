@@ -3,6 +3,7 @@ import {
   isRetryableDnsError,
   resolveHost,
   ResolverPool,
+  backoffDelay,
   DEFAULT_RESOLVERS,
   type ResolverLike,
 } from '../src/lib/resolve.js';
@@ -78,6 +79,32 @@ describe('resolveHost retry', () => {
     expect(out.a).toEqual([]);
     expect(calls()).toBe(3);
     expect(out.errors[0]).toMatch(/ETIMEOUT/);
+  });
+
+  it('clamps maxTries below 1 to a single attempt (never zero queries)', async () => {
+    const { resolver, calls } = stub([['1.2.3.4']]);
+    const out = await resolveHost(
+      'h.gov.hu',
+      { next: () => resolver },
+      { ...opts, maxTries: 0 },
+      noSleep,
+    );
+    expect(calls()).toBe(1);
+    expect(out.a).toEqual(['1.2.3.4']);
+  });
+});
+
+describe('backoffDelay', () => {
+  it('scales with attempt and stays within the jitter band', () => {
+    // rng=0 -> 0.5x, rng=1 -> 1.5x of base*attempt
+    expect(backoffDelay(1, 100, () => 0)).toBe(50);
+    expect(backoffDelay(1, 100, () => 1)).toBe(150);
+    expect(backoffDelay(2, 100, () => 0)).toBe(100);
+    expect(backoffDelay(2, 100, () => 1)).toBe(300);
+  });
+  it('is not deterministic across calls (jitter present)', () => {
+    const vals = new Set(Array.from({ length: 20 }, () => backoffDelay(1, 1000)));
+    expect(vals.size).toBeGreaterThan(1);
   });
 });
 
