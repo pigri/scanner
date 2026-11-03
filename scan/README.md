@@ -385,16 +385,18 @@ npm run risk -- --db scan.db --suffix gov.hu --discovery-db ../discovery/recon.d
 
 | Signal | Weight | Cap |
 |---|---:|---:|
-| Critical findings | +40 each | 3 (max 120→cap) |
-| High findings | +25 each | 3 |
-| Medium findings | +8 each | 5 |
-| Known CVE | +10 each | 3 |
+| Critical findings | +100 first, +15 each extra | 140 |
+| High findings | +12 each (first 4), +3 each extra | 60 |
+| Medium findings | +5 each (first 5), +1 each extra | 30 |
+| Low findings | +1 each (first 10), +0.3 each extra | 15 |
+| Info findings | +0.2 each (first 20), +0.05 each extra | 5 |
+| Known CVE | +10 each (first 3), +2 each extra | 60 |
 | Subdomain takeover | +30 | flat |
-| Weak TLS (testssl LOW/MED/HIGH/CRITICAL) | +12 | flat |
+| Weak TLS (testssl LOW/MED/HIGH/CRITICAL) | +8 | flat |
 | WordPress detected | +5 | flat |
-| Open port count | +2 each | 10 |
-| Risk-keyword hostname (`admin`, `dev`, `staging`, `test`, `backup`, `old`, `legacy`, `jenkins`, `gitlab`, `sonar`, `phpmyadmin`, `.git`) | +8 each | 3 |
-| Foreign-country host (vs `--suffix`'s expected country) | +6 | flat |
+| Open port count | +2 each | 10 ports (20) |
+| Risk-keyword hostname (`admin`, `dev`, `staging`, `test`, `backup`, `old`, `legacy`, `jenkins`, `gitlab`, `sonar`, `phpmyadmin`, `.git`) | +8 each | 3 (24) |
+| Foreign-country host (vs `--suffix`'s expected country) | +15 | flat |
 | Shared IP with >5 domains | +4 | flat |
 | First-seen < 7 days ago | +3 | flat |
 
