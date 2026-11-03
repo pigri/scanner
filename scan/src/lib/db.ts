@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
+import { decideHostStates, type HostStateRow } from './host-state.js';
 import { makeQueue, type QueueEntry, type ClaimedRow, type QueueStats, type QueueOps, type QueueFilter } from './queue.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -130,6 +131,11 @@ export interface Db {
   insertCertificate(row: CertInput, at: string, runId: number | null): void;
   insertDiscoveredUrl(row: DiscoveredUrlRow, at: string, runId: number | null): void;
   insertDnsRecord(row: DnsRecordRow, at: string, runId: number | null): void;
+  // Records one dnsx batch: targets in `resolvedSet` become active, the rest
+  // accrue dns_fail_count and are archived at `threshold`. One transaction.
+  applyHostResolution(targets: readonly string[], resolvedSet: ReadonlySet<string>, atIso: string, threshold: number): void;
+  archivedTargets(): Set<string>;
+  hostStates(): HostStateRow[];
   findingsSince(startIso: string): FindingRow[];
   findingsBetween(startIso: string, endIso: string): FindingRow[];
   countBySeverity(): { severity: string; n: number }[];
@@ -224,6 +230,27 @@ export function openDb(dbPath: string, options: OpenDbOptions = {}): Db {
     INSERT OR IGNORE INTO dns_records(target, name, type, value, ttl, seen_at, run_id)
     VALUES(@target, @name, @type, @value, @ttl, @seen_at, @run_id)
   `);
+  const hostStateGetStmt = raw.prepare('SELECT * FROM host_state WHERE target = ?');
+  const hostStateUpsertStmt = raw.prepare(`
+    INSERT INTO host_state(target, active, reason, dns_fail_count, last_checked, last_resolved, first_archived_at, updated_at)
+    VALUES(@target, @active, @reason, @dns_fail_count, @last_checked, @last_resolved, @first_archived_at, @updated_at)
+    ON CONFLICT(target) DO UPDATE SET
+      active = excluded.active, reason = excluded.reason, dns_fail_count = excluded.dns_fail_count,
+      last_checked = excluded.last_checked, last_resolved = excluded.last_resolved,
+      first_archived_at = excluded.first_archived_at, updated_at = excluded.updated_at
+  `);
+  const archivedStmt = raw.prepare('SELECT target FROM host_state WHERE active = 0');
+  const hostStatesStmt = raw.prepare('SELECT * FROM host_state ORDER BY target');
+  const applyHostResolutionTx = raw.transaction(
+    (targets: readonly string[], resolved: ReadonlySet<string>, atIso: string, threshold: number): void => {
+      const current = new Map<string, HostStateRow>();
+      for (const t of new Set(targets)) {
+        const r = hostStateGetStmt.get(t) as HostStateRow | undefined;
+        if (r) current.set(t, r);
+      }
+      for (const row of decideHostStates(targets, resolved, current, atIso, threshold)) hostStateUpsertStmt.run(row);
+    }
+  );
 
   const findingsSinceStmt = raw.prepare(
     'SELECT * FROM findings WHERE seen_at >= ? ORDER BY seen_at'
@@ -323,6 +350,16 @@ export function openDb(dbPath: string, options: OpenDbOptions = {}): Db {
         target: row.target, name: row.name, type: row.type, value: row.value,
         ttl: row.ttl ?? null, seen_at: at, run_id: runId,
       });
+    },
+    applyHostResolution(targets, resolvedSet, atIso, threshold): void {
+      if (!targets.length) return;
+      applyHostResolutionTx(targets, resolvedSet, atIso, threshold);
+    },
+    archivedTargets(): Set<string> {
+      return new Set((archivedStmt.all() as { target: string }[]).map((r) => r.target));
+    },
+    hostStates(): HostStateRow[] {
+      return hostStatesStmt.all() as HostStateRow[];
     },
     findingsSince(startIso): FindingRow[] {
       return findingsSinceStmt.all(startIso) as FindingRow[];
