@@ -16,18 +16,6 @@ export interface RawPeerCert {
   issuer?: { O?: string | string[] } | null;
 }
 
-/**
- * Open a TLS connection and resolve the peer certificate. The injection point
- * for tests: the real implementation talks to the network, a fake one returns a
- * fixed cert (or throws) with no socket.
- */
-export type CertConnect = (opts: {
-  host: string;
-  port: number;
-  servername: string;
-  timeoutMs: number;
-}) => Promise<RawPeerCert>;
-
 /** First value of an RDN that may be a string or a multi-valued array; '' -> null. */
 function firstRdn(v: string | string[] | undefined): string | null {
   const raw = Array.isArray(v) ? v[0] : v;
@@ -55,33 +43,62 @@ export function certCsvFields(cert: CertInfo | null): [string, string, string] {
   return [cert?.org ?? '', cert?.cn ?? '', cert?.issuer_org ?? ''];
 }
 
-const realConnect: CertConnect = ({ host, port, servername, timeoutMs }) =>
-  new Promise<RawPeerCert>((resolve, reject) => {
+/** Minimal view of the TLS socket connectPeerCert drives — injectable for tests. */
+export interface CertSocket {
+  getPeerCertificate(): RawPeerCert;
+  destroy(): void;
+  once(event: string, listener: (...args: unknown[]) => void): unknown;
+  on(event: string, listener: (...args: unknown[]) => void): unknown;
+}
+
+export interface ConnectOpts {
+  host: string;
+  port: number;
+  servername: string;
+  timeoutMs: number;
+}
+
+export type SocketFactory = (opts: ConnectOpts) => CertSocket;
+
+const realSocketFactory: SocketFactory = ({ host, port, servername, timeoutMs }) =>
+  // Recon wants the cert's identity regardless of validity: an expired or
+  // self-signed cert still tells us who the host claims to be.
+  tls.connect({ host, port, servername, rejectUnauthorized: false, timeout: timeoutMs }) as unknown as CertSocket;
+
+/**
+ * Open a TLS connection and resolve the peer certificate. Settles EXACTLY once
+ * via `finish`: a hard timer guarantees settlement even if no socket event ever
+ * fires, the socket is destroyed and the timer cleared on every path, and a
+ * no-op error listener is attached before teardown so a second 'error' on the
+ * destroyed socket cannot become an unhandled throw. The socket is injectable
+ * so these paths are unit-tested without the network.
+ */
+export function connectPeerCert(
+  opts: ConnectOpts,
+  socketFactory: SocketFactory = realSocketFactory,
+): Promise<RawPeerCert> {
+  return new Promise<RawPeerCert>((resolve, reject) => {
     let settled = false;
+    const socket = socketFactory(opts);
     const finish = (fn: () => void): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      socket.on('error', () => {}); // swallow any error raised after teardown
       socket.destroy();
       fn();
     };
-    const socket = tls.connect({
-      host,
-      port,
-      servername,
-      // Recon wants the cert's identity regardless of validity: an expired or
-      // self-signed cert still tells us who the host claims to be.
-      rejectUnauthorized: false,
-      timeout: timeoutMs,
-    });
-    const timer = setTimeout(() => finish(() => reject(new Error('tls timeout'))), timeoutMs);
-    socket.once('secureConnect', () => {
-      const cert = socket.getPeerCertificate() as RawPeerCert;
-      finish(() => resolve(cert));
-    });
+    const timer = setTimeout(() => finish(() => reject(new Error('tls timeout'))), opts.timeoutMs);
+    socket.once('secureConnect', () => finish(() => resolve(socket.getPeerCertificate())));
     socket.once('timeout', () => finish(() => reject(new Error('tls timeout'))));
-    socket.once('error', (e) => finish(() => reject(e)));
+    socket.once('error', (e: unknown) =>
+      finish(() => reject(e instanceof Error ? e : new Error(String(e)))),
+    );
   });
+}
+
+/** Injection point for fetchCert's high-level tests (returns/throws a Promise). */
+export type CertConnect = (opts: ConnectOpts) => Promise<RawPeerCert>;
 
 /**
  * Fetch the TLS certificate identity for `host`, dialing `ip` (its resolved
@@ -96,7 +113,7 @@ export async function fetchCert(
   host: string,
   opts: { ip?: string; port?: number; timeoutMs: number; connect?: CertConnect },
 ): Promise<CertInfo | null> {
-  const connect = opts.connect ?? realConnect;
+  const connect = opts.connect ?? ((o: ConnectOpts) => connectPeerCert(o));
   try {
     const raw = await connect({
       host: opts.ip ?? host,
