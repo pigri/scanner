@@ -43,6 +43,7 @@ export function decideHostStates(
       dns_fail_count: fails,
       last_checked: atIso,
       last_resolved: prev?.last_resolved ?? null,
+      // Start of the current archive episode (reset on recovery), not the first-ever archival.
       first_archived_at: archived ? (prev?.first_archived_at ?? atIso) : null,
       updated_at: atIso,
     });
@@ -66,4 +67,9 @@ export function parseDnsxResolved(jsonl: string): { rows: number; resolved: Set<
     } catch { /* ignore */ }
   }
   return { rows, resolved };
+}
+
+// A failed run, or one with no output rows, proves nothing about resolution.
+export function shouldApplyResolution(code: number, rows: number): boolean {
+  return code === 0 && rows > 0;
 }

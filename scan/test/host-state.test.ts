@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { decideHostStates, parseDnsxResolved, DNS_ARCHIVE_THRESHOLD, type HostStateRow } from '../src/lib/host-state.js';
+import { decideHostStates, parseDnsxResolved, shouldApplyResolution, DNS_ARCHIVE_THRESHOLD, type HostStateRow } from '../src/lib/host-state.js';
 
 const T1 = '2026-11-01T00:00:00Z';
 const T2 = '2026-11-02T00:00:00Z';
@@ -109,5 +109,18 @@ describe('parseDnsxResolved', () => {
 
   it('reports zero rows for empty output', () => {
     expect(parseDnsxResolved('')).toEqual({ rows: 0, resolved: new Set() });
+  });
+});
+
+describe('shouldApplyResolution', () => {
+  it('rejects a non-zero exit code', () => {
+    expect(shouldApplyResolution(1, 10)).toBe(false);
+    expect(shouldApplyResolution(-1, 10)).toBe(false);
+  });
+  it('rejects a clean exit with no output rows', () => {
+    expect(shouldApplyResolution(0, 0)).toBe(false);
+  });
+  it('accepts a clean exit with output rows', () => {
+    expect(shouldApplyResolution(0, 1)).toBe(true);
   });
 });
