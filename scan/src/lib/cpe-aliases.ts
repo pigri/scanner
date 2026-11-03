@@ -18,7 +18,7 @@ export interface AliasEntry {
 export const ALIASES: readonly AliasEntry[] = [
   { display: 'Apache httpd', pairs: [['apache', 'http_server']],
     names: ['apache', 'apache httpd', 'apache http server', 'httpd'] },
-  { display: 'nginx', pairs: [['f5', 'nginx'], ['nginx', 'nginx']],
+  { display: 'nginx', pairs: [['f5', 'nginx'], ['f5', 'nginx_open_source'], ['nginx', 'nginx']],
     names: ['nginx'] },
   { display: 'PHP', pairs: [['php', 'php']], names: ['php'] },
   { display: 'OpenSSL', pairs: [['openssl', 'openssl']], names: ['openssl'] },

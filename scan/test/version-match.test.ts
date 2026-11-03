@@ -134,6 +134,16 @@ describe('resolveAlias', () => {
     expect(resolveAlias('PHP')?.pairs).toContainEqual(['php', 'php']);
     expect(resolveAlias('OpenSSH')?.pairs).toContainEqual(['openbsd', 'openssh']);
   });
+  it('maps nginx to every NVD spelling incl. nginx_open_source, but not Plus', () => {
+    // NVD files mainline nginx CVEs under f5:nginx AND f5:nginx_open_source
+    // (F5 renamed the CPE in 2024); the matcher must query both. nginx_plus is
+    // a distinct commercial product and must NOT match a bare `nginx/` banner.
+    const pairs = resolveAlias('nginx')?.pairs;
+    expect(pairs).toContainEqual(['f5', 'nginx']);
+    expect(pairs).toContainEqual(['f5', 'nginx_open_source']);
+    expect(pairs).toContainEqual(['nginx', 'nginx']);
+    expect(pairs).not.toContainEqual(['f5', 'nginx_plus']);
+  });
   it('rejects products outside the allowlist', () => {
     expect(resolveAlias('jQuery')).toBeNull();
     expect(resolveAlias('Apache Traffic Server')).toBeNull();
