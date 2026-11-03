@@ -15,6 +15,7 @@ export interface TargetRowLike {
   created_at: string | null;
   updated_at: string | null;
   organization: string | null;
+  active: number; // 0 = archived (host_state), 1 = active
 }
 
 export const SEVERITIES: readonly string[] = ['critical', 'high', 'medium', 'low', 'info'];
@@ -38,6 +39,7 @@ export interface TargetFilterParams {
   minScore?: number | null;
   maxScore?: number | null;
   org?: string; // exact-match on the cert Organization; '' = any
+  archived?: string; // '' = active only (default), '1' = archived only, 'all' = both
   sort?: string;
   offset?: number;
   limit?: number;
@@ -55,6 +57,7 @@ export interface TargetFacetResult<T> {
   offset: number;
   sevCounts: Record<string, number>;
   orgs: OrgCount[];
+  archivedCount: number;
 }
 
 export function filterAndFacet<T extends TargetRowLike>(
@@ -69,13 +72,13 @@ export function filterAndFacet<T extends TargetRowLike>(
   const maxScore = p.maxScore as number;
   const sevList = (p.sevList ?? []).map((s) => s.trim()).filter((s) => SEVERITIES.includes(s));
   const org = (p.org ?? '').trim();
+  const archived = (p.archived ?? '').trim();
   const sort = p.sort || 'score';
   const offset = p.offset ?? 0;
   const limit = p.limit ?? 100;
 
-  // Base predicate: everything except the severity and org selections, so each
-  // facet's counts stay independent of its own selection.
-  const base = all.filter((r) => {
+  // Everything except the archived set and the severity/org selections.
+  const matched = all.filter((r) => {
     if (search && !r.target.toLowerCase().includes(search)) return false;
     if (cve === '1' && !(r.cves > 0)) return false;
     if (cve === '0' && r.cves > 0) return false;
@@ -83,6 +86,16 @@ export function filterAndFacet<T extends TargetRowLike>(
     if (hasMax && r.score > maxScore) return false;
     return true;
   });
+
+  // Archived tally is taken before the set is chosen, so the toggle can show
+  // how many hosts the other set holds.
+  const archivedCount = matched.reduce((n, r) => n + (r.active === 0 ? 1 : 0), 0);
+
+  // Base predicate: the chosen archived set too, but not the severity and org
+  // selections, so each facet's counts stay independent of its own selection.
+  const base = matched.filter((r) =>
+    archived === 'all' ? true : archived === '1' ? r.active === 0 : r.active !== 0,
+  );
 
   const sevCounts: Record<string, number> = {};
   for (const s of SEVERITIES) sevCounts[s] = 0;
@@ -136,5 +149,6 @@ export function filterAndFacet<T extends TargetRowLike>(
     offset,
     sevCounts,
     orgs,
+    archivedCount,
   };
 }
