@@ -132,6 +132,7 @@ export async function runSync(o: SyncOpts): Promise<number> {
   let matches = 0;
   const t0 = Date.now();
 
+  let refused = false;
   await replaceAtomically(o.nvdDb, async (tmp) => {
     if (incremental) fs.copyFileSync(o.nvdDb, tmp);
     const w = new NvdWriter(tmp);
@@ -170,7 +171,18 @@ export async function runSync(o: SyncOpts): Promise<number> {
       w.abort();
       throw e;
     }
+    if (truncated && existing) {
+      refused = true;
+      return false;
+    }
+    return true;
   });
+  if (refused) {
+    console.error(
+      `nvd-sync: WARNING: refused to replace existing ${path.resolve(o.nvdDb)} with a partial build ` +
+      `(--limit-pages ${o.limitPages}); the existing db is unchanged`);
+    return 0;
+  }
 
   console.error(
     `nvd-sync done: ${pages} page(s), ${cves} CVE(s) processed, ${matches} cpe_match rows total, ` +

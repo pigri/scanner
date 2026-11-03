@@ -49,7 +49,7 @@ export interface NvdCveInput {
   published?: string;
   lastModified?: string;
   metrics?: { cvssMetricV31?: NvdMetric[]; cvssMetricV30?: NvdMetric[]; cvssMetricV2?: NvdMetric[] };
-  configurations?: Array<{ nodes?: Array<{ cpeMatch?: NvdCpeMatch[] }> }>;
+  configurations?: Array<{ nodes?: Array<{ negate?: boolean; cpeMatch?: NvdCpeMatch[] }> }>;
 }
 
 export interface CpeMatchRow {
@@ -103,6 +103,7 @@ export function cpeRowsFromCve(cve: NvdCveInput): CpeMatchRow[] {
   const rows: CpeMatchRow[] = [];
   for (const cfg of cve.configurations ?? []) {
     for (const node of cfg.nodes ?? []) {
+      if (node.negate === true) continue;
       for (const m of node.cpeMatch ?? []) {
         if (m.vulnerable !== true || !m.criteria) continue;
         const p = splitCpe(m.criteria);
@@ -224,16 +225,17 @@ export class NvdWriter {
 /**
  * Run `build(tmpPath)` against `<finalPath>.tmp`, then rename over finalPath.
  * If build throws, the tmp file is removed and finalPath is left untouched.
+ * If build resolves to `false`, the tmp file is removed and nothing is renamed.
  */
 export async function replaceAtomically(
   finalPath: string,
-  build: (tmpPath: string) => void | Promise<void>,
+  build: (tmpPath: string) => void | boolean | Promise<void | boolean>,
 ): Promise<void> {
   const tmp = `${finalPath}.tmp`;
   rmTmp(tmp);
   try {
-    await build(tmp);
-    fs.renameSync(tmp, finalPath);
+    if ((await build(tmp)) === false) rmTmp(tmp);
+    else fs.renameSync(tmp, finalPath);
   } catch (e) {
     rmTmp(tmp);
     throw e;

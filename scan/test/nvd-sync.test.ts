@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,10 +10,12 @@ import {
   cveMetaFromCve,
   isRejected,
   openNvdLookup,
+  readSyncCursor,
   replaceAtomically,
   type NvdCveInput,
 } from '../src/lib/nvd-db.js';
-import { fetchWithRetry } from '../src/nvd-sync.js';
+import Database from 'better-sqlite3';
+import { fetchWithRetry, runSync } from '../src/nvd-sync.js';
 
 const dirs: string[] = [];
 function tmpDir(): string {
@@ -230,5 +232,68 @@ describe('fetchWithRetry', () => {
     await expect(fetchWithRetry('http://x', {}, {
       fetchFn: async () => resp(503), sleep: async () => {}, maxAttempts: 3,
     })).rejects.toThrow('HTTP 503');
+  });
+});
+
+describe('cpeRowsFromCve negate nodes', () => {
+  it('drops cpeMatch entries under a negate:true node', () => {
+    const cve = {
+      id: 'CVE-2020-0009',
+      configurations: [{ nodes: [
+        { negate: true, cpeMatch: [{ vulnerable: true, criteria: 'cpe:2.3:a:acme:widget:1.0:*:*:*:*:*:*:*' }] },
+        { cpeMatch: [{ vulnerable: true, criteria: 'cpe:2.3:a:acme:gadget:2.0:*:*:*:*:*:*:*' }] },
+      ] }],
+    } as unknown as NvdCveInput;
+    expect(cpeRowsFromCve(cve).map((r) => r.product)).toEqual(['gadget']);
+  });
+});
+
+describe('runSync degraded-path invariants', () => {
+  const cveJson = (id: string): unknown => ({
+    id,
+    configurations: [{ nodes: [{ cpeMatch: [{ vulnerable: true, criteria: 'cpe:2.3:a:acme:widget:1.0:*:*:*:*:*:*:*' }] }] }],
+  });
+  const stubNvd = (total: number): void => {
+    vi.stubGlobal('fetch', async () =>
+      new Response(JSON.stringify({ totalResults: total, vulnerabilities: [{ cve: cveJson('CVE-2021-0001') }] }), { status: 200 }));
+  };
+  const opts = (nvdDb: string, limitPages: number | null) => ({ nvdDb, full: true, since: null, limitPages });
+  const meta = (path: string, key: string): string | undefined => {
+    const db = new Database(path, { readonly: true });
+    try {
+      return (db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined)?.value;
+    } finally { db.close(); }
+  };
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('a fresh truncated build marks partial=1 with an empty cursor that reads back as null', async () => {
+    stubNvd(5000);
+    const p = join(tmpDir(), 'nvd.db');
+    expect(await runSync(opts(p, 1))).toBe(0);
+    expect(meta(p, 'partial')).toBe('1');
+    expect(meta(p, 'sync_cursor')).toBe('');
+    expect(readSyncCursor(p)).toBeNull();
+  });
+
+  it('a complete build marks partial=0 with a real cursor', async () => {
+    stubNvd(1);
+    const p = join(tmpDir(), 'nvd.db');
+    expect(await runSync(opts(p, null))).toBe(0);
+    expect(meta(p, 'partial')).toBe('0');
+    const c = readSyncCursor(p);
+    expect(c).not.toBeNull();
+    expect(Number.isNaN(new Date(c!).getTime())).toBe(false);
+  });
+
+  it('a truncated build refuses to replace an existing db', async () => {
+    stubNvd(1);
+    const p = join(tmpDir(), 'nvd.db');
+    await runSync(opts(p, null));
+    const before = readFileSync(p);
+    stubNvd(5000);
+    expect(await runSync(opts(p, 1))).toBe(0);
+    expect(readFileSync(p).equals(before)).toBe(true);
+    expect(meta(p, 'partial')).toBe('0');
+    expect(existsSync(`${p}.tmp`)).toBe(false);
   });
 });
