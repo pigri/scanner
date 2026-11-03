@@ -47,6 +47,7 @@ function main(): void {
   const rows = db.raw.prepare('SELECT common_name, san_json FROM certificates').all() as { common_name: string | null; san_json: string | null }[];
   const certs: CertRecord[] = rows.map((r) => ({
     certIndex: 1, port: null, commonName: r.common_name, san: r.san_json ? JSON.parse(r.san_json) as string[] : [],
+    organization: null, orgUnit: null, locality: null, country: null,
     issuer: null, notBefore: null, notAfter: null, keyAlgo: null, keySize: null, sigAlgo: null, serial: null, fingerprintSha256: null, selfSigned: false,
   }));
   db.close();

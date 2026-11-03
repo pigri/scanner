@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { openDb, type Db } from '../src/lib/db.js';
+import Database from 'better-sqlite3';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 let db: Db;
 beforeEach(() => { db = openDb(':memory:'); });
@@ -96,3 +100,55 @@ describe('date-range queries', () => {
     expect(counts.find((c) => c.severity === 'critical')?.n).toBe(1);
   });
 });
+
+
+describe('certificates subject columns', () => {
+  const cert = {
+    target: 'x.example', port: 443, certIndex: 1, commonName: 'cn',
+    san: [], issuer: 'CN=CA', notBefore: null, notAfter: null,
+    keyAlgo: 'EC', keySize: 256, sigAlgo: 'sha256', serial: '1',
+    fingerprintSha256: 'A'.repeat(64), selfSigned: false,
+    organization: 'Acme Kft', orgUnit: 'IT', locality: 'Budapest', country: 'HU',
+  };
+
+  it('round-trips organization/org_unit/locality/country', () => {
+    const runId = db.startRun('sslyze', {}, 'T');
+    db.insertCertificate(cert, 'T', runId);
+    const row = db.raw
+      .prepare('SELECT organization, org_unit, locality, country FROM certificates')
+      .get();
+    expect(row).toEqual({ organization: 'Acme Kft', org_unit: 'IT', locality: 'Budapest', country: 'HU' });
+  });
+
+  it('adds the subject columns to a legacy certificates table, preserving old rows', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-migrate-'));
+    try {
+      const f = path.join(dir, 'legacy.db');
+      const raw = new Database(f);
+      raw.exec(`CREATE TABLE certificates (
+        id INTEGER PRIMARY KEY, target TEXT NOT NULL, port INTEGER,
+        cert_index INTEGER NOT NULL DEFAULT 1, common_name TEXT, san_json TEXT,
+        issuer TEXT, not_before TEXT, not_after TEXT, key_algo TEXT, key_size INTEGER,
+        sig_algo TEXT, serial TEXT, fingerprint_sha256 TEXT,
+        self_signed INTEGER NOT NULL DEFAULT 0, seen_at TEXT NOT NULL, run_id INTEGER,
+        UNIQUE(target, port, fingerprint_sha256))`);
+      raw.prepare('INSERT INTO certificates(target, common_name, seen_at) VALUES(?,?,?)')
+        .run('legacy.host', 'old.cn', 'T');
+      raw.close();
+
+      const legacyDb = openDb(f);
+      const cols = new Set(
+        (legacyDb.raw.prepare('PRAGMA table_info(certificates)').all() as { name: string }[]).map((r) => r.name)
+      );
+      for (const c of ['organization', 'org_unit', 'locality', 'country']) expect(cols.has(c)).toBe(true);
+      const old = legacyDb.raw
+        .prepare("SELECT common_name, organization FROM certificates WHERE target='legacy.host'")
+        .get();
+      expect(old).toEqual({ common_name: 'old.cn', organization: null });
+      legacyDb.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+

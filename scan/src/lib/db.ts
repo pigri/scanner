@@ -102,6 +102,10 @@ export interface CertInput {
   port: number | null;
   certIndex: number;
   commonName: string | null;
+  organization: string | null;
+  orgUnit: string | null;
+  locality: string | null;
+  country: string | null;
   san: string[];
   issuer: string | null;
   notBefore: string | null;
@@ -176,6 +180,13 @@ export function openDb(dbPath: string, options: OpenDbOptions = {}): Db {
   // Runs after the column is guaranteed to exist — either from schema.sql on
   // fresh DBs or the migration above on legacy ones.
   raw.exec("CREATE INDEX IF NOT EXISTS idx_findings_review ON findings(needs_review) WHERE needs_review = 1");
+  // certificates: subject O / OU / L / C, added after the table shipped.
+  const certCols = new Set(
+    (raw.prepare('PRAGMA table_info(certificates)').all() as { name: string }[]).map((r) => r.name)
+  );
+  for (const col of ['organization', 'org_unit', 'locality', 'country'] as const) {
+    if (!certCols.has(col)) raw.exec(`ALTER TABLE certificates ADD COLUMN ${col} TEXT`);
+  }
 
   const startRunStmt = raw.prepare(
     'INSERT INTO runs(tool, started_at, args_json) VALUES(?, ?, ?)'
@@ -200,9 +211,9 @@ export function openDb(dbPath: string, options: OpenDbOptions = {}): Db {
     VALUES(@target, @url, @path, @status, @title, @seen_at, @run_id)
   `);
   const insertCertStmt = raw.prepare(`
-    INSERT OR IGNORE INTO certificates(target, port, cert_index, common_name, san_json, issuer,
+    INSERT OR IGNORE INTO certificates(target, port, cert_index, common_name, organization, org_unit, locality, country, san_json, issuer,
       not_before, not_after, key_algo, key_size, sig_algo, serial, fingerprint_sha256, self_signed, seen_at, run_id)
-    VALUES(@target, @port, @cert_index, @common_name, @san_json, @issuer,
+    VALUES(@target, @port, @cert_index, @common_name, @organization, @org_unit, @locality, @country, @san_json, @issuer,
       @not_before, @not_after, @key_algo, @key_size, @sig_algo, @serial, @fingerprint_sha256, @self_signed, @seen_at, @run_id)
   `);
   const insertUrlStmt = raw.prepare(`
@@ -290,7 +301,9 @@ export function openDb(dbPath: string, options: OpenDbOptions = {}): Db {
     insertCertificate(row, at, runId): void {
       insertCertStmt.run({
         target: row.target, port: row.port, cert_index: row.certIndex,
-        common_name: row.commonName, san_json: JSON.stringify(row.san),
+        common_name: row.commonName,
+        organization: row.organization, org_unit: row.orgUnit, locality: row.locality, country: row.country,
+        san_json: JSON.stringify(row.san),
         issuer: row.issuer, not_before: row.notBefore, not_after: row.notAfter,
         key_algo: row.keyAlgo, key_size: row.keySize, sig_algo: row.sigAlgo,
         serial: row.serial, fingerprint_sha256: row.fingerprintSha256,

@@ -9,6 +9,10 @@ export interface CertRecord {
   certIndex: number;
   port: number | null;
   commonName: string | null;
+  organization: string | null;
+  orgUnit: string | null;
+  locality: string | null;
+  country: string | null;
   san: string[];
   issuer: string | null;
   notBefore: string | null;
@@ -60,6 +64,8 @@ export function parseCertificates(records: readonly TestsslCertInput[]): CertRec
     const cert: CertRecord = {
       certIndex, port,
       commonName: get('cert_commonName'),
+      // testssl does not break out subject O / OU / L / C; sslyze fills these.
+      organization: null, orgUnit: null, locality: null, country: null,
       san,
       issuer: get('cert_caIssuers'),
       notBefore: get('cert_notBefore'),

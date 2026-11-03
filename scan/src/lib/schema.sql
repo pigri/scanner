@@ -130,6 +130,10 @@ CREATE TABLE IF NOT EXISTS certificates (
   port               INTEGER,
   cert_index         INTEGER NOT NULL DEFAULT 1,   -- host may present RSA + ECDSA
   common_name        TEXT,
+  organization       TEXT,                          -- subject O
+  org_unit           TEXT,                          -- subject OU
+  locality           TEXT,                          -- subject L
+  country            TEXT,                          -- subject C
   san_json           TEXT,                          -- JSON array of SAN hostnames
   issuer             TEXT,
   not_before         TEXT,
