@@ -392,6 +392,7 @@ npm run risk -- --db scan.db --suffix gov.hu --discovery-db ../discovery/recon.d
 | Low findings | +1 each (first 10), +0.3 each extra | 15 |
 | Info findings | +0.2 each (first 20), +0.05 each extra | 5 |
 | Known CVE | +10 each (first 3), +2 each extra | 60 |
+| Version-match CVE (distinct) | +3 each (first 5), +0.5 each extra | 20 |
 | Subdomain takeover | +30 | flat |
 | Weak TLS (testssl LOW/MED/HIGH/CRITICAL) | +8 | flat |
 | WordPress detected | +5 | flat |

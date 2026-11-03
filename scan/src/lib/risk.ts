@@ -46,6 +46,8 @@ export interface Breakdown {
   lowPoints: number;
   infoPoints: number;
   cvePoints: number;
+  versionMatch: number;                   // distinct CVEs from version-match findings
+  versionMatchPoints: number;
   takeover: number;
   tlsWeak: number;
   wordpress: number;
@@ -97,6 +99,7 @@ export function computeScore(s: TargetSignals): ScoreResult {
   let critical = 0, high = 0, medium = 0, low = 0, info = 0, cves = 0;
   let takeover = 0, tlsWeak = 0, wordpress = 0;
   let reviewSkipped = 0;
+  const versionMatchCves = new Set<string>();
 
   // Findings are append-only INSERTs in scan.db: the same host rescanned N
   // times gets the same (tool, category, title) row N times, and the scorer
@@ -116,6 +119,9 @@ export function computeScore(s: TargetSignals): ScoreResult {
     // Findings the scanner suspects are false positives (catch-all-200
     // responders, decoy pages, etc.) don't get to distort the score.
     if (f.needsReview) { reviewSkipped++; continue; }
+    // Inferred from a banner/version, not a live exploit: scored on a separate
+    // low-weight distinct-CVE curve, never in the severity or cve buckets.
+    if (f.tool === 'version-match') { if (f.cve) versionMatchCves.add(f.cve); continue; }
     const sev = (f.severity ?? '').toLowerCase();
     if (sev === 'critical') critical++;
     else if (sev === 'high') high++;
@@ -149,6 +155,8 @@ export function computeScore(s: TargetSignals): ScoreResult {
   const lowPoints      = tieredPoints(low,      1, 10, 0.3, 15);
   const infoPoints     = tieredPoints(info,     0.2, 20, 0.05, 5);
   const cvePoints      = tieredPoints(cves,     10, 3, 2, 60);
+  // First 5 distinct CVEs at 3 pts, extras at 0.5, cap 20.
+  const versionMatchPoints = tieredPoints(versionMatchCves.size, 3, 5, 0.5, 20);
 
   // Count distinct (port, protocol) pairs — the ports table holds one row
   // per tool per port, so naabu + nmap + rustscan all inserting rows for
@@ -179,7 +187,7 @@ export function computeScore(s: TargetSignals): ScoreResult {
   }
 
   const total =
-    criticalPoints + highPoints + mediumPoints + lowPoints + infoPoints + cvePoints +
+    criticalPoints + highPoints + mediumPoints + lowPoints + infoPoints + cvePoints + versionMatchPoints +
     takeover + tlsWeak + wordpress +
     portPoints + keywordPoints + sharedIp + foreign + fresh;
 
@@ -196,6 +204,7 @@ export function computeScore(s: TargetSignals): ScoreResult {
     breakdown: {
       critical, high, medium, low, info, reviewSkipped,
       criticalPoints, highPoints, mediumPoints, lowPoints, infoPoints, cvePoints,
+      versionMatch: versionMatchCves.size, versionMatchPoints,
       takeover, tlsWeak, wordpress,
       portPoints, keywordPoints, keywords,
       sharedIp, foreign, fresh, total,
