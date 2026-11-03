@@ -2,6 +2,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import os from 'node:os';
+import { classify, loadState, saveState } from './lib/resolve-state.js';
 
 interface Opts {
   parentsFile: string;
@@ -12,6 +14,7 @@ interface Opts {
   skipBrute: boolean;
   skipCt: boolean;
   skipEnrich: boolean;
+  phantomThreshold: number;
   help?: boolean;
 }
 
@@ -25,6 +28,7 @@ function parseArgs(argv: string[]): Opts {
     skipBrute: false,
     skipCt: false,
     skipEnrich: false,
+    phantomThreshold: 3,
   };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i]!;
@@ -37,6 +41,7 @@ function parseArgs(argv: string[]): Opts {
     else if (a === '--skip-brute') opts.skipBrute = true;
     else if (a === '--skip-ct') opts.skipCt = true;
     else if (a === '--skip-enrich') opts.skipEnrich = true;
+    else if (a === '--phantom-threshold') opts.phantomThreshold = Math.max(1, parseInt(next(), 10) || 3);
     else if (a === '-h' || a === '--help') opts.help = true;
   }
   return opts;
@@ -48,17 +53,18 @@ function usage(): void {
 Runs one full discovery refresh cycle:
   1. ct-log:    crt.sh + certspotter for each parent, merge into --domains
   2. dns-brute: SecLists wordlist against each parent, merge into --domains
-  3. enrich:    resolve every host + PTR + MMDB, filter phantoms
+  3. enrich:    re-resolve domains + phantoms, reclassify (self-healing)
 
 Options:
-  --parents <file>     Parent domains list (default: parents.txt)
-  --suffix <domain>    Only keep hosts under this suffix (default: gov.hu)
-  --domains <file>     Master hostname file (default: domains.txt)
-  --seclist <name>     SecLists variant (default: top-5000)
-  --ct-sources <s>     CT source(s): crtsh | certspotter | both (default: certspotter)
-  --skip-brute         Skip DNS brute step
-  --skip-ct            Skip CT log step
-  --skip-enrich        Skip enrichment
+  --parents <file>         Parent domains list (default: parents.txt)
+  --suffix <domain>        Only keep hosts under this suffix (default: gov.hu)
+  --domains <file>         Master hostname file (default: domains.txt)
+  --seclist <name>         SecLists variant (default: top-5000)
+  --ct-sources <s>         CT source(s): crtsh | certspotter | both (default: certspotter)
+  --skip-brute             Skip DNS brute step
+  --skip-ct                Skip CT log step
+  --skip-enrich            Skip enrichment
+  --phantom-threshold <N>  Consecutive failed runs before a host is binned (default: 3)
 `);
 }
 
@@ -113,27 +119,46 @@ async function main(): Promise<void> {
   }
 
   if (!opts.skipEnrich) {
-    console.error('\n=== stage 3: enrich + phantom filter ===');
-    await run('npx', ['tsx', 'src/enrich.ts', opts.domainsFile, '--concurrency', '40']);
-    // Filter phantoms. Phantoms accumulate across runs — if we overwrote the
-    // file with only this run's failures, back-to-back runs would clobber
-    // real phantoms whenever the second run's input already excludes them
-    // (see loss chain: run1 moves H to phantoms, run2 sees 0 new failures
-    // and would wipe the file). Union with the existing phantoms.txt.
+    console.error('\n=== stage 3: enrich + phantom reclassify ===');
+    const phantomsFile = 'phantoms.txt';
+    const stateFile = 'resolve-state.json';
+    const readLines = (f: string): string[] =>
+      fs.existsSync(f)
+        ? fs.readFileSync(f, 'utf8').split('\n').map((s) => s.trim()).filter(Boolean)
+        : [];
+    // Re-test phantoms too (self-healing): a host wrongly binned on a past
+    // transient failure returns automatically once it resolves again. A host
+    // is only moved to phantoms after it fails --phantom-threshold runs in a
+    // row, so a single transient miss never evicts a live host.
+    const union = [...new Set([...readLines(opts.domainsFile), ...readLines(phantomsFile)])].sort();
+    const unionFile = path.join(os.tmpdir(), `refresh-union-${process.pid}.txt`);
+    fs.writeFileSync(unionFile, union.join('\n') + '\n');
+    try {
+      await run('npx', ['tsx', 'src/enrich.ts', unionFile, '--concurrency', '40']);
+    } finally {
+      fs.rmSync(unionFile, { force: true });
+    }
+
     const rows: { domain: string; addresses: unknown[] }[] = [];
     for (const line of fs.readFileSync('enriched.jsonl', 'utf8').split('\n')) {
       if (!line.trim()) continue;
       rows.push(JSON.parse(line));
     }
     const resolved = rows.filter((r) => r.addresses.length > 0).map((r) => r.domain);
-    const newPhantoms = rows.filter((r) => r.addresses.length === 0).map((r) => r.domain);
-    const existingPhantoms = fs.existsSync('phantoms.txt')
-      ? fs.readFileSync('phantoms.txt', 'utf8').split('\n').map((s) => s.trim()).filter(Boolean)
-      : [];
-    const allPhantoms = [...new Set([...existingPhantoms, ...newPhantoms])].sort();
-    fs.writeFileSync(opts.domainsFile, [...new Set(resolved)].sort().join('\n') + '\n');
-    fs.writeFileSync('phantoms.txt', allPhantoms.join('\n') + '\n');
-    console.error(`filtered: ${resolved.length} resolvable, +${newPhantoms.length} new phantoms (${allPhantoms.length} total)`);
+    const failed = rows.filter((r) => r.addresses.length === 0).map((r) => r.domain);
+    const { domains, phantoms, state } = classify(
+      loadState(stateFile),
+      resolved,
+      failed,
+      opts.phantomThreshold,
+    );
+    fs.writeFileSync(opts.domainsFile, domains.join('\n') + '\n');
+    fs.writeFileSync(phantomsFile, phantoms.join('\n') + '\n');
+    saveState(stateFile, state);
+    const grace = domains.length - resolved.length;
+    console.error(
+      `reclassified: ${resolved.length} resolved, ${grace} in grace, ${phantoms.length} phantoms (threshold ${opts.phantomThreshold})`,
+    );
   }
 
   const finalCount = new Set(
