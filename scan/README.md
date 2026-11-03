@@ -357,7 +357,7 @@ Runs `nuclei -tags takeover -rate-limit 100`. Cheap subdomain-takeover check. Fi
 ```
 npm run scan-all -- --targets hosts.txt --scope scope.txt --sqlite scan.db
 ```
-Orchestrates the full pipeline in order: **httpx → nmap → nuclei → takeover → testssl → wpscan (only WordPress hosts from httpx) → gowitness.** After stage 2 (httpx and port scans populated) and before the stage-3 `cve-rollup`, `version-match` compares detected service/product versions against the offline NVD mirror (`/storage/gen0sec-scan/nvd.db`) and writes `tool='version-match'` CVE findings; a missing mirror is a no-op. The mirror is refreshed nightly (01:30) by the `nvd-sync.timer` unit (see `deploy/README.md`); `npm run nvd-sync` and `npm run version-match` run them by hand.
+Orchestrates the full pipeline in order: **httpx → nmap → nuclei → takeover → testssl → wpscan (only WordPress hosts from httpx) → gowitness.** After stage 2 (httpx and port scans populated) and before the stage-3 `cve-rollup`, `version-match` compares detected service/product versions against the offline NVD mirror (`/storage/gen0sec-scan/nvd.db`) and writes `tool='version-match'` CVE findings; a missing mirror is a no-op. The mirror is refreshed nightly (01:30) by the `nvd-sync.timer` unit (see `deploy/README.md`); `npm run nvd-sync` and `npm run version-match` run them by hand. A nightly sweep (`version-match-sweep.timer`, 02:00; `npm run version-match:all`) re-matches `scan.db` evidence from the last `--window` days (default 30) against each new mirror snapshot, once per snapshot, and then refreshes the rollup, so new CVEs light up without a rescan.
 
 Skip stages with `SKIP=<name,name>`:
 ```

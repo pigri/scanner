@@ -1,0 +1,13 @@
+[Unit]
+Description=gen0sec nightly version-match sweep (re-match scan.db version evidence against the fresh nvd.db, then refresh the cves rollup)
+After=network-online.target nvd-sync.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Once per nvd.db snapshot: if a sweep already completed for the current
+# snapshot this exits 0 without writing anything. A missing or unreadable
+# nvd.db warns and exits 0. The rollup runs as a child (cve-rollup --sqlite),
+# like scan-all's stage 3. Sources .env.scan like the scan workers do.
+ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; cd %h/gen0sec/redteam/scan && mkdir -p logs && ENVFILE="$PWD/.env.scan"; [ -r "$ENVFILE" ] && set -a && . "$ENVFILE" && set +a; exec npx tsx src/version-match.ts --all --sqlite scan.db --nvd-db /storage/gen0sec-scan/nvd.db >>logs/version-match-sweep.log 2>&1'
+TimeoutStartSec=3600

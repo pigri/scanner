@@ -7,7 +7,7 @@
 // to a warning plus a note on the run row, and the exit stays 0.
 import fs from 'node:fs';
 import { openDb, type Db } from './lib/db.js';
-import { parseCommonCli, prepareTargets } from './lib/runner.js';
+import { parseCommonCli, prepareTargets, run } from './lib/runner.js';
 import { openNvdLookup, type VulnLookup } from './lib/nvd-db.js';
 import { isSqliteBusy } from './cve-enrich.js';
 import { resolveAlias } from './lib/cpe-aliases.js';
@@ -18,6 +18,9 @@ import {
 
 export const DEFAULT_NVD_DB = '/storage/gen0sec-scan/nvd.db';
 const DAY_MS = 24 * 3600 * 1000;
+/** `runs.tool` of the --all sweep marker row; args_json.snapshotAt keys idempotency. */
+export const SWEEP_TOOL = 'version-match-sweep';
+export const DEFAULT_SWEEP_WINDOW_DAYS = 30;
 
 export interface VersionMatchOpts {
   db: Db;
@@ -26,6 +29,11 @@ export interface VersionMatchOpts {
   maxAgeDays: number;
   dryRun: boolean;
   now?: Date;
+  /** Sweep mode: ignore `targets`, match every target with evidence seen in the last `windowDays`. */
+  all?: boolean;
+  windowDays?: number;
+  /** Refresh the cves rollup after a sweep; false = failed. Injected in tests. */
+  rollup?: () => Promise<boolean>;
   /** Injected lookup, used instead of opening `nvdDb` (tests). */
   lookup?: VulnLookup | null;
   log?: (msg: string) => void;
@@ -38,6 +46,8 @@ export interface VersionMatchResult {
   skippedVersions: number;
   busySkipped: number;
   failedTargets: number;
+  /** Sweep already completed for this nvd.db snapshot: nothing was done. */
+  noop?: boolean;
 }
 
 interface Seen { evidence: Evidence; matchedAt: string; text: string }
@@ -81,6 +91,25 @@ function portEvidence(db: Db, target: string): Seen[] {
   return out;
 }
 
+/** Distinct targets with http_probes or ports evidence seen within `windowDays` of `now`. */
+export function selectSweepTargets(db: Db, windowDays: number, now: Date): string[] {
+  const cutoff = new Date(now.getTime() - windowDays * DAY_MS).toISOString();
+  const rows = db.raw.prepare(
+    `SELECT target FROM http_probes WHERE seen_at >= ?
+     UNION SELECT target FROM ports WHERE seen_at >= ?
+     ORDER BY target`,
+  ).all(cutoff, cutoff) as { target: string }[];
+  return rows.map((r) => r.target);
+}
+
+/** The sweep marker for this snapshot: undefined = never matched, else whether the rollup finished too. */
+function sweepMarker(db: Db, snapshotAt: string): { id: number; done: boolean } | undefined {
+  const r = db.raw.prepare(
+    `SELECT id, finished_at FROM runs WHERE tool = ? AND json_extract(args_json, '$.snapshotAt') = ? ORDER BY id DESC LIMIT 1`,
+  ).get(SWEEP_TOOL, snapshotAt) as { id: number; finished_at: string | null } | undefined;
+  return r ? { id: r.id, done: r.finished_at !== null } : undefined;
+}
+
 /** One evidence per (vendor, product, version); a distro hint on any duplicate wins. */
 function dedupe(seen: Seen[]): Seen[] {
   const byKey = new Map<string, Seen>();
@@ -103,10 +132,13 @@ export async function runVersionMatch(opts: VersionMatchOpts): Promise<VersionMa
   const result: VersionMatchResult = { exitCode: 0, matched: 0, inserted: 0, skippedVersions: 0, busySkipped: 0, failedTargets: 0 };
   const { db } = opts;
 
-  const runId = opts.dryRun ? null : db.startRun('version-match', { nvdDb: opts.nvdDb, maxAgeDays: opts.maxAgeDays }, at);
+  const sweep = opts.all === true;
+  const windowDays = opts.windowDays ?? DEFAULT_SWEEP_WINDOW_DAYS;
+  let targets = opts.targets;
+  const runId = opts.dryRun ? null : db.startRun('version-match', { nvdDb: opts.nvdDb, maxAgeDays: opts.maxAgeDays, ...(sweep ? { all: true, windowDays } : {}) }, at);
   const finish = (notes: string | undefined): void => {
     if (runId === null) return;
-    db.finishRun(runId, { targetsCount: opts.targets.length, findingsCount: result.inserted, ...(notes !== undefined ? { notes } : {}), at: new Date().toISOString() });
+    db.finishRun(runId, { targetsCount: targets.length, findingsCount: result.inserted, ...(notes !== undefined ? { notes } : {}), at: new Date().toISOString() });
   };
 
   const lookup = opts.lookup !== undefined ? opts.lookup : openNvdLookup(opts.nvdDb);
@@ -126,7 +158,32 @@ export async function runVersionMatch(opts: VersionMatchOpts): Promise<VersionMa
     notes.push(note);
   }
 
-  for (const target of opts.targets) {
+  // A sweep is keyed on the mirror snapshot: the marker row is written after matching
+  // and finished only once the rollup is done, so a failed rollup is retried alone.
+  const snapshotAt = lookup.snapshotAt;
+  let markerId: number | null = null;
+  let skipMatching = false;
+  if (sweep) {
+    if (!snapshotAt) {
+      log('WARN: nvd.db has no snapshot_at; sweep idempotency is disabled for this run');
+    } else if (!opts.dryRun) {
+      const m = sweepMarker(db, snapshotAt);
+      if (m?.done) {
+        const note = `sweep already completed for nvd.db snapshot ${snapshotAt}; nothing to do`;
+        log(`version-match: ${note}`);
+        result.noop = true;
+        finish(note);
+        return result;
+      }
+      if (m) { markerId = m.id; skipMatching = true; notes.push(`sweep matching already done for snapshot ${snapshotAt}; retrying rollup only`); }
+    }
+    if (!skipMatching) {
+      targets = selectSweepTargets(db, windowDays, now);
+      log(`version-match: sweep over ${targets.length} target(s) with evidence in the last ${windowDays} day(s)`);
+    }
+  }
+
+  for (const target of skipMatching ? [] : targets) {
     try {
       const evidence = dedupe([...httpEvidence(db, target), ...portEvidence(db, target)]);
       for (const s of evidence) {
@@ -151,6 +208,21 @@ export async function runVersionMatch(opts: VersionMatchOpts): Promise<VersionMa
   if (result.skippedVersions) notes.push(`${result.skippedVersions} evidence version(s) skipped (fewer than 2 numeric segments)`);
   if (result.busySkipped) notes.push(`${result.busySkipped} finding(s) skipped: scan.db busy`);
   if (result.failedTargets) notes.push(`${result.failedTargets} target(s) failed`);
+  if (sweep && !opts.dryRun) {
+    const clean = skipMatching || (result.failedTargets === 0 && result.busySkipped === 0);
+    if (snapshotAt && clean && markerId === null) {
+      markerId = db.startRun(SWEEP_TOOL, { snapshotAt, windowDays, targets: targets.length }, at);
+    }
+    if (clean) {
+      const ok = opts.rollup ? await opts.rollup() : true;
+      if (!ok) { result.exitCode = 1; notes.push('cve-rollup failed after sweep'); log('WARN: cve-rollup failed after the sweep'); }
+      else if (markerId !== null) {
+        db.finishRun(markerId, { targetsCount: targets.length, findingsCount: result.inserted, at: new Date().toISOString() });
+      }
+    } else {
+      notes.push('sweep incomplete: no marker written, the next run re-matches this snapshot');
+    }
+  }
   finish(notes.length ? notes.join('; ') : undefined);
   log(`version-match: ${result.matched} match(es), ${result.inserted} inserted, ${result.skippedVersions} skipped version(s), ${result.busySkipped} busy, ${result.failedTargets} failed target(s)${opts.dryRun ? ' (dry run)' : ''}`);
   return result;
@@ -192,39 +264,59 @@ function insert(
 
 function usage(): void {
   console.error(`Usage: version-match --targets <file> --sqlite <scan.db> [--nvd-db <path>] [--max-age-days N] [--dry-run]
+       version-match --all [--window <days>] --sqlite <scan.db> [--nvd-db <path>] [--dry-run]
 
 Matches versions in http_probes / ports against nvd.db and writes tool=version-match CVE findings.
 
   --nvd-db <path>       default: ${DEFAULT_NVD_DB}
   --max-age-days <N>    warn and mark findings nvd_stale when nvd.db is older (default: 14)
+  --all                 sweep: ignore --targets, re-match every target with http/port evidence
+                        seen in the last --window days, once per nvd.db snapshot, then run cve-rollup
+  --window <days>       evidence age limit for --all (default: ${DEFAULT_SWEEP_WINDOW_DAYS})
   --dry-run             print matches, write nothing
   --targets, --scope, --strict, --sqlite: as for the other wrappers`);
 }
 
 /** Pull this tool's own flags out of argv so parseCommonCli does not mistake their values for targets. */
-function splitOwnFlags(argv: string[]): { rest: string[]; nvdDb: string; maxAgeDays: number; dryRun: boolean } {
+function splitOwnFlags(argv: string[]): { rest: string[]; nvdDb: string; maxAgeDays: number; dryRun: boolean; all: boolean; windowDays: number } {
   const rest = argv.slice(0, 2);
-  let nvdDb = DEFAULT_NVD_DB, maxAgeDays = 14, dryRun = false;
+  let nvdDb = DEFAULT_NVD_DB, maxAgeDays = 14, dryRun = false, all = false, windowDays = DEFAULT_SWEEP_WINDOW_DAYS;
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === '--nvd-db') nvdDb = argv[++i] ?? '';
     else if (a === '--max-age-days') maxAgeDays = Number(argv[++i]);
     else if (a === '--dry-run') dryRun = true;
+    else if (a === '--all') all = true;
+    else if (a === '--window') windowDays = Number(argv[++i]);
     else rest.push(a);
   }
-  return { rest, nvdDb, maxAgeDays, dryRun };
+  return { rest, nvdDb, maxAgeDays, dryRun, all, windowDays };
 }
 
 async function main(): Promise<void> {
   const own = splitOwnFlags(process.argv);
   const opts = parseCommonCli(own.rest);
   if (opts.help) { usage(); process.exit(0); }
-  if (!opts.targetsFile || !own.nvdDb || !Number.isFinite(own.maxAgeDays) || own.maxAgeDays < 0) { usage(); process.exit(2); }
-  if (!fs.existsSync(opts.targetsFile)) { console.error(`FATAL: targets file not found: ${opts.targetsFile}`); process.exit(2); }
-  const { targets } = prepareTargets(opts);
-  const db = openDb(opts.sqlite ?? 'scan.db');
+  if ((!own.all && !opts.targetsFile) || !own.nvdDb || !Number.isFinite(own.maxAgeDays) || own.maxAgeDays < 0
+      || !Number.isFinite(own.windowDays) || own.windowDays <= 0) { usage(); process.exit(2); }
+  let targets: string[] = [];
+  if (!own.all) {
+    if (!fs.existsSync(opts.targetsFile)) { console.error(`FATAL: targets file not found: ${opts.targetsFile}`); process.exit(2); }
+    targets = prepareTargets(opts).targets;
+  }
+  const sqlite = opts.sqlite ?? 'scan.db';
+  const db = openDb(sqlite);
+  // Same invocation as scan-all's stage 3; a separate process, as there.
+  const rollup = async (): Promise<boolean> => {
+    const r = await run('npx', ['tsx', 'src/cve-rollup.ts', '--sqlite', sqlite]);
+    if (r.stderr) console.error(r.stderr.trimEnd());
+    return r.code === 0;
+  };
   try {
-    const r = await runVersionMatch({ db, targets, nvdDb: own.nvdDb, maxAgeDays: own.maxAgeDays, dryRun: own.dryRun });
+    const r = await runVersionMatch({
+      db, targets, nvdDb: own.nvdDb, maxAgeDays: own.maxAgeDays, dryRun: own.dryRun,
+      all: own.all, windowDays: own.windowDays, rollup,
+    });
     process.exitCode = r.exitCode;
   } finally {
     db.close();

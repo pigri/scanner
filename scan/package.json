@@ -23,6 +23,7 @@
     "cve-rollup": "tsx src/cve-rollup.ts",
     "cve-enrich": "tsx src/cve-enrich.ts",
     "version-match": "tsx src/version-match.ts",
+    "version-match:all": "tsx src/version-match.ts --all --sqlite scan.db",
     "nvd-sync": "tsx src/nvd-sync.ts",
     "graph-export": "tsx src/graph-export.ts",
     "cname-takeover": "tsx src/cname-takeover.ts",
