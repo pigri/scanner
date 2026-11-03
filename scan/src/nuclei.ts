@@ -4,6 +4,7 @@ import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, writeLines, resolveOutputPath } from './lib/runner.js';
 import { openDb, type Db } from './lib/db.js';
 import { fetchCanary, probeUrl, hashBody, isNearCanary, type CanaryProbe } from './lib/catchall.js';
+import { cveIdsFor } from './lib/nuclei-cve.js';
 
 // Nuclei templates whose semantics are "did the server return a page for this
 // path?" — these fire false positives on catch-all responders that return the
@@ -260,27 +261,33 @@ Everything after '--' is passed to nuclei verbatim.`));
         const titlePrefix = isSuspect ? '[needs review] ' : '';
         const baseTitle = row.info?.name ?? tid;
 
-        db.insertFinding({
-          tool: 'nuclei',
-          target: targetHost,
-          category: tid,
-          severity: isSuspect ? 'info' : (row.info?.severity ?? null),
-          title: `${titlePrefix}${baseTitle}${reviewNote}`,
-          cve: cves && cves.length ? cves[0]! : null,
-          matched_at: row['matched-at'] ?? null,
-          meta: {
-            ...row,
-            needs_review: isSuspect || undefined,
-            confirmed_fake: confirmedFake || undefined,
-            body_status: bodyStatus,
-            body_preview: bodyPreview,
-            canary: canary
-              ? { url: canary.url, status: canary.status, size: canary.size, hash: canary.hash }
-              : undefined,
-          },
-          needsReview: isSuspect,
-        }, now, runId);
-        count++;
+        // Record EVERY CVE this template lists, not just the first: one
+        // finding per id. cve-rollup aggregates them per (target, cve_id), so a
+        // template carrying a CVE pair no longer loses its secondary id.
+        const meta = {
+          ...row,
+          needs_review: isSuspect || undefined,
+          confirmed_fake: confirmedFake || undefined,
+          body_status: bodyStatus,
+          body_preview: bodyPreview,
+          canary: canary
+            ? { url: canary.url, status: canary.status, size: canary.size, hash: canary.hash }
+            : undefined,
+        };
+        for (const cveId of cveIdsFor(cves)) {
+          db.insertFinding({
+            tool: 'nuclei',
+            target: targetHost,
+            category: tid,
+            severity: isSuspect ? 'info' : (row.info?.severity ?? null),
+            title: `${titlePrefix}${baseTitle}${reviewNote}`,
+            cve: cveId,
+            matched_at: row['matched-at'] ?? null,
+            meta,
+            needsReview: isSuspect,
+          }, now, runId);
+          count++;
+        }
         if (isSuspect) reviewCount++;
       } catch { /* ignore */ }
     }
