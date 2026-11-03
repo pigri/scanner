@@ -200,3 +200,55 @@ describe('toCertRecords multi-deployment', () => {
     ]);
   });
 });
+
+describe('toCertRecords subject fields', () => {
+  const mk = (attrs: Array<{ oid: { name: string }; value: string }>) => ({
+    server_scan_results: [
+      {
+        server_location: { hostname: 'subj.example', port: 443 },
+        scan_status: 'COMPLETED',
+        scan_result: {
+          certificate_info: {
+            result: {
+              certificate_deployments: [
+                {
+                  received_certificate_chain: [
+                    {
+                      fingerprint_sha256: fp1,
+                      subject: { rfc4514_string: 'CN=subj.example', attributes: attrs },
+                      issuer: { rfc4514_string: 'CN=CA' },
+                      public_key: { algorithm: 'ECPublicKey', key_size: 256 },
+                      signature_hash_algorithm: { name: 'sha256' },
+                      subject_alternative_name: { dns_names: ['subj.example'] },
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      },
+    ],
+  });
+
+  it('extracts organization, org unit, locality and country from the subject', () => {
+    const recs = toCertRecords(mk([
+      { oid: { name: 'countryName' }, value: 'HU' },
+      { oid: { name: 'localityName' }, value: 'Budapest' },
+      { oid: { name: 'organizationName' }, value: 'Országos Kórházi Főigazgatóság' },
+      { oid: { name: 'organizationalUnitName' }, value: 'IT Dept' },
+      { oid: { name: 'commonName' }, value: 'subj.example' },
+    ]));
+    expect(recs[0]).toMatchObject({
+      organization: 'Országos Kórházi Főigazgatóság',
+      orgUnit: 'IT Dept',
+      locality: 'Budapest',
+      country: 'HU',
+    });
+  });
+
+  it('leaves subject fields null for a DV cert with only a CN', () => {
+    const recs = toCertRecords(mk([{ oid: { name: 'commonName' }, value: 'subj.example' }]));
+    expect(recs[0]).toMatchObject({ organization: null, orgUnit: null, locality: null, country: null });
+  });
+});
