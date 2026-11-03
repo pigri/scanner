@@ -1,11 +1,9 @@
 #!/usr/bin/env -S node --loader tsx
 import fs from 'node:fs';
 import path from 'node:path';
-import { extractCtHosts, extractCertspotterHosts } from './lib/ct.js';
 import { makeDomainFilter } from './lib/ddg.js';
 import { openDb } from './lib/db.js';
-
-type Source = 'crtsh' | 'certspotter' | 'both';
+import { queryAll, type CtSource } from './lib/ct-fetch.js';
 
 interface Opts {
   patterns: string[];
@@ -14,7 +12,7 @@ interface Opts {
   exclude: string[];
   merge: string | null;
   timeoutMs: number;
-  source: Source;
+  source: CtSource;
   sqlite: string | null;
   help?: boolean;
 }
@@ -39,7 +37,7 @@ function parseArgs(argv: string[]): Opts {
     else if (a === '--exclude') opts.exclude = next().split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
     else if (a === '--merge') opts.merge = next();
     else if (a === '--timeout-ms') opts.timeoutMs = parseInt(next(), 10);
-    else if (a === '--source') opts.source = next() as Source;
+    else if (a === '--source') opts.source = next() as CtSource;
     else if (a === '--sqlite') opts.sqlite = next();
     else if (a === '-h' || a === '--help') opts.help = true;
     else rest.push(a);
@@ -51,9 +49,9 @@ function parseArgs(argv: string[]): Opts {
 function usage(): void {
   console.error(`Usage: ct-log <pattern...> [options]
 
-Query crt.sh certificate transparency logs for one or more domain patterns
-and emit a deduplicated hostname list. Use '%' as a wildcard in patterns
-(SQL LIKE style), e.g. '%.dtr.gov.hu' or '%.gov.hu'.
+Query certificate transparency logs (crt.sh + certspotter) for one or more
+domain patterns and emit a deduplicated hostname list. Use '%' as a wildcard
+in patterns (SQL LIKE style), e.g. '%.dtr.gov.hu' or '%.gov.hu'.
 
 Options:
   -o, --out <path>       Output file, one host per line (default: ct-hosts.txt)
@@ -64,77 +62,17 @@ Options:
   --source <src>         crtsh | certspotter | both (default: both — union)
   --sqlite <path>        Also write hosts + source tags to this SQLite DB
 
+Environment:
+  CERTSPOTTER_TOKEN      Certspotter API token for higher rate limits (sent as
+                         'Authorization: Bearer'). Without one, certspotter is
+                         tried once with no backoff (retrying an anonymous 429
+                         only wastes time); a token enables retries.
+  CT_CRTSH_DISABLED=1    Skip crt.sh (escape hatch if it starts 502ing again).
+
 Examples:
   ct-log '%.dtr.gov.hu' -o dtr-hosts.txt
   ct-log '%.gov.hu' --exclude nki.gov.hu,nbsz.gov.hu --merge domains.txt
 `);
-}
-
-async function queryCrtSh(pattern: string, timeoutMs: number): Promise<string[]> {
-  const url = `https://crt.sh/?q=${encodeURIComponent(pattern)}&output=json`;
-  const res = await fetch(url, {
-    headers: { 'User-Agent': 'discovery/ct-log', Accept: 'application/json' },
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!res.ok) throw new Error(`crt.sh returned HTTP ${res.status}`);
-  const text = await res.text();
-  if (!text.trim()) return [];
-  let json: unknown;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    throw new Error(`crt.sh returned non-JSON (${text.length}b, likely HTML error page)`);
-  }
-  return extractCtHosts(json);
-}
-
-function patternToDomain(pattern: string): string {
-  // '%.dtr.gov.hu' or '*.dtr.gov.hu' -> 'dtr.gov.hu'
-  return pattern.replace(/^[%*]\./, '').replace(/^%/, '').trim();
-}
-
-async function queryCertspotter(pattern: string, timeoutMs: number): Promise<string[]> {
-  const domain = patternToDomain(pattern);
-  const url =
-    `https://api.certspotter.com/v1/issuances?domain=${encodeURIComponent(domain)}` +
-    `&include_subdomains=true&expand=dns_names`;
-  const res = await fetch(url, {
-    headers: { 'User-Agent': 'discovery/ct-log', Accept: 'application/json' },
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!res.ok) throw new Error(`certspotter returned HTTP ${res.status}`);
-  const json = await res.json();
-  return extractCertspotterHosts(json);
-}
-
-// TEMPORARY: crt.sh has been returning 502 Bad Gateway globally since
-// 2026-08-26 (their public sqlite backend is overloaded). Silently skip it
-// so 'both'/'crtsh' runs don't waste time waiting on failures. Delete this
-// block and the `CRTSH_DISABLED` gate to re-enable when they recover.
-const CRTSH_DISABLED = true;
-
-async function queryAll(pattern: string, source: Source, timeoutMs: number, log: (s: string) => void): Promise<string[]> {
-  const all = new Set<string>();
-  const attempt = async (name: string, fn: () => Promise<string[]>) => {
-    try {
-      const hosts = await fn();
-      log(`    ${name}: ${hosts.length} hosts`);
-      for (const h of hosts) all.add(h);
-    } catch (e: unknown) {
-      log(`    ${name}: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  };
-  if (source === 'crtsh' || source === 'both') {
-    if (CRTSH_DISABLED) {
-      log('    crt.sh: SKIPPED (temporarily disabled — 502s global since 2026-08-26)');
-    } else {
-      await attempt('crt.sh', () => queryCrtSh(pattern, timeoutMs));
-    }
-  }
-  if (source === 'certspotter' || source === 'both') {
-    await attempt('certspotter', () => queryCertspotter(pattern, timeoutMs));
-  }
-  return [...all];
 }
 
 async function main(): Promise<void> {
@@ -143,6 +81,8 @@ async function main(): Promise<void> {
     usage();
     process.exit(opts.patterns.length ? 0 : 1);
   }
+  const crtshEnabled = process.env.CT_CRTSH_DISABLED !== '1';
+  const token = process.env.CERTSPOTTER_TOKEN || undefined;
   const keep = makeDomainFilter(opts.suffix, opts.exclude);
   const existing = opts.merge
     ? new Set(
@@ -155,7 +95,15 @@ async function main(): Promise<void> {
   const log = (s: string) => console.error(s);
   for (const pattern of opts.patterns) {
     console.error(`querying ${opts.source}: ${pattern}`);
-    const hosts = await queryAll(pattern, opts.source, opts.timeoutMs, log);
+    const hosts = await queryAll(pattern, opts.source, {
+      timeoutMs: opts.timeoutMs,
+      crtshEnabled,
+      token,
+      // Anonymous certspotter 429s are a steady-state limit; retrying wastes
+      // time per parent. Only retry when a token lifts that limit.
+      certspotterMaxRetries: token ? undefined : 0,
+      log,
+    });
     let kept = 0, newHosts = 0;
     for (const raw of hosts) {
       const filtered = keep(raw);

@@ -24,7 +24,7 @@ function parseArgs(argv: string[]): Opts {
     suffix: 'gov.hu',
     domainsFile: 'domains.txt',
     seclist: 'top-5000',
-    ctSources: 'certspotter',
+    ctSources: 'both',
     skipBrute: false,
     skipCt: false,
     skipEnrich: false,
@@ -60,7 +60,7 @@ Options:
   --suffix <domain>        Only keep hosts under this suffix (default: gov.hu)
   --domains <file>         Master hostname file (default: domains.txt)
   --seclist <name>         SecLists variant (default: top-5000)
-  --ct-sources <s>         CT source(s): crtsh | certspotter | both (default: certspotter)
+  --ct-sources <s>         CT source(s): crtsh | certspotter | both (default: both)
   --skip-brute             Skip DNS brute step
   --skip-ct                Skip CT log step
   --skip-enrich            Skip enrichment
