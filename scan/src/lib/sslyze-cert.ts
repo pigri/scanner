@@ -38,7 +38,22 @@ export interface SslyzeCertResult { server_scan_results?: SslyzeServerResult[] }
 export function b64FingerprintToHex(b64: string | null | undefined): string | null {
   if (!b64) return null;
   const hex = Buffer.from(b64, 'base64').toString('hex');
-  return hex ? hex.toUpperCase() : null;
+  // A SHA-256 fingerprint is exactly 32 bytes; reject anything else so a
+  // malformed value can never be stored in a shape that fails dedup against
+  // testssl's 64-char hex.
+  return hex.length === 64 ? hex.toUpperCase() : null;
+}
+
+/**
+ * Pre-`JSON.parse` rewrite: quote every integer `serial_number` value so it
+ * survives as a string. A certificate serial routinely exceeds 2^53 and would
+ * lose precision as a JS number. Only the bare `"serial_number":` key matches
+ * (never a `*_serial_number` key, never an in-string occurrence, which would
+ * need escaped quotes and so break the key/colon adjacency); an already-quoted
+ * value is left untouched because the next char is `"`, not a digit or sign.
+ */
+export function quoteBigSerials(text: string): string {
+  return text.replace(/("serial_number":\s*)(-?\d+)/g, '$1"$2"');
 }
 
 /** "ECPublicKey" → "EC", "RSAPublicKey" → "RSA", else the name uppercased. */

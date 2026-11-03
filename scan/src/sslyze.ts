@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, resolveOutputPath } from './lib/runner.js';
 import { openDb, type Db } from './lib/db.js';
-import { toCertRecords, type SslyzeCertResult } from './lib/sslyze-cert.js';
+import { toCertRecords, quoteBigSerials, type SslyzeCertResult } from './lib/sslyze-cert.js';
 
 // Live-HTTPS targets from either http_probes (https://) or a 443/tcp port.
 function loadHttpsTargets(db: Db, targets: readonly string[]): string[] {
@@ -139,11 +139,8 @@ Wrapper flags (before '--'):
     return;
   }
 
-  // Pre-quote big-integer serials before parsing: a certificate serial_number
-  // routinely exceeds 2^53 and would lose precision as a JS number (see
-  // lib/sslyze-cert.ts).
-  const rawText = fs.readFileSync(outFile, 'utf8').replace(/("serial_number":\s*)(\d+)/g, '$1"$2"');
-  const raw = JSON.parse(rawText) as SslyzeResult;
+  // Pre-quote big-integer serials before parsing (see quoteBigSerials).
+  const raw = JSON.parse(quoteBigSerials(fs.readFileSync(outFile, 'utf8'))) as SslyzeResult;
   const rows = raw.server_scan_results ?? [];
   let findings = 0;
   const emit = (target: string, category: string, severity: string, title: string, meta: unknown): void => {

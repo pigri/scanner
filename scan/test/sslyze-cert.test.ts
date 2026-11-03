@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { toCertRecords, b64FingerprintToHex } from '../src/lib/sslyze-cert.js';
+import { toCertRecords, b64FingerprintToHex, quoteBigSerials } from '../src/lib/sslyze-cert.js';
 
 // Trimmed from a real sslyze run (site.okfo.gov.hu, run #15324) plus a synthetic
 // RSA leaf and two records that must be skipped. serial_number is a STRING here
@@ -133,5 +133,70 @@ describe('toCertRecords', () => {
     expect(c.sigAlgo).toBe('sha384');
     expect(c.serial).toBe('12345');
     expect(c.selfSigned).toBe(true);
+  });
+});
+
+
+describe('quoteBigSerials', () => {
+  it('round-trips a serial above 2^53 as an exact string', () => {
+    const big = '7742690324942097440523856490400309004';
+    const parsed = JSON.parse(quoteBigSerials(`{"serial_number": ${big}}`));
+    expect(parsed.serial_number).toBe(big); // not 7.74e+36
+  });
+  it('leaves an already-quoted serial untouched', () => {
+    const parsed = JSON.parse(quoteBigSerials('{"serial_number": "123"}'));
+    expect(parsed.serial_number).toBe('123');
+  });
+  it('quotes a negative serial too', () => {
+    const parsed = JSON.parse(quoteBigSerials('{"serial_number": -5}'));
+    expect(parsed.serial_number).toBe('-5');
+  });
+  it('does not touch other numbers or a *_serial_number key', () => {
+    const parsed = JSON.parse(quoteBigSerials('{"key_size": 2048, "x_serial_number": 5, "serial_number": 9}'));
+    expect(parsed.key_size).toBe(2048);        // number, untouched
+    expect(parsed.x_serial_number).toBe(5);    // suffixed key, untouched
+    expect(parsed.serial_number).toBe('9');    // the real key, quoted
+  });
+});
+
+// A single host presenting several deployments, the middle one fingerprint-less.
+const fp1 = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=';
+const fp2 = 'ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=';
+const leaf = (fingerprint_sha256: string | undefined, algo: string, cn: string) => ({
+  ...(fingerprint_sha256 !== undefined ? { fingerprint_sha256 } : {}),
+  public_key: { algorithm: algo, key_size: 256 },
+  signature_hash_algorithm: { name: 'sha256' },
+  subject: { rfc4514_string: `CN=${cn}`, attributes: [{ oid: { name: 'commonName' }, value: cn }] },
+  issuer: { rfc4514_string: 'CN=Issuing CA' },
+  subject_alternative_name: { dns_names: [cn] },
+});
+const multiFixture = {
+  server_scan_results: [
+    {
+      server_location: { hostname: 'multi.example', port: 443 },
+      scan_status: 'COMPLETED',
+      scan_result: {
+        certificate_info: {
+          result: {
+            certificate_deployments: [
+              { received_certificate_chain: [leaf(fp1, 'ECPublicKey', 'a')] },
+              { received_certificate_chain: [leaf(undefined, 'ECPublicKey', 'b')] }, // no fingerprint → skipped
+              { received_certificate_chain: [leaf(fp2, 'RSAPublicKey', 'c')] },
+            ],
+          },
+        },
+      },
+    },
+  ],
+};
+
+describe('toCertRecords multi-deployment', () => {
+  it('numbers certIndex per host and skips a fingerprint-less deployment without consuming an index', () => {
+    const recs = toCertRecords(multiFixture);
+    expect(recs).toHaveLength(2);
+    expect(recs.map((r) => ({ target: r.target, port: r.port, certIndex: r.certIndex, keyAlgo: r.keyAlgo }))).toEqual([
+      { target: 'multi.example', port: 443, certIndex: 1, keyAlgo: 'EC' },
+      { target: 'multi.example', port: 443, certIndex: 2, keyAlgo: 'RSA' },
+    ]);
   });
 });
