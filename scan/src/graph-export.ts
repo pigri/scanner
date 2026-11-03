@@ -281,7 +281,7 @@ async function renderPng(htmlPath: string, outPng: string, w: number, h: number,
     const page = await browser.newPage();
     // Capture in-page console + errors so silent breakage surfaces on stderr.
     page.on('console', (msg) => { if (['error', 'warn'].includes(msg.type())) console.error(`  [page ${msg.type()}] ${msg.text()}`); });
-    page.on('pageerror', (err) => console.error(`  [page error] ${err.message}`));
+    page.on('pageerror', (err) => console.error(`  [page error] ${err instanceof Error ? err.message : String(err)}`));
     // Large graphs (thousands of nodes) inline a big JSON literal + take
     // seconds to parse; the default 30s goto is too tight. Give the whole
     // page-load path settleMs + 60s of headroom.
