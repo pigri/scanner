@@ -168,8 +168,18 @@ function main(): void {
   }
   // Single BEGIN IMMEDIATE txn: takes the write lock once (waiting up to the
   // bumped busy_timeout for it) instead of racing the workers on each row.
+  const hasLatest = !!db.raw.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='risk_latest'").get();
   const writeAll = db.raw.transaction((batch: typeof rows) => {
     for (const row of batch) insertStmt.run(row.target, row.score, row.breakdownJson, now, runId);
+    if (hasLatest) {
+      for (const row of batch) {
+        db.raw.prepare(
+          `INSERT INTO risk_latest(target, score, updated_at, created_at)
+           VALUES(?, ?, ?, ?)
+           ON CONFLICT(target) DO UPDATE SET score=excluded.score, updated_at=excluded.updated_at`,
+        ).run(row.target, row.score, now, now);
+      }
+    }
   });
   writeAll.immediate(rows);
 

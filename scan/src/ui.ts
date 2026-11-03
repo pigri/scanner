@@ -143,20 +143,33 @@ function logicalFindings(): LogicalFinding[] {
 
 // Per-target aggregate: latest risk score, first/last assessment, finding
 // severity tallies and CVE count. Computed once with GROUP-BY passes and cached
-// briefly — risk_scores can be very large (hourly snapshots), so recomputing it
-// on every pagination/filter request was the source of slow paging.
+// briefly. Uses risk_latest (a summary table with one row per target) instead
+// of scanning all 4.8M risk_scores rows.
 interface TargetRow {
   target: string; score: number; created_at: string | null; updated_at: string | null;
   critical: number; high: number; medium: number; low: number; info: number;
   findings: number; cves: number;
 }
+const hasRiskLatest = tableExists(scan, 'risk_latest');
 let targetsCache: { rows: TargetRow[]; at: number } | null = null;
 function targetRows(): TargetRow[] {
   const now = Date.now();
   if (targetsCache && now - targetsCache.at < 60000) return targetsCache.rows;
-  const rows = scan
-    .prepare(
-      `WITH latest AS MATERIALIZED (
+  const sql = hasRiskLatest
+    ? `WITH agg AS MATERIALIZED (
+         SELECT target,
+           SUM(severity='critical') critical, SUM(severity='high') high,
+           SUM(severity='medium') medium, SUM(severity='low') low, SUM(severity='info') info,
+           COUNT(*) findings,
+           SUM(CASE WHEN cve IS NOT NULL AND cve!='' THEN 1 ELSE 0 END) cves
+         FROM findings GROUP BY target)
+       SELECT rl.target target, rl.score score, rl.created_at, rl.updated_at,
+         COALESCE(agg.critical,0) critical, COALESCE(agg.high,0) high, COALESCE(agg.medium,0) medium,
+         COALESCE(agg.low,0) low, COALESCE(agg.info,0) info,
+         COALESCE(agg.findings,0) findings, COALESCE(agg.cves,0) cves
+       FROM risk_latest rl
+       LEFT JOIN agg ON agg.target = rl.target`
+    : `WITH latest AS MATERIALIZED (
          SELECT target, score FROM (SELECT target, score, MAX(computed_at) FROM risk_scores WHERE ${NO_URL} GROUP BY target)),
        rstime AS MATERIALIZED (
          SELECT target, MIN(computed_at) created_at, MAX(computed_at) updated_at
@@ -173,9 +186,8 @@ function targetRows(): TargetRow[] {
          COALESCE(agg.low,0) low, COALESCE(agg.info,0) info,
          COALESCE(agg.findings,0) findings, COALESCE(agg.cves,0) cves
        FROM latest JOIN rstime ON rstime.target = latest.target
-       LEFT JOIN agg ON agg.target = latest.target`,
-    )
-    .all() as TargetRow[];
+       LEFT JOIN agg ON agg.target = latest.target`;
+  const rows = scan.prepare(sql).all() as TargetRow[];
   targetsCache = { rows, at: now };
   return rows;
 }
@@ -276,8 +288,10 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
       .all();
     const topRisk = scan
       .prepare(
-        `SELECT target, score FROM (SELECT target, score, MAX(computed_at) FROM risk_scores WHERE ${NO_URL} GROUP BY target)
-         ORDER BY score DESC, target LIMIT 10`,
+        hasRiskLatest
+          ? `SELECT target, score FROM risk_latest ORDER BY score DESC, target LIMIT 10`
+          : `SELECT target, score FROM (SELECT target, score, MAX(computed_at) FROM risk_scores WHERE ${NO_URL} GROUP BY target)
+             ORDER BY score DESC, target LIMIT 10`,
       )
       .all();
     // Recently scanned hosts: last time each target produced any finding
@@ -285,13 +299,21 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
     // batch). Correlated subqueries run only for the 12 output rows.
     const recentTargets = scan
       .prepare(
-        `SELECT t.target, t.last_scan,
-           (SELECT score FROM risk_scores r WHERE r.target=t.target ORDER BY computed_at DESC LIMIT 1) score,
-           (SELECT COUNT(*) FROM findings f WHERE f.target=t.target AND f.severity='critical') critical,
-           (SELECT COUNT(*) FROM findings f WHERE f.target=t.target AND f.severity='high') high,
-           (SELECT COUNT(*) FROM findings f WHERE f.target=t.target) findings
-         FROM (SELECT target, MAX(seen_at) last_scan FROM findings GROUP BY target
-               ORDER BY last_scan DESC LIMIT 12) t`,
+        hasRiskLatest
+          ? `SELECT t.target, t.last_scan,
+               (SELECT score FROM risk_latest WHERE target=t.target) score,
+               (SELECT COUNT(*) FROM findings f WHERE f.target=t.target AND f.severity='critical') critical,
+               (SELECT COUNT(*) FROM findings f WHERE f.target=t.target AND f.severity='high') high,
+               (SELECT COUNT(*) FROM findings f WHERE f.target=t.target) findings
+             FROM (SELECT target, MAX(seen_at) last_scan FROM findings GROUP BY target
+                   ORDER BY last_scan DESC LIMIT 12) t`
+          : `SELECT t.target, t.last_scan,
+               (SELECT score FROM risk_scores r WHERE r.target=t.target ORDER BY computed_at DESC LIMIT 1) score,
+               (SELECT COUNT(*) FROM findings f WHERE f.target=t.target AND f.severity='critical') critical,
+               (SELECT COUNT(*) FROM findings f WHERE f.target=t.target AND f.severity='high') high,
+               (SELECT COUNT(*) FROM findings f WHERE f.target=t.target) findings
+             FROM (SELECT target, MAX(seen_at) last_scan FROM findings GROUP BY target
+                   ORDER BY last_scan DESC LIMIT 12) t`,
       )
       .all();
     const queue = tableExists(scan, 'scan_queue')
@@ -347,14 +369,23 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
         targets: (
           scan
             .prepare(
-              `SELECT COUNT(*) c FROM (
-                 SELECT target FROM ports        WHERE ${NO_URL}
-                 UNION SELECT target FROM http_probes  WHERE ${NO_URL}
-                 UNION SELECT target FROM findings     WHERE ${NO_URL}
-                 UNION SELECT target FROM dns_records  WHERE ${NO_URL}
-                 UNION SELECT target FROM cves         WHERE ${NO_URL}
-                 UNION SELECT target FROM risk_scores  WHERE ${NO_URL}
-               )`,
+              hasRiskLatest
+                ? `SELECT COUNT(*) c FROM (
+                     SELECT target FROM ports        WHERE ${NO_URL}
+                     UNION SELECT target FROM http_probes  WHERE ${NO_URL}
+                     UNION SELECT target FROM findings     WHERE ${NO_URL}
+                     UNION SELECT target FROM dns_records  WHERE ${NO_URL}
+                     UNION SELECT target FROM cves         WHERE ${NO_URL}
+                     UNION SELECT target FROM risk_latest
+                   )`
+                : `SELECT COUNT(*) c FROM (
+                     SELECT target FROM ports        WHERE ${NO_URL}
+                     UNION SELECT target FROM http_probes  WHERE ${NO_URL}
+                     UNION SELECT target FROM findings     WHERE ${NO_URL}
+                     UNION SELECT target FROM dns_records  WHERE ${NO_URL}
+                     UNION SELECT target FROM cves         WHERE ${NO_URL}
+                     UNION SELECT target FROM risk_scores  WHERE ${NO_URL}
+                   )`,
             )
             .get() as { c: number }
         ).c,
@@ -725,7 +756,11 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
     }
     const scoreMap = new Map<string, number>();
     for (const s of scan
-      .prepare(`SELECT target, score FROM (SELECT target, score, MAX(computed_at) FROM risk_scores WHERE ${NO_URL} GROUP BY target)`)
+      .prepare(
+        hasRiskLatest
+          ? `SELECT target, score FROM risk_latest`
+          : `SELECT target, score FROM (SELECT target, score, MAX(computed_at) FROM risk_scores WHERE ${NO_URL} GROUP BY target)`,
+      )
       .all() as { target: string; score: number }[]) scoreMap.set(s.target, s.score);
     const byCvss = (a: Item, b: Item) => (b.cvss ?? 0) - (a.cvss ?? 0);
     const cap = (xs: Item[]) => xs.sort(byCvss).slice(0, 12);
@@ -843,8 +878,9 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
     if (!isHost) {
       // Not an exact host → treat the input as a search and offer matches to
       // pick from (filtered by what was typed, else the highest-risk hosts).
-      const latest =
-        `SELECT target, score FROM (SELECT target, score, MAX(computed_at) FROM risk_scores WHERE ${NO_URL} GROUP BY target)`;
+      const latest = hasRiskLatest
+        ? `SELECT target, score FROM risk_latest`
+        : `SELECT target, score FROM (SELECT target, score, MAX(computed_at) FROM risk_scores WHERE ${NO_URL} GROUP BY target)`;
       const suggest = t
         ? scan
             .prepare(`${latest} WHERE target LIKE ? ORDER BY score DESC, target LIMIT 50`)
