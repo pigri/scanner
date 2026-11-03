@@ -1,0 +1,13 @@
+[Unit]
+Description=Nightly version-match sweep over recent scan.db evidence
+
+[Timer]
+# Fires 02:00, after nvd-sync (01:30) so the sweep reads the fresh mirror; the
+# service's After=nvd-sync.service orders them if the sync is still running.
+# Persistent=true reruns a missed job.
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
