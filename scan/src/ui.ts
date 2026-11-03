@@ -13,6 +13,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { resolveDbArg } from './lib/db-arg.js';
 import { filterAndFacet } from './lib/target-filter.js';
+import { CERT_ORG_SQL } from './lib/cert-org.js';
 
 interface Opts {
   scanDb: string;
@@ -149,6 +150,7 @@ interface TargetRow {
   target: string; score: number; created_at: string | null; updated_at: string | null;
   critical: number; high: number; medium: number; low: number; info: number;
   findings: number; cves: number;
+  organization: string | null;
 }
 let targetsCache: { rows: TargetRow[]; at: number } | null = null;
 function targetRows(): TargetRow[] {
@@ -167,13 +169,16 @@ function targetRows(): TargetRow[] {
            SUM(severity='medium') medium, SUM(severity='low') low, SUM(severity='info') info,
            COUNT(*) findings,
            SUM(CASE WHEN cve IS NOT NULL AND cve!='' THEN 1 ELSE 0 END) cves
-         FROM findings GROUP BY target)
+         FROM findings GROUP BY target),
+       certorg AS MATERIALIZED (${CERT_ORG_SQL})
        SELECT latest.target target, latest.score score, rstime.created_at, rstime.updated_at,
          COALESCE(agg.critical,0) critical, COALESCE(agg.high,0) high, COALESCE(agg.medium,0) medium,
          COALESCE(agg.low,0) low, COALESCE(agg.info,0) info,
-         COALESCE(agg.findings,0) findings, COALESCE(agg.cves,0) cves
+         COALESCE(agg.findings,0) findings, COALESCE(agg.cves,0) cves,
+         certorg.organization organization
        FROM latest JOIN rstime ON rstime.target = latest.target
-       LEFT JOIN agg ON agg.target = latest.target`,
+       LEFT JOIN agg ON agg.target = latest.target
+       LEFT JOIN certorg ON certorg.target = latest.target`,
     )
     .all() as TargetRow[];
   targetsCache = { rows, at: now };
@@ -389,6 +394,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
       cve: q.get('cve'), // '1' = has ≥1 CVE, '0' = none
       minScore: minRaw != null && minRaw !== '' ? Number(minRaw) : null,
       maxScore: maxRaw != null && maxRaw !== '' ? Number(maxRaw) : null,
+      org: q.get('org') || '',
       sort: q.get('sort') || 'score',
       offset: clampInt(q.get('offset'), 0, 0, 1e9),
       limit: clampInt(q.get('limit'), 100, 1, 1000),
@@ -1400,10 +1406,10 @@ async function renderOverview(){
   overviewTimer=setTimeout(()=>{if(current==='overview'&&!document.hidden)renderOverview();},30000);
 }
 
-const T_DEFAULT={q:'',severities:[],cve:'',minScore:'',maxScore:'',sort:'score',offset:0,limit:100};
+const T_DEFAULT={q:'',severities:[],cve:'',org:'',minScore:'',maxScore:'',sort:'score',offset:0,limit:100};
 let tState={...T_DEFAULT};
 async function renderTargets(){
-  const d=await api('targets',{q:tState.q,severity:tState.severities.join(','),cve:tState.cve,minScore:tState.minScore,maxScore:tState.maxScore,sort:tState.sort,offset:tState.offset,limit:tState.limit});
+  const d=await api('targets',{q:tState.q,severity:tState.severities.join(','),cve:tState.cve,org:tState.org,minScore:tState.minScore,maxScore:tState.maxScore,sort:tState.sort,offset:tState.offset,limit:tState.limit});
   // severity facet chips — targets having ≥1 finding of that severity
   const sevChips=el('div',{class:'toolbar'},el('span',{class:'muted'},'has severity:'),...SEV.map(s=>{
     const on=tState.severities.includes(s);
@@ -1411,6 +1417,7 @@ async function renderTargets(){
       el('span',{class:'gdot',style:'background:'+SEVCOL[s]}),' '+s+' ('+num(d.sevCounts?d.sevCounts[s]||0:0)+')');
   }),el('span',{class:'muted'},num(d.total)+' targets'));
   const cveSel=fsel(tState.cve,[{value:'',label:'CVE: any'},{value:'1',label:'has CVE'},{value:'0',label:'no CVE'}],v=>{tState.cve=v;tState.offset=0;renderTargets();});
+  const orgSel=fsel(tState.org,[{value:'',label:'org: any'},...(d.orgs||[]).map(o=>({value:o.org,label:o.org+' ('+num(o.c)+')'}))],v=>{tState.org=v;tState.offset=0;renderTargets();});
   const sortSel=fsel(tState.sort,[{value:'score',label:'sort: risk score'},{value:'critical',label:'sort: critical'},{value:'high',label:'sort: high'},{value:'findings',label:'sort: findings'},{value:'cves',label:'sort: CVEs'},{value:'updated',label:'sort: updated'},{value:'created',label:'sort: created'},{value:'target',label:'sort: name'}],v=>{tState.sort=v;tState.offset=0;renderTargets();});
   const minS=el('input',{type:'number',min:'0',max:'100',placeholder:'min',value:tState.minScore,style:'width:70px',title:'min risk score'});
   minS.addEventListener('change',()=>{tState.minScore=minS.value;tState.offset=0;renderTargets();});
@@ -1418,10 +1425,10 @@ async function renderTargets(){
   maxS.addEventListener('change',()=>{tState.maxScore=maxS.value;tState.offset=0;renderTargets();});
   const search=el('input',{type:'search',placeholder:'filter target name…',value:tState.q});
   search.addEventListener('input',debounce(()=>{tState.q=search.value;tState.offset=0;renderTargets();},250));
-  const active=tState.severities.length||tState.cve||tState.minScore||tState.maxScore||tState.q||tState.sort!=='score';
+  const active=tState.severities.length||tState.cve||tState.org||tState.minScore||tState.maxScore||tState.q||tState.sort!=='score';
   const clear=el('button',{class:'pillbtn',onclick:()=>{tState={...T_DEFAULT,severities:[]};renderTargets();}},'clear'+(active?' ✕':''));
-  const filterRow=el('div',{class:'toolbar'},cveSel,sortSel,el('span',{class:'muted'},'score'),minS,el('span',{class:'muted'},'–'),maxS,search,clear);
-  const rows=d.rows.map(r=>[link(r.target),el('span',{class:'score'},r.score),
+  const filterRow=el('div',{class:'toolbar'},cveSel,orgSel,sortSel,el('span',{class:'muted'},'score'),minS,el('span',{class:'muted'},'–'),maxS,search,clear);
+  const rows=d.rows.map(r=>[link(r.target),el('span',{class:'mono muted'},esc(r.organization)),el('span',{class:'score'},r.score),
     r.critical?el('span',{class:'pill sev-critical'},r.critical):'',
     r.high?el('span',{class:'pill sev-high'},r.high):'',
     r.medium?el('span',{class:'pill sev-medium'},r.medium):'',
@@ -1430,7 +1437,7 @@ async function renderTargets(){
     el('span',{class:'mono muted'},isoSec(r.created_at)),
     el('span',{class:'mono muted'},isoSec(r.updated_at))]);
   setView(sevChips,filterRow,
-    el('div',{class:'panel'},table(['Target','Score','Crit','High','Med','Findings','CVEs','Created','Updated'],rows,[1,5]),pager(tState,d.total,renderTargets)));
+    el('div',{class:'panel'},table(['Target','Organization','Score','Crit','High','Med','Findings','CVEs','Created','Updated'],rows,[2,6]),pager(tState,d.total,renderTargets)));
 }
 
 async function renderTarget(t){

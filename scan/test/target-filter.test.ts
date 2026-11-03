@@ -14,13 +14,14 @@ function row(o: Partial<TargetRowLike> & { target: string }): TargetRowLike {
     cves: o.cves ?? 0,
     created_at: o.created_at ?? null,
     updated_at: o.updated_at ?? null,
+    organization: o.organization ?? null,
   };
 }
 
 const rows: TargetRowLike[] = [
-  row({ target: 'a.example.com', score: 90, critical: 2, findings: 5, cves: 3 }),
-  row({ target: 'b.example.com', score: 50, high: 1, findings: 2, cves: 0 }),
-  row({ target: 'c.other.com', score: 10, info: 4, findings: 4, cves: 1 }),
+  row({ target: 'a.example.com', score: 90, critical: 2, findings: 5, cves: 3, organization: 'Acme Kft.' }),
+  row({ target: 'b.example.com', score: 50, high: 1, findings: 2, cves: 0, organization: 'Acme Kft.' }),
+  row({ target: 'c.other.com', score: 10, info: 4, findings: 4, cves: 1, organization: null }),
 ];
 
 describe('filterAndFacet', () => {
@@ -77,4 +78,27 @@ describe('filterAndFacet', () => {
     const r = filterAndFacet(rows, { sort: 'target' });
     expect(r.rows.map((x) => x.target)).toEqual(['a.example.com', 'b.example.com', 'c.other.com']);
   });
+
+  it('org filter keeps only rows with the exact Organization; null-org rows excluded', () => {
+    const r = filterAndFacet(rows, { org: 'Acme Kft.' });
+    expect(r.rows.map((x) => x.target)).toEqual(['a.example.com', 'b.example.com']);
+    expect(r.total).toBe(2);
+    // a non-matching org yields nothing, and never a null-org row
+    expect(filterAndFacet(rows, { org: 'Nope Zrt.' }).rows).toEqual([]);
+  });
+
+  it('orgs facet counts each non-null Organization and is independent of the org selection', () => {
+    const r = filterAndFacet(rows, { org: 'Acme Kft.' });
+    // facet computed over the base (before the org selection), nulls excluded
+    expect(r.orgs).toEqual([{ org: 'Acme Kft.', c: 2 }]);
+  });
+
+  it('org composes with search, severity and score filters', () => {
+    const r = filterAndFacet(rows, { org: 'Acme Kft.', sevList: ['critical'] });
+    expect(r.rows.map((x) => x.target)).toEqual(['a.example.com']);
+    // sevCounts stays independent of the org selection too
+    expect(r.sevCounts.critical).toBe(1);
+    expect(r.sevCounts.high).toBe(1);
+  });
+
 });

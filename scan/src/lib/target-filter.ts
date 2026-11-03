@@ -14,6 +14,7 @@ export interface TargetRowLike {
   cves: number;
   created_at: string | null;
   updated_at: string | null;
+  organization: string | null;
 }
 
 export const SEVERITIES: readonly string[] = ['critical', 'high', 'medium', 'low', 'info'];
@@ -36,9 +37,15 @@ export interface TargetFilterParams {
   cve?: string | null; // '1' = has >=1 CVE, '0' = none
   minScore?: number | null;
   maxScore?: number | null;
+  org?: string; // exact-match on the cert Organization; '' = any
   sort?: string;
   offset?: number;
   limit?: number;
+}
+
+export interface OrgCount {
+  org: string;
+  c: number;
 }
 
 export interface TargetFacetResult<T> {
@@ -47,6 +54,7 @@ export interface TargetFacetResult<T> {
   limit: number;
   offset: number;
   sevCounts: Record<string, number>;
+  orgs: OrgCount[];
 }
 
 export function filterAndFacet<T extends TargetRowLike>(
@@ -60,12 +68,13 @@ export function filterAndFacet<T extends TargetRowLike>(
   const minScore = p.minScore as number;
   const maxScore = p.maxScore as number;
   const sevList = (p.sevList ?? []).map((s) => s.trim()).filter((s) => SEVERITIES.includes(s));
+  const org = (p.org ?? '').trim();
   const sort = p.sort || 'score';
   const offset = p.offset ?? 0;
   const limit = p.limit ?? 100;
 
-  // Base predicate: everything except the severity selection, so the severity
-  // facet counts are independent of the severity the user has chosen.
+  // Base predicate: everything except the severity and org selections, so each
+  // facet's counts stay independent of its own selection.
   const base = all.filter((r) => {
     if (search && !r.target.toLowerCase().includes(search)) return false;
     if (cve === '1' && !(r.cves > 0)) return false;
@@ -79,9 +88,22 @@ export function filterAndFacet<T extends TargetRowLike>(
   for (const s of SEVERITIES) sevCounts[s] = 0;
   for (const r of base) for (const s of SEVERITIES) if (sevOf(r, s) > 0) sevCounts[s] = (sevCounts[s] ?? 0) + 1;
 
-  const filtered = sevList.length
-    ? base.filter((r) => sevList.some((s) => sevOf(r, s) > 0))
-    : base;
+  // Org facet: # of targets per non-null Organization, over the base (so it is
+  // independent of the chosen org, matching the severity-facet convention).
+  const orgTally = new Map<string, number>();
+  for (const r of base) {
+    const o = r.organization;
+    if (o != null && o !== '') orgTally.set(o, (orgTally.get(o) ?? 0) + 1);
+  }
+  const orgs: OrgCount[] = [...orgTally.entries()]
+    .map(([o, c]) => ({ org: o, c }))
+    .sort((a, b) => b.c - a.c || a.org.localeCompare(b.org));
+
+  const filtered = base.filter((r) => {
+    if (sevList.length && !sevList.some((s) => sevOf(r, s) > 0)) return false;
+    if (org && r.organization !== org) return false;
+    return true;
+  });
 
   const cmp = (a: T, b: T): number => {
     const byNum = (k: keyof TargetRowLike) =>
@@ -107,5 +129,12 @@ export function filterAndFacet<T extends TargetRowLike>(
   };
   filtered.sort(cmp);
 
-  return { rows: filtered.slice(offset, offset + limit), total: filtered.length, limit, offset, sevCounts };
+  return {
+    rows: filtered.slice(offset, offset + limit),
+    total: filtered.length,
+    limit,
+    offset,
+    sevCounts,
+    orgs,
+  };
 }
