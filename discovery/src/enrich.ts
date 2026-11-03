@@ -5,6 +5,7 @@ import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import maxmind from 'maxmind';
 import type { EnrichedAddress, EnrichedRow } from './lib/graph.js';
+import { fetchCert, certCsvFields } from './lib/cert.js';
 import { openDb, type Db } from './lib/db.js';
 import { ResolverPool, resolveHost, reverseIp, DEFAULT_RESOLVERS } from './lib/resolve.js';
 
@@ -25,6 +26,7 @@ interface Opts {
   refresh: boolean;
   sqlite: string | null;
   source: string;
+  tlsCert: boolean;
   help?: boolean;
 }
 
@@ -43,6 +45,7 @@ function parseArgs(argv: string[]): Opts {
     refresh: false,
     sqlite: null,
     source: 'enrich',
+    tlsCert: true,
   };
   const rest: string[] = [];
   for (let i = 2; i < argv.length; i++) {
@@ -65,6 +68,7 @@ function parseArgs(argv: string[]): Opts {
     else if (a === '--refresh-mmdb') opts.refresh = true;
     else if (a === '--sqlite') opts.sqlite = next();
     else if (a === '--source') opts.source = next();
+    else if (a === '--no-tls-cert') opts.tlsCert = false;
     else if (a === '--help' || a === '-h') opts.help = true;
     else rest.push(a);
   }
@@ -92,6 +96,7 @@ Options:
   --no-ptr               Skip reverse DNS
   --sqlite <path>        Also write hosts/ips/resolutions/ptr history to this SQLite DB
   --source <name>        Source tag for provenance (default: enrich)
+  --no-tls-cert          Skip the TLS certificate fetch (org/CN/issuer per host)
 `);
 }
 
@@ -156,7 +161,7 @@ async function main(): Promise<void> {
   const csvStream = opts.outCsv ? fs.createWriteStream(opts.outCsv) : null;
   if (csvStream) {
     csvStream.write(
-      'domain,ip,ip_version,ptr,asn,as_name,as_domain,country_code,country,continent_code\n'
+      'domain,ip,ip_version,ptr,asn,as_name,as_domain,country_code,country,continent_code,cert_org,cert_cn,cert_issuer_org\n'
     );
   }
 
@@ -198,7 +203,18 @@ async function main(): Promise<void> {
       })
     );
 
-    const row: EnrichedRow = { domain, addresses, errors: dns4and6.errors };
+    // One cert per hostname (keyed by SNI), fetched against the first
+    // resolved IP (prefer v4). fetchCert never throws, so the worker never
+    // rejects and enrich still reaches a clean exit 0 (the enrich-exit invariant).
+    const cert =
+      opts.tlsCert && addresses.length
+        ? await fetchCert(domain, {
+            ip: (addresses.find((a) => a.version === 4) ?? addresses[0]!).ip,
+            timeoutMs: opts.timeoutMs,
+          })
+        : null;
+
+    const row: EnrichedRow = { domain, addresses, errors: dns4and6.errors, cert };
     if (jsonlStream) jsonlStream.write(JSON.stringify(row) + '\n');
 
     if (db && addresses.length) {
@@ -215,7 +231,7 @@ async function main(): Promise<void> {
     }
     if (csvStream) {
       if (!addresses.length) {
-        csvStream.write([csvEscape(domain), '', '', '', '', '', '', '', '', ''].join(',') + '\n');
+        csvStream.write([csvEscape(domain), '', '', '', '', '', '', '', '', '', ...certCsvFields(cert).map(csvEscape)].join(',') + '\n');
       } else {
         for (const a of addresses) {
           csvStream.write(
@@ -230,6 +246,7 @@ async function main(): Promise<void> {
               csvEscape(a.country_code),
               csvEscape(a.country),
               csvEscape(a.continent_code),
+              ...certCsvFields(cert).map(csvEscape),
             ].join(',') + '\n'
           );
         }
