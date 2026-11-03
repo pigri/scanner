@@ -123,8 +123,24 @@ systemctl --user enable --now scan-worker scan-report-worker
 
 ## Scheduling (daily new hosts + weekly full re-scan)
 
-With the workers running as daemons, three **systemd timers** feed them:
+With the workers running as daemons, five **systemd timers** feed them:
 
+- **`nvd-sync.timer`** (daily 01:30): `nvd-sync` incrementally refreshes the
+  offline NVD mirror `/storage/gen0sec-scan/nvd.db` (full build when the db does
+  not exist yet) that `version-match` reads during `scan-all`. Runs before the
+  template refresh and `scan-feed` so the day's scans see a fresh mirror.
+  `NVD_API_KEY` is read from `.env.scan`. The first build is a full pull
+  (~100 min keyed, longer unauthenticated); the timer allows 4 h for it, but on
+  a slow link you can bootstrap it once by hand before enabling the timer:
+  `cd ~/gen0sec/redteam/scan && set -a && . .env.scan && set +a && npm run nvd-sync -- --full --nvd-db /storage/gen0sec-scan/nvd.db`.
+- **`version-match-sweep.timer`** (daily 02:00, after `nvd-sync`): `version-match
+  --all` re-matches the version evidence already in `scan.db` (http_probes /
+  ports seen in the last 30 days) against the fresh mirror, so CVEs published
+  since a host was last scanned appear without a rescan, then runs `cve-rollup`.
+  It does this once per `nvd.db` snapshot: a second firing on the same snapshot
+  exits 0 without writing. A missing `nvd.db` warns and exits 0. The marker is a
+  `runs` row (`tool='version-match-sweep'`, `args_json.snapshotAt`). If the
+  rollup fails the unit fails, and the next firing retries only the rollup.
 - **`nuclei-update-templates.timer`** (daily 02:30): `nuclei -update-templates`
   so any subsequent scan uses the day's fresh template set. Safe mid-scan —
   nuclei loads templates at process start.
@@ -139,11 +155,14 @@ Both use `Persistent=true`, so a run missed while the box was off fires on next 
 ```bash
 # link the feeder units + timers
 for u in scan-feed.service scan-feed.timer scan-rescan.service scan-rescan.timer \
-         nuclei-update-templates.service nuclei-update-templates.timer; do
+         nuclei-update-templates.service nuclei-update-templates.timer \
+         nvd-sync.service nvd-sync.timer \
+         version-match-sweep.service version-match-sweep.timer; do
   ln -sf ~/gen0sec/redteam/scan/deploy/$u ~/.config/systemd/user/$u
 done
 systemctl --user daemon-reload
-systemctl --user enable --now scan-feed.timer scan-rescan.timer nuclei-update-templates.timer
+systemctl --user enable --now scan-feed.timer scan-rescan.timer nuclei-update-templates.timer nvd-sync.timer \
+  version-match-sweep.timer
 
 # inspect
 systemctl --user list-timers                 # next fire times

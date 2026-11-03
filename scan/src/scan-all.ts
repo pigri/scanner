@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run } from './lib/runner.js';
+import { DEFAULT_NVD_DB } from './version-match.js';
 
 async function step(name: string, cmd: string, args: string[]): Promise<number> {
   const start = Date.now();
@@ -35,6 +36,10 @@ Dependency graph:
                         waybackurls (CDX-index URLs → discovered_urls),
                         dnsx     (A/AAAA/CNAME/MX/TXT/NS/SOA → dns_records),
                         checkdmarc (SPF/DMARC/MTA-STS/DNSSEC → findings)  ← concurrent
+  Stage 2.5 (after 2):  version-match (http_probes + ports versions vs the offline
+                        nvd.db mirror → CVE findings; must follow Stage 2 and
+                        precede cve-rollup; SKIP=version-match turns it off;
+                        a missing nvd.db is a no-op, not a failure)
   Stage 3 (parallel):   wpscan (WordPress-flagged hosts from httpx),
                         nuclei-urls (rescan katana URLs — needs Stage-2 katana done),
                         kiterunner (API-route brute; api-shaped hosts only),
@@ -45,9 +50,10 @@ Dependency graph:
                         sslyze (modern TLS audit: Heartbleed/ROBOT/CCS/SSLv3/TLS1.x),
                         cve-rollup (aggregate findings.cve → cves table),
                         cname-takeover (dangling-CNAME check vs 29 providers),
-                        data-integrity (self-heal report_queue + cve rollup drift),
                         enum4linux-ng + smbmap + rpcclient (--live-only, gated on
                         nmap-detected port 445/139)
+  Tail (sequential):    data-integrity (self-heal report_queue + cve rollup drift;
+                        runs after all of Stage 3 has finished)
 
 Each stage inherits --scope / --strict / --targets / --sqlite.
 
@@ -141,6 +147,15 @@ Env vars:
     await Promise.all(stage2.map(([name, args]) => step(name, tsx, args)));
   }
 
+  // Stage 2.5: version-match — reads http_probes (stage 1) AND ports (stage 2),
+  // so it must follow the stage-2 await, and it must precede stage 3 because
+  // cve-rollup aggregates its findings. A missing nvd.db makes it exit 0.
+  // SKIP=version-match turns it off.
+  if (runOne('version-match')) {
+    console.error('\n>>> STAGE 2.5 / version-match');
+    await step('version-match', tsx, ['tsx', 'src/version-match.ts', ...common, '--nvd-db', DEFAULT_NVD_DB]);
+  }
+
   // Stage 3: wpscan (needs httpx from stage 1) + SMB tools (need nmap ports
   // from stage 2). They share no data with each other so run in parallel.
   const stage3: Array<[string, string[]]> = [];
@@ -195,9 +210,6 @@ Env vars:
     const cta: string[] = ['tsx', 'src/cname-takeover.ts', ...common, '--', '--all'];
     stage3.push(['cname-takeover', cta]);
   }
-  // data-integrity — self-heal (report_queue orphans + cve rollup drift).
-  // Runs last so it observes the batch's completed state.
-  if (runOne('data-integrity')) stage3.push(['data-integrity', ['tsx', 'src/data-integrity.ts', '--sqlite', opts.sqlite ?? 'scan.db']]);
 
   // SMB layer — each wrapper uses --live-only to filter to hosts the ports table
   // has seen listening on 445/139. If nmap surfaced no SMB in the current batch's
@@ -221,6 +233,14 @@ Env vars:
     } else {
       await Promise.all(stage3.map(([name, args]) => step(name, tsx, args)));
     }
+  }
+
+  // data-integrity — self-heal (report_queue orphans + cve rollup drift).
+  // Sequential tail after stage 3 so it observes the batch's completed state,
+  // including cve-rollup's output.
+  if (runOne('data-integrity')) {
+    console.error('\n>>> TAIL: data-integrity');
+    await step('data-integrity', tsx, ['tsx', 'src/data-integrity.ts', '--sqlite', opts.sqlite ?? 'scan.db']);
   }
 
   const totalDt = ((Date.now() - pipelineStart) / 1000).toFixed(1);

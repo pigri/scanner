@@ -80,7 +80,7 @@ async function main(): Promise<void> {
   // ─── Check 2: findings.cve rows missing from the cves rollup ────────────
   const missingCveFindings = db.prepare(
     `SELECT COUNT(*) c FROM findings f
-     WHERE f.cve IS NOT NULL AND f.cve != ''
+     WHERE f.cve GLOB 'CVE-*'
        AND NOT EXISTS (
          SELECT 1 FROM cves c
          WHERE c.target = f.target AND c.cve_id = f.cve
@@ -96,7 +96,7 @@ async function main(): Promise<void> {
     r2.action = `cve-rollup exit ${proc.status}`;
     const after = db.prepare(
       `SELECT COUNT(*) c FROM findings f
-       WHERE f.cve IS NOT NULL AND f.cve != ''
+       WHERE f.cve GLOB 'CVE-*'
          AND NOT EXISTS (SELECT 1 FROM cves c WHERE c.target = f.target AND c.cve_id = f.cve)`
     ).get() as { c: number };
     r2.healed = missingCveFindings.c - after.c;

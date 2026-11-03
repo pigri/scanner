@@ -1,39 +1,40 @@
 import { describe, it, expect } from 'vitest';
 import { parseLiveHosts } from '../src/lib/liveness.js';
 
+// parseLiveHosts consumes naabu `-j` (JSONL) output: one
+// {"host":"…","ip":"…","port":N} object per open port. probeLive spawns naabu
+// (not httpx — see the rationale comment in liveness.ts), so these cases mirror
+// what naabu actually emits, collapsed to distinct host/ip identifiers.
 describe('parseLiveHosts', () => {
-  it('extracts hostnames from httpx -silent URL lines', () => {
-    const out = 'https://a.gov.hu\nhttp://b.gov.hu\n';
+  it('extracts the host from naabu JSONL lines', () => {
+    const out = '{"host":"a.gov.hu","ip":"1.2.3.4","port":443}\n{"host":"b.gov.hu","ip":"5.6.7.8","port":22}\n';
     expect([...parseLiveHosts(out)].sort()).toEqual(['a.gov.hu', 'b.gov.hu']);
   });
 
-  it('handles a trailing [status] and ports', () => {
-    const out = 'https://a.gov.hu:8443 [200]\nhttps://b.gov.hu/login [302]\n';
-    const live = parseLiveHosts(out);
-    expect(live.has('a.gov.hu')).toBe(true);
-    expect(live.has('b.gov.hu')).toBe(true);
-  });
-
-  it('strips ANSI colour codes', () => {
-    const out = '\x1b[34mhttps://a.gov.hu\x1b[0m [200]\n';
-    expect(parseLiveHosts(out).has('a.gov.hu')).toBe(true);
-  });
-
-  it('lowercases and dedupes', () => {
-    const out = 'https://A.GOV.HU\nhttps://a.gov.hu\n';
+  it('collapses the many open-port lines of one host to a single id', () => {
+    const out =
+      '{"host":"a.gov.hu","ip":"1.2.3.4","port":80}\n' +
+      '{"host":"a.gov.hu","ip":"1.2.3.4","port":443}\n' +
+      '{"host":"a.gov.hu","ip":"1.2.3.4","port":22}\n';
     expect([...parseLiveHosts(out)]).toEqual(['a.gov.hu']);
   });
 
-  it('handles bare hosts without a scheme', () => {
-    expect(parseLiveHosts('a.gov.hu\n').has('a.gov.hu')).toBe(true);
+  it('falls back to ip when the row carries no host', () => {
+    expect(parseLiveHosts('{"ip":"84.206.102.29","port":80}\n').has('84.206.102.29')).toBe(true);
   });
 
-  it('ignores blank lines and returns empty for empty input', () => {
-    expect(parseLiveHosts('\n\n  \n').size).toBe(0);
+  it('lowercases and dedupes host ids', () => {
+    const out = '{"host":"A.GOV.HU","ip":"1.2.3.4","port":443}\n{"host":"a.gov.hu","ip":"1.2.3.4","port":80}\n';
+    expect([...parseLiveHosts(out)]).toEqual(['a.gov.hu']);
+  });
+
+  it('ignores blank lines, non-JSON lines and malformed JSON', () => {
+    const out = '\n  \nnot json\n{"host":"a.gov.hu","port":443}\n{"host":"oops"\n';
+    expect([...parseLiveHosts(out)]).toEqual(['a.gov.hu']);
+  });
+
+  it('returns empty for empty or whitespace-only input', () => {
     expect(parseLiveHosts('').size).toBe(0);
-  });
-
-  it('keeps IP targets', () => {
-    expect(parseLiveHosts('https://84.206.102.29 [200]\n').has('84.206.102.29')).toBe(true);
+    expect(parseLiveHosts('\n\n  \n').size).toBe(0);
   });
 });

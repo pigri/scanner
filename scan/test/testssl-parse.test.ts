@@ -10,7 +10,7 @@ describe('normalizeTestsslFinding', () => {
 
   it('builds title from the check id + finding value (not the value alone)', () => {
     const f = normalizeTestsslFinding({ id: 'cert_expirationStatus', severity: 'CRITICAL', finding: 'expired' })!;
-    expect(f.severity).toBe('critical');
+    expect(f.severity).toBe('medium'); // SEVERITY_OVERRIDES downgrades cert_expirationStatus (functional, not compromise)
     expect(f.category).toBe('cert_expirationStatus');
     expect(f.title).toBe('Certificate expiration: expired'); // NOT just "expired"
   });

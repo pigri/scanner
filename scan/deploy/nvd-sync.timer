@@ -1,0 +1,12 @@
+[Unit]
+Description=Nightly NVD CVE mirror sync (nvd.db)
+
+[Timer]
+# Fires 01:30 — before nuclei-update-templates (02:30) and scan-feed (03:00) so
+# the day's scans read a fresh mirror. Persistent=true reruns a missed job.
+OnCalendar=*-*-* 01:30:00
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

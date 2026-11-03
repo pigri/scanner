@@ -1,12 +1,13 @@
 #!/usr/bin/env -S node --loader tsx
 import fs from 'node:fs';
 import path from 'node:path';
-import dns from 'node:dns/promises';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import maxmind from 'maxmind';
 import type { EnrichedAddress, EnrichedRow } from './lib/graph.js';
+import { fetchCert, certCsvFields } from './lib/cert.js';
 import { openDb, type Db } from './lib/db.js';
+import { ResolverPool, resolveHost, reverseIp, DEFAULT_RESOLVERS } from './lib/resolve.js';
 
 const MMDB_URL =
   'https://github.com/gen0sec/geoip-databases/releases/latest/download/ipinfo_lite.mmdb';
@@ -18,12 +19,14 @@ interface Opts {
   outCsv: string | null;
   concurrency: number;
   timeoutMs: number;
+  maxTries: number;
   resolvers: string[] | null;
   ipv6: boolean;
   ptr: boolean;
   refresh: boolean;
   sqlite: string | null;
   source: string;
+  tlsCert: boolean;
   help?: boolean;
 }
 
@@ -35,12 +38,14 @@ function parseArgs(argv: string[]): Opts {
     outCsv: 'enriched.csv',
     concurrency: 20,
     timeoutMs: 5000,
-    resolvers: null,
+    maxTries: 3,
+    resolvers: DEFAULT_RESOLVERS,
     ipv6: true,
     ptr: true,
     refresh: false,
     sqlite: null,
     source: 'enrich',
+    tlsCert: true,
   };
   const rest: string[] = [];
   for (let i = 2; i < argv.length; i++) {
@@ -53,12 +58,17 @@ function parseArgs(argv: string[]): Opts {
     else if (a === '--no-jsonl') opts.outJsonl = null;
     else if (a === '--concurrency') opts.concurrency = parseInt(next(), 10);
     else if (a === '--timeout-ms') opts.timeoutMs = parseInt(next(), 10);
-    else if (a === '--resolvers') opts.resolvers = next().split(',').map((s) => s.trim()).filter(Boolean);
+    else if (a === '--resolvers') {
+      const v = next();
+      opts.resolvers = v === 'system' ? null : v.split(',').map((s) => s.trim()).filter(Boolean);
+    }
+    else if (a === '--max-tries') opts.maxTries = Math.max(1, parseInt(next(), 10) || 1);
     else if (a === '--no-ipv6') opts.ipv6 = false;
     else if (a === '--no-ptr') opts.ptr = false;
     else if (a === '--refresh-mmdb') opts.refresh = true;
     else if (a === '--sqlite') opts.sqlite = next();
     else if (a === '--source') opts.source = next();
+    else if (a === '--no-tls-cert') opts.tlsCert = false;
     else if (a === '--help' || a === '-h') opts.help = true;
     else rest.push(a);
   }
@@ -79,11 +89,14 @@ Options:
   --out-csv <path>       CSV output (default: enriched.csv; --no-csv to disable)
   --concurrency <N>      Parallel resolves (default: 20)
   --timeout-ms <N>       DNS timeout per query (default: 5000)
-  --resolvers <a,b,c>    Override system resolvers (e.g. 1.1.1.1,8.8.8.8)
+  --resolvers <a,b,c>    Resolvers to use (default: 1.1.1.1,8.8.8.8,9.9.9.9;
+                         pass 'system' to use the OS-configured resolvers)
+  --max-tries <N>        Retries per record on transient failures (default: 3)
   --no-ipv6              Skip AAAA lookups
   --no-ptr               Skip reverse DNS
   --sqlite <path>        Also write hosts/ips/resolutions/ptr history to this SQLite DB
   --source <name>        Source tag for provenance (default: enrich)
+  --no-tls-cert          Skip the TLS certificate fetch (org/CN/issuer per host)
 `);
 }
 
@@ -95,39 +108,6 @@ async function ensureMmdb(file: string, force: boolean): Promise<void> {
   await pipeline(Readable.fromWeb(res.body as any), fs.createWriteStream(file));
   const stat = fs.statSync(file);
   console.error(`saved ${file} (${(stat.size / 1024 / 1024).toFixed(1)} MiB)`);
-}
-
-async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`${label} timeout`)), ms)),
-  ]);
-}
-
-interface ResolveOutput { a: string[]; aaaa: string[]; errors: string[] }
-
-async function resolveDomain(name: string, opts: Opts, resolver: dns.Resolver): Promise<ResolveOutput> {
-  const out: ResolveOutput = { a: [], aaaa: [], errors: [] };
-  await Promise.all([
-    withTimeout(resolver.resolve4(name), opts.timeoutMs, 'A')
-      .then((r) => { out.a = r; })
-      .catch((e: Error & { code?: string }) => { out.errors.push(`A:${e.code || e.message}`); }),
-    opts.ipv6
-      ? withTimeout(resolver.resolve6(name), opts.timeoutMs, 'AAAA')
-          .then((r) => { out.aaaa = r; })
-          .catch((e: Error & { code?: string }) => { out.errors.push(`AAAA:${e.code || e.message}`); })
-      : Promise.resolve(),
-  ]);
-  return out;
-}
-
-async function reverseIp(ip: string, opts: Opts, resolver: dns.Resolver): Promise<string[]> {
-  if (!opts.ptr) return [];
-  try {
-    return await withTimeout(resolver.reverse(ip), opts.timeoutMs, 'PTR');
-  } catch {
-    return [];
-  }
 }
 
 async function pool<T, R>(items: readonly T[], size: number, worker: (item: T, idx: number) => Promise<R>): Promise<R[]> {
@@ -166,8 +146,7 @@ async function main(): Promise<void> {
   await ensureMmdb(opts.mmdb, opts.refresh);
   const geo = (await maxmind.open(opts.mmdb)) as { get(ip: string): GeoRow | null };
 
-  const resolver = new dns.Resolver();
-  if (opts.resolvers && opts.resolvers.length) resolver.setServers(opts.resolvers);
+  const resolverPool = new ResolverPool(opts.resolvers);
 
   const domains = fs
     .readFileSync(opts.input, 'utf8')
@@ -176,12 +155,13 @@ async function main(): Promise<void> {
     .filter(Boolean);
   const unique = [...new Set(domains)];
   console.error(`enriching ${unique.length} domains (concurrency ${opts.concurrency})...`);
+  console.error(`  resolvers: ${opts.resolvers ? opts.resolvers.join(',') : 'system'} · max-tries ${opts.maxTries}`);
 
   const jsonlStream = opts.outJsonl ? fs.createWriteStream(opts.outJsonl) : null;
   const csvStream = opts.outCsv ? fs.createWriteStream(opts.outCsv) : null;
   if (csvStream) {
     csvStream.write(
-      'domain,ip,ip_version,ptr,asn,as_name,as_domain,country_code,country,continent_code\n'
+      'domain,ip,ip_version,ptr,asn,as_name,as_domain,country_code,country,continent_code,cert_org,cert_cn,cert_issuer_org\n'
     );
   }
 
@@ -196,7 +176,11 @@ async function main(): Promise<void> {
   let done = 0, resolved = 0, ipCount = 0;
   const start = Date.now();
   await pool(unique, opts.concurrency, async (domain) => {
-    const dns4and6 = await resolveDomain(domain, opts, resolver);
+    const dns4and6 = await resolveHost(domain, resolverPool, {
+      ipv6: opts.ipv6,
+      maxTries: opts.maxTries,
+      timeoutMs: opts.timeoutMs,
+    });
     const ips = [
       ...dns4and6.a.map((ip) => ({ ip, version: 4 as const })),
       ...dns4and6.aaaa.map((ip) => ({ ip, version: 6 as const })),
@@ -204,7 +188,7 @@ async function main(): Promise<void> {
     const addresses: EnrichedAddress[] = await Promise.all(
       ips.map(async ({ ip, version }) => {
         const [ptr, geoRow] = await Promise.all([
-          reverseIp(ip, opts, resolver),
+          opts.ptr ? reverseIp(ip, resolverPool, opts.timeoutMs) : Promise.resolve([]),
           Promise.resolve(geo.get(ip) || {}),
         ]);
         return {
@@ -219,7 +203,18 @@ async function main(): Promise<void> {
       })
     );
 
-    const row: EnrichedRow = { domain, addresses, errors: dns4and6.errors };
+    // One cert per hostname (keyed by SNI), fetched against the first
+    // resolved IP (prefer v4). fetchCert never throws, so the worker never
+    // rejects and enrich still reaches a clean exit 0 (the enrich-exit invariant).
+    const cert =
+      opts.tlsCert && addresses.length
+        ? await fetchCert(domain, {
+            ip: (addresses.find((a) => a.version === 4) ?? addresses[0]!).ip,
+            timeoutMs: opts.timeoutMs,
+          })
+        : null;
+
+    const row: EnrichedRow = { domain, addresses, errors: dns4and6.errors, cert };
     if (jsonlStream) jsonlStream.write(JSON.stringify(row) + '\n');
 
     if (db && addresses.length) {
@@ -236,7 +231,7 @@ async function main(): Promise<void> {
     }
     if (csvStream) {
       if (!addresses.length) {
-        csvStream.write([csvEscape(domain), '', '', '', '', '', '', '', '', ''].join(',') + '\n');
+        csvStream.write([csvEscape(domain), '', '', '', '', '', '', '', '', '', ...certCsvFields(cert).map(csvEscape)].join(',') + '\n');
       } else {
         for (const a of addresses) {
           csvStream.write(
@@ -251,6 +246,7 @@ async function main(): Promise<void> {
               csvEscape(a.country_code),
               csvEscape(a.country),
               csvEscape(a.continent_code),
+              ...certCsvFields(cert).map(csvEscape),
             ].join(',') + '\n'
           );
         }

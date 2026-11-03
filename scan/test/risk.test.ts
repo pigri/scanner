@@ -34,6 +34,45 @@ describe('computeScore', () => {
     expect(r.breakdown.critical).toBe(0);
   });
 
+  describe('version-match tier', () => {
+    const vm = (cve: string, severity = 'critical') => ({ tool: 'version-match', severity, title: `${cve} on X (version match)`, cve, needsReview: false });
+
+    it('scores on its own curve and stays out of severity and cve buckets', () => {
+      const s = empty();
+      s.findings = [vm('CVE-2024-0001'), vm('CVE-2024-0002', 'high'), vm('CVE-2024-0003', 'medium')];
+      const b = computeScore(s).breakdown;
+      expect(b.versionMatch).toBe(3);
+      expect(b.versionMatchPoints).toBe(9); // 3 distinct * 3
+      expect(b.critical + b.high + b.medium + b.low + b.info).toBe(0);
+      expect(b.criticalPoints + b.highPoints + b.mediumPoints + b.cvePoints).toBe(0);
+      expect(b.reviewSkipped).toBe(0);
+    });
+
+    it('counts a repeated CVE once', () => {
+      const s = empty();
+      s.findings = [vm('CVE-2024-0001'), { ...vm('CVE-2024-0001'), title: 'same CVE, other url' }];
+      const b = computeScore(s).breakdown;
+      expect(b.versionMatch).toBe(1);
+      expect(b.versionMatchPoints).toBe(3);
+    });
+
+    it('uses the tail rate past 5 CVEs and caps at 20', () => {
+      const s = empty();
+      s.findings = Array.from({ length: 8 }, (_, i) => vm(`CVE-2024-${1000 + i}`));
+      expect(computeScore(s).breakdown.versionMatchPoints).toBe(16.5); // 5*3 + 3*0.5
+      s.findings = Array.from({ length: 100 }, (_, i) => vm(`CVE-2024-${2000 + i}`));
+      expect(computeScore(s).breakdown.versionMatchPoints).toBe(20);
+    });
+
+    it('leaves other tools CVE findings on the cvePoints tier', () => {
+      const s = empty();
+      s.findings = [{ tool: 'nuclei', severity: 'medium', title: 'a', cve: 'CVE-2024-0001' }];
+      const b = computeScore(s).breakdown;
+      expect(b.cvePoints).toBe(10);
+      expect(b.versionMatchPoints).toBe(0);
+    });
+  });
+
   it('adds 40 for one critical finding', () => {
     const s = empty();
     s.findings = [{ tool: 'nuclei', severity: 'critical', title: 'RCE', cve: null }];
@@ -42,12 +81,14 @@ describe('computeScore', () => {
     expect(r.breakdown.critical).toBe(1);
   });
 
-  it('scores high findings with diminishing returns (first 3 = 25 pts each, extras = 3 pts each, cap 100)', () => {
+  it('scores high findings with diminishing returns (first 4 = 12 pts each, extras = 3 pts each, cap 60)', () => {
     const s = empty();
-    s.findings = Array.from({ length: 10 }, () => ({ tool: 'nuclei', severity: 'high', title: 'x', cve: null }));
+    // Distinct titles so the dedupe (one row per tool|sev|title|cve) keeps all
+    // 10 and the tiered tail is actually exercised.
+    s.findings = Array.from({ length: 10 }, (_, i) => ({ tool: 'nuclei', severity: 'high', title: `high-${i}`, cve: null }));
     const r = computeScore(s);
-    // 3 * 25 (linear) + 7 * 3 (tail) = 75 + 21 = 96
-    expect(r.breakdown.highPoints).toBe(96);
+    // 4 * 12 (linear) + 6 * 3 (tail) = 48 + 18 = 66, capped at 60
+    expect(r.breakdown.highPoints).toBe(60);
   });
 
   it('adds 10 for each CVE (cap 30)', () => {
@@ -67,11 +108,11 @@ describe('computeScore', () => {
     expect(r.breakdown.takeover).toBe(30);
   });
 
-  it('adds 12 for weak TLS from testssl', () => {
+  it('adds 8 for weak TLS from testssl', () => {
     const s = empty();
     s.findings = [{ tool: 'testssl', severity: 'medium', title: 'RC4 supported', cve: null }];
     const r = computeScore(s);
-    expect(r.breakdown.tlsWeak).toBe(12);
+    expect(r.breakdown.tlsWeak).toBe(8);
   });
 
   it('adds 8 per risk keyword (cap 24)', () => {

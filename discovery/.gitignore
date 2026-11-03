@@ -7,3 +7,4 @@ domains.txt
 enriched.jsonl
 enriched.csv
 discovery/
+resolve-state.json

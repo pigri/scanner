@@ -357,12 +357,13 @@ Runs `nuclei -tags takeover -rate-limit 100`. Cheap subdomain-takeover check. Fi
 ```
 npm run scan-all -- --targets hosts.txt --scope scope.txt --sqlite scan.db
 ```
-Orchestrates the full pipeline in order: **httpx → nmap → nuclei → takeover → testssl → wpscan (only WordPress hosts from httpx) → gowitness.**
+Orchestrates the full pipeline in order: **httpx → nmap → nuclei → takeover → testssl → wpscan (only WordPress hosts from httpx) → gowitness.** After stage 2 (httpx and port scans populated) and before the stage-3 `cve-rollup`, `version-match` compares detected service/product versions against the offline NVD mirror (`/storage/gen0sec-scan/nvd.db`) and writes `tool='version-match'` CVE findings; a missing mirror is a no-op. The mirror is refreshed nightly (01:30) by the `nvd-sync.timer` unit (see `deploy/README.md`); `npm run nvd-sync` and `npm run version-match` run them by hand. A nightly sweep (`version-match-sweep.timer`, 02:00; `npm run version-match:all`) re-matches `scan.db` evidence from the last `--window` days (default 30) against each new mirror snapshot, once per snapshot, and then refreshes the rollup, so new CVEs light up without a rescan.
 
 Skip stages with `SKIP=<name,name>`:
 ```
 SKIP=wpscan,testssl npm run scan-all -- ...
 ```
+`SKIP=version-match` turns the version-to-CVE matching off.
 
 `--sqlite` flows down to every stage automatically.
 
@@ -385,16 +386,19 @@ npm run risk -- --db scan.db --suffix gov.hu --discovery-db ../discovery/recon.d
 
 | Signal | Weight | Cap |
 |---|---:|---:|
-| Critical findings | +40 each | 3 (max 120→cap) |
-| High findings | +25 each | 3 |
-| Medium findings | +8 each | 5 |
-| Known CVE | +10 each | 3 |
+| Critical findings | +100 first, +15 each extra | 140 |
+| High findings | +12 each (first 4), +3 each extra | 60 |
+| Medium findings | +5 each (first 5), +1 each extra | 30 |
+| Low findings | +1 each (first 10), +0.3 each extra | 15 |
+| Info findings | +0.2 each (first 20), +0.05 each extra | 5 |
+| Known CVE | +10 each (first 3), +2 each extra | 60 |
+| Version-match CVE (distinct) | +3 each (first 5), +0.5 each extra | 20 |
 | Subdomain takeover | +30 | flat |
-| Weak TLS (testssl LOW/MED/HIGH/CRITICAL) | +12 | flat |
+| Weak TLS (testssl LOW/MED/HIGH/CRITICAL) | +8 | flat |
 | WordPress detected | +5 | flat |
-| Open port count | +2 each | 10 |
-| Risk-keyword hostname (`admin`, `dev`, `staging`, `test`, `backup`, `old`, `legacy`, `jenkins`, `gitlab`, `sonar`, `phpmyadmin`, `.git`) | +8 each | 3 |
-| Foreign-country host (vs `--suffix`'s expected country) | +6 | flat |
+| Open port count | +2 each | 10 ports (20) |
+| Risk-keyword hostname (`admin`, `dev`, `staging`, `test`, `backup`, `old`, `legacy`, `jenkins`, `gitlab`, `sonar`, `phpmyadmin`, `.git`) | +8 each | 3 (24) |
+| Foreign-country host (vs `--suffix`'s expected country) | +15 | flat |
 | Shared IP with >5 domains | +4 | flat |
 | First-seen < 7 days ago | +3 | flat |
 

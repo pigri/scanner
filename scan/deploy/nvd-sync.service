@@ -1,0 +1,19 @@
+[Unit]
+Description=gen0sec NVD CVE mirror sync (incremental; builds /storage/gen0sec-scan/nvd.db)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Incremental by default: nvd-sync resumes from the cursor stored in nvd.db and
+# does a full build only when no db exists yet. The new db is built at
+# nvd.db.tmp and renamed over the old one on success, so scans never read a
+# half-written mirror. NVD_API_KEY (50 req/30s instead of 5) comes from
+# .env.scan, sourced like the scan workers do; it is never echoed or logged.
+ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; cd %h/gen0sec/redteam/scan && mkdir -p logs && ENVFILE="$PWD/.env.scan"; [ -r "$ENVFILE" ] && set -a && . "$ENVFILE" && set +a; exec npx tsx src/nvd-sync.ts --nvd-db /storage/gen0sec-scan/nvd.db >>logs/nvd-sync.log 2>&1'
+# Only the first build (full, no db yet) is long: measured ~100 min keyed, ~2 h
+# unauthenticated, and NVD's CVE count only grows. 4 h leaves headroom so a slow
+# first build is never SIGTERM'd — a killed build discards the .tmp, leaves no
+# mirror, and version-match silently no-ops. Nightly incremental runs finish in
+# seconds. For a slow link, bootstrap once by hand (see deploy/README.md).
+TimeoutStartSec=14400

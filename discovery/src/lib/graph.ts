@@ -1,3 +1,5 @@
+import type { CertInfo } from './cert.js';
+
 export interface EnrichedAddress {
   ip: string;
   version: 4 | 6;
@@ -14,6 +16,8 @@ export interface EnrichedRow {
   domain: string;
   addresses: EnrichedAddress[];
   errors: string[];
+  /** TLS certificate identity (subject O/CN, issuer O); null when not fetched or unreachable. */
+  cert?: CertInfo | null;
 }
 
 export interface GraphDomain {
