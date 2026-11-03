@@ -129,7 +129,10 @@ With the workers running as daemons, four **systemd timers** feed them:
   offline NVD mirror `/storage/gen0sec-scan/nvd.db` (full build when the db does
   not exist yet) that `version-match` reads during `scan-all`. Runs before the
   template refresh and `scan-feed` so the day's scans see a fresh mirror.
-  `NVD_API_KEY` is read from `.env.scan`.
+  `NVD_API_KEY` is read from `.env.scan`. The first build is a full pull
+  (~100 min keyed, longer unauthenticated); the timer allows 4 h for it, but on
+  a slow link you can bootstrap it once by hand before enabling the timer:
+  `cd ~/gen0sec/redteam/scan && set -a && . .env.scan && set +a && npm run nvd-sync -- --full --nvd-db /storage/gen0sec-scan/nvd.db`.
 - **`nuclei-update-templates.timer`** (daily 02:30): `nuclei -update-templates`
   so any subsequent scan uses the day's fresh template set. Safe mid-scan —
   nuclei loads templates at process start.
