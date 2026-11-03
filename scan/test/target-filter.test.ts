@@ -15,6 +15,7 @@ function row(o: Partial<TargetRowLike> & { target: string }): TargetRowLike {
     created_at: o.created_at ?? null,
     updated_at: o.updated_at ?? null,
     organization: o.organization ?? null,
+    active: o.active ?? 1,
   };
 }
 
@@ -101,4 +102,56 @@ describe('filterAndFacet', () => {
     expect(r.sevCounts.high).toBe(1);
   });
 
+
+  describe('archived hosts', () => {
+    const withArchived: TargetRowLike[] = [
+      ...rows,
+      row({ target: 'dead.example.com', score: 70, cves: 1, findings: 1, active: 0 }),
+      row({ target: 'gone.other.com', score: 5, active: 0 }),
+    ];
+    const names = (r: { rows: TargetRowLike[] }) => r.rows.map((x) => x.target);
+
+    it('default and empty archived show only active hosts', () => {
+      const expected = ['a.example.com', 'b.example.com', 'c.other.com'];
+      expect(names(filterAndFacet(withArchived, {}))).toEqual(expected);
+      expect(names(filterAndFacet(withArchived, { archived: '' }))).toEqual(expected);
+      expect(filterAndFacet(withArchived, {}).total).toBe(3);
+    });
+
+    it("archived='1' shows only archived hosts", () => {
+      const r = filterAndFacet(withArchived, { archived: '1' });
+      expect(names(r)).toEqual(['dead.example.com', 'gone.other.com']);
+      expect(r.total).toBe(2);
+    });
+
+    it("archived='all' shows both sets", () => {
+      const r = filterAndFacet(withArchived, { archived: 'all' });
+      expect(r.total).toBe(5);
+      expect(names(r)).toContain('dead.example.com');
+      expect(names(r)).toContain('a.example.com');
+    });
+
+    it('archivedCount counts archived hosts regardless of the chosen set', () => {
+      expect(filterAndFacet(withArchived, {}).archivedCount).toBe(2);
+      expect(filterAndFacet(withArchived, { archived: '1' }).archivedCount).toBe(2);
+      expect(filterAndFacet(withArchived, { archived: 'all' }).archivedCount).toBe(2);
+      expect(filterAndFacet(rows, {}).archivedCount).toBe(0);
+    });
+
+    it('search composes with each archived set', () => {
+      expect(names(filterAndFacet(withArchived, { search: 'example' }))).toEqual([
+        'a.example.com',
+        'b.example.com',
+      ]);
+      expect(names(filterAndFacet(withArchived, { search: 'example', archived: '1' }))).toEqual([
+        'dead.example.com',
+      ]);
+      expect(names(filterAndFacet(withArchived, { search: 'example', archived: 'all' }))).toEqual([
+        'a.example.com',
+        'dead.example.com',
+        'b.example.com',
+      ]);
+      expect(filterAndFacet(withArchived, { search: 'example' }).archivedCount).toBe(1);
+    });
+  });
 });
