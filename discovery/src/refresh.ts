@@ -140,11 +140,13 @@ async function main(): Promise<void> {
       fs.rmSync(unionFile, { force: true });
     }
 
-    // Read whatever enrich wrote, but do not trust it yet: enriched.jsonl is
-    // truncate-on-open, so a non-zero exit means a partial file. reclassify()
-    // throws on a non-zero code before any of the master lists are touched.
+    // enriched.jsonl is truncate-on-open, so a non-zero exit means a partial
+    // file whose final line may be truncated. Only parse it on a clean exit:
+    // reclassify() throws on a non-zero code regardless of rows (before any of
+    // the master lists are touched), so passing [] there keeps the abort while
+    // avoiding a raw JSON-parse error that would mask reclassify's message.
     const rows: { domain: string; addresses: unknown[] }[] = [];
-    if (fs.existsSync('enriched.jsonl')) {
+    if (code === 0 && fs.existsSync('enriched.jsonl')) {
       for (const line of fs.readFileSync('enriched.jsonl', 'utf8').split('\n')) {
         if (!line.trim()) continue;
         rows.push(JSON.parse(line));

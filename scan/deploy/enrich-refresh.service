@@ -1,5 +1,5 @@
 [Unit]
-Description=gen0sec discovery enrich-refresh (resolve + PTR + MMDB, filter phantoms)
+Description=gen0sec discovery enrich-refresh (resolve + PTR + MMDB, self-healing phantom reclassify)
 After=network-online.target
 Wants=network-online.target
 # Runs on a 30-min cadence, offset ~15 min after ct-mirror so a freshly-enqueued
