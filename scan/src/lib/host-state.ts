@@ -49,3 +49,21 @@ export function decideHostStates(
   }
   return out;
 }
+
+// Reads dnsx -j output. `rows` counts parsed rows with a host, so a caller can
+// tell an empty output (crash, timeout) from a run that answered.
+export function parseDnsxResolved(jsonl: string): { rows: number; resolved: Set<string> } {
+  const resolved = new Set<string>();
+  let rows = 0;
+  for (const line of jsonl.split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const row = JSON.parse(t) as { host?: string; a?: string[]; aaaa?: string[] };
+      if (!row.host) continue;
+      rows++;
+      if ((row.a?.length ?? 0) > 0 || (row.aaaa?.length ?? 0) > 0) resolved.add(row.host);
+    } catch { /* ignore */ }
+  }
+  return { rows, resolved };
+}

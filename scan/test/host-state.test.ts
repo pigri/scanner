@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { decideHostStates, DNS_ARCHIVE_THRESHOLD, type HostStateRow } from '../src/lib/host-state.js';
+import { decideHostStates, parseDnsxResolved, DNS_ARCHIVE_THRESHOLD, type HostStateRow } from '../src/lib/host-state.js';
 
 const T1 = '2026-11-01T00:00:00Z';
 const T2 = '2026-11-02T00:00:00Z';
@@ -84,5 +84,30 @@ describe('decideHostStates', () => {
     const out = decideHostStates(['a.example'], new Set(['zzz.example']), new Map(), T2, 1);
     expect(out).toHaveLength(1);
     expect(out[0]!.active).toBe(0);
+  });
+});
+
+describe('parseDnsxResolved', () => {
+  it('collects hosts with at least one A or AAAA', () => {
+    const text = [
+      JSON.stringify({ host: 'a.example', a: ['192.0.2.1'] }),
+      JSON.stringify({ host: 'b.example', aaaa: ['2001:db8::1'] }),
+      JSON.stringify({ host: 'c.example', cname: ['x.example'], mx: ['mx.example'] }),
+      JSON.stringify({ host: 'd.example', a: [], aaaa: [] }),
+    ].join('\n');
+    const r = parseDnsxResolved(text);
+    expect([...r.resolved].sort()).toEqual(['a.example', 'b.example']);
+    expect(r.rows).toBe(4);
+  });
+
+  it('skips blank, malformed and host-less lines', () => {
+    const text = ['', 'not json', JSON.stringify({ a: ['192.0.2.1'] }), JSON.stringify({ host: 'a.example', a: ['192.0.2.1'] })].join('\n');
+    const r = parseDnsxResolved(text);
+    expect([...r.resolved]).toEqual(['a.example']);
+    expect(r.rows).toBe(1);
+  });
+
+  it('reports zero rows for empty output', () => {
+    expect(parseDnsxResolved('')).toEqual({ rows: 0, resolved: new Set() });
   });
 });
