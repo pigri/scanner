@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run } from './lib/runner.js';
+import { DEFAULT_NVD_DB } from './version-match.js';
 
 async function step(name: string, cmd: string, args: string[]): Promise<number> {
   const start = Date.now();
@@ -35,6 +36,10 @@ Dependency graph:
                         waybackurls (CDX-index URLs → discovered_urls),
                         dnsx     (A/AAAA/CNAME/MX/TXT/NS/SOA → dns_records),
                         checkdmarc (SPF/DMARC/MTA-STS/DNSSEC → findings)  ← concurrent
+  Stage 2.5 (after 2):  version-match (http_probes + ports versions vs the offline
+                        nvd.db mirror → CVE findings; must follow Stage 2 and
+                        precede cve-rollup; SKIP=version-match turns it off;
+                        a missing nvd.db is a no-op, not a failure)
   Stage 3 (parallel):   wpscan (WordPress-flagged hosts from httpx),
                         nuclei-urls (rescan katana URLs — needs Stage-2 katana done),
                         kiterunner (API-route brute; api-shaped hosts only),
@@ -140,6 +145,15 @@ Env vars:
     for (const [name, args] of stage2) await step(name, tsx, args);
   } else {
     await Promise.all(stage2.map(([name, args]) => step(name, tsx, args)));
+  }
+
+  // Stage 2.5: version-match — reads http_probes (stage 1) AND ports (stage 2),
+  // so it must follow the stage-2 await, and it must precede stage 3 because
+  // cve-rollup aggregates its findings. A missing nvd.db makes it exit 0.
+  // SKIP=version-match turns it off.
+  if (runOne('version-match')) {
+    console.error('\n>>> STAGE 2.5 / version-match');
+    await step('version-match', tsx, ['tsx', 'src/version-match.ts', ...common, '--nvd-db', DEFAULT_NVD_DB]);
   }
 
   // Stage 3: wpscan (needs httpx from stage 1) + SMB tools (need nmap ports

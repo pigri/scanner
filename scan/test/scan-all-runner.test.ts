@@ -86,6 +86,8 @@ describe('scan-all stage order', () => {
         'name=$(basename "$2" .ts)',
         `echo "START $name" >> "${log}"`,
         '[ "$name" = cve-rollup ] && sleep 1',
+        '[ "$name" = nmap ] && sleep 1',
+        '[ "$name" = version-match ] && sleep 1',
         `echo "END $name" >> "${log}"`,
         '',
       ].join('\n'), { mode: 0o755 });
@@ -106,8 +108,23 @@ describe('scan-all stage order', () => {
   const STAGE2 = 'httpx,nmap,rustscan,naabu,nmap-udp,masscan,nuclei,takeover,testssl,gowitness,katana,gau,waybackurls,dnsx,checkdmarc';
   const STAGE3 = 'wpscan,nuclei-urls,kiterunner,secrets,headers,ffuf,content-sigs,sslyze,cname-takeover,smb';
 
+  it('runs version-match after stage 2 finishes and before cve-rollup starts', () => {
+    const stage2NoNmap = STAGE2.replace('nmap,', '');
+    const order = runPipeline(`${stage2NoNmap},${STAGE3},data-integrity`);
+    expect(order).toEqual([
+      'START nmap', 'END nmap',
+      'START version-match', 'END version-match',
+      'START cve-rollup', 'END cve-rollup',
+    ]);
+  });
+
+  it('SKIP=version-match turns it off', () => {
+    const order = runPipeline(`${STAGE2},${STAGE3},data-integrity,version-match`);
+    expect(order).toEqual(['START cve-rollup', 'END cve-rollup']);
+  });
+
   it('starts data-integrity only after cve-rollup has finished', () => {
-    const order = runPipeline(`${STAGE2},${STAGE3}`);
+    const order = runPipeline(`${STAGE2},${STAGE3},version-match`);
     expect(order).toEqual([
       'START cve-rollup', 'END cve-rollup',
       'START data-integrity', 'END data-integrity',
@@ -115,7 +132,7 @@ describe('scan-all stage order', () => {
   });
 
   it('SKIP=data-integrity still skips it', () => {
-    const order = runPipeline(`${STAGE2},${STAGE3},data-integrity`);
+    const order = runPipeline(`${STAGE2},${STAGE3},data-integrity,version-match`);
     expect(order).toEqual(['START cve-rollup', 'END cve-rollup']);
   });
 });
