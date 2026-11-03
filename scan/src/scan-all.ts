@@ -26,7 +26,7 @@ Runs the full scan pipeline on --targets. Default: parallel.
 Dependency graph:
   Stage 1 (fast):       httpx     — its output feeds wpscan + katana live filter
   Stage 2 (parallel):   nmap (--vulners: NSE CVE tagging via vulners.nse),
-                        nuclei, takeover, testssl, gowitness,
+                        nuclei, takeover, gowitness,
                         rustscan (full 1-65535, TCP-connect),
                         naabu    (full 1-65535, TCP-connect — WG/tun-safe),
                         masscan  (full 1-65535, raw SYN — auto-skips over
@@ -58,7 +58,9 @@ Dependency graph:
 Each stage inherits --scope / --strict / --targets / --sqlite.
 
 Env vars:
-  SKIP=wpscan,testssl,smb   skip these stages ("smb" skips all three SMB tools)
+  SKIP=wpscan,gowitness,smb skip these stages ("smb" skips all three SMB tools)
+  RUN_TESTSSL=1            run the testssl stage (off by default — sslyze covers
+                           TLS/certs; testssl hangs on many hosts)
   SEQUENTIAL=1              fall back to strict sequential (legacy behaviour)
   SCAN_DEEP=1               widen the profile — katana -depth 3, kiterunner
                             --all-hosts, ffuf/nuclei longer timeouts. Set by
@@ -132,7 +134,11 @@ Env vars:
   if (runOne('masscan'))   stage2.push(['masscan',   cmd('masscan')]);
   if (runOne('nuclei'))    stage2.push(['nuclei',    cmd('nuclei')]);
   if (runOne('takeover'))  stage2.push(['takeover',  cmd('takeover')]);
-  if (runOne('testssl'))   stage2.push(['testssl',   cmd('testssl')]);
+  // testssl's cert capture regressed and the scanner hangs on many hosts
+  // (killed at the timeout, 0 certs); sslyze now provides the certificate
+  // inventory and the overlapping TLS findings. testssl is OFF by default
+  // but still runnable on demand with RUN_TESTSSL=1 (and honours SKIP).
+  if (process.env['RUN_TESTSSL'] === '1' && runOne('testssl')) stage2.push(['testssl', cmd('testssl')]);
   if (runOne('gowitness')) stage2.push(['gowitness', cmd('gowitness')]);
   if (runOne('katana'))     stage2.push(['katana',      cmd('katana')]);
   if (runOne('gau'))        stage2.push(['gau',         cmd('gau')]);

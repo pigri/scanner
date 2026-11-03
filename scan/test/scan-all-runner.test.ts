@@ -75,7 +75,7 @@ describe('scanChildEnv (worker self-sufficiency)', () => {
 describe('scan-all stage order', () => {
   // A fake `npx` on PATH logs START/END per step, so the real scan-all.ts
   // orchestration runs without any scanner installed.
-  const runPipeline = (skip: string): string[] => {
+  const runPipeline = (skip: string, extraEnv: Record<string, string> = {}): string[] => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scan-all-order-'));
     try {
       const log = path.join(dir, 'order.log');
@@ -96,7 +96,7 @@ describe('scan-all stage order', () => {
       const r = spawnSync(
         path.resolve('node_modules/.bin/tsx'),
         ['src/scan-all.ts', '--targets', targets, '--sqlite', path.join(dir, 'scan.db')],
-        { env: { ...process.env, PATH: `${bin}:${process.env['PATH']}`, SKIP: skip }, encoding: 'utf8' },
+        { env: { ...process.env, PATH: `${bin}:${process.env['PATH']}`, SKIP: skip, ...extraEnv }, encoding: 'utf8' },
       );
       expect(r.status).toBe(0);
       return fs.readFileSync(log, 'utf8').trim().split('\n');
@@ -105,7 +105,7 @@ describe('scan-all stage order', () => {
     }
   };
 
-  const STAGE2 = 'httpx,nmap,rustscan,naabu,nmap-udp,masscan,nuclei,takeover,testssl,gowitness,katana,gau,waybackurls,dnsx,checkdmarc';
+  const STAGE2 = 'httpx,nmap,rustscan,naabu,nmap-udp,masscan,nuclei,takeover,gowitness,katana,gau,waybackurls,dnsx,checkdmarc';
   const STAGE3 = 'wpscan,nuclei-urls,kiterunner,secrets,headers,ffuf,content-sigs,sslyze,cname-takeover,smb';
 
   it('runs version-match after stage 2 finishes and before cve-rollup starts', () => {
@@ -134,5 +134,15 @@ describe('scan-all stage order', () => {
   it('SKIP=data-integrity still skips it', () => {
     const order = runPipeline(`${STAGE2},${STAGE3},data-integrity,version-match`);
     expect(order).toEqual(['START cve-rollup', 'END cve-rollup']);
+  });
+
+  // testssl's cert capture regressed and the scanner hangs on many hosts; it is
+  // no longer in the default stage-2 set. sslyze now carries the TLS/cert load.
+  it('does not run testssl by default, but RUN_TESTSSL=1 opts back in', () => {
+    // cve-rollup always runs, so assert on testssl's presence rather than the
+    // whole order.
+    const skipAllButTestssl = `${STAGE2},${STAGE3},version-match,data-integrity`;
+    expect(runPipeline(skipAllButTestssl)).not.toContain('START testssl');
+    expect(runPipeline(skipAllButTestssl, { RUN_TESTSSL: '1' })).toContain('START testssl');
   });
 });
