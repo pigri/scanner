@@ -69,3 +69,31 @@ export function classify(
     state,
   };
 }
+
+/**
+ * Stage-3 gate: turn one enrich run's output into a classification, but only
+ * if that run actually completed.
+ *
+ * enriched.jsonl is truncate-on-open, so a crashed or killed enrich leaves a
+ * partial file holding only the hosts it reached before dying. Classifying
+ * from that partial file would read every absent host as "failed" and, over
+ * enough runs, evict thousands of live hosts — a worse ratchet than the one
+ * this change removes. A non-zero exit code is the signal that the file cannot
+ * be trusted, so we refuse to reclassify and leave domains.txt/phantoms.txt
+ * untouched.
+ */
+export function reclassify(
+  enrichExit: number,
+  rows: { domain: string; addresses: unknown[] }[],
+  prev: ResolveState,
+  threshold: number,
+): Classification {
+  if (enrichExit !== 0) {
+    throw new Error(
+      `enrich exited ${enrichExit}; refusing to reclassify from a possibly-truncated enriched.jsonl`,
+    );
+  }
+  const resolved = rows.filter((r) => r.addresses.length > 0).map((r) => r.domain);
+  const failed = rows.filter((r) => r.addresses.length === 0).map((r) => r.domain);
+  return classify(prev, resolved, failed, threshold);
+}

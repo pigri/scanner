@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it, expect } from 'vitest';
-import { classify, loadState, saveState } from '../src/lib/resolve-state.js';
+import { classify, loadState, saveState, reclassify } from '../src/lib/resolve-state.js';
 
 const T = 3;
 
@@ -59,6 +59,37 @@ describe('classify (self-healing phantom policy)', () => {
     expect(r.domains).toContain('x.gov.hu');
     expect(r.phantoms).not.toContain('x.gov.hu');
     expect(r.state['x.gov.hu']).toBeUndefined();
+  });
+});
+
+describe('reclassify (stage-3 gate)', () => {
+  it('throws on a non-zero enrich exit so a truncated enriched.jsonl never overwrites the lists', () => {
+    expect(() =>
+      reclassify(1, [{ domain: 'a.gov.hu', addresses: [{ ip: '1.2.3.4' }] }], {}, T),
+    ).toThrow(/exit/i);
+  });
+
+  it('on a clean exit splits resolved/failed by addresses and delegates to classify', () => {
+    const r = reclassify(
+      0,
+      [
+        { domain: 'live.gov.hu', addresses: [{ ip: '1.2.3.4' }] },
+        { domain: 'dead.gov.hu', addresses: [] },
+      ],
+      { 'dead.gov.hu': 2 }, // 2 -> 3 == threshold, bins
+      T,
+    );
+    expect(r.domains).toContain('live.gov.hu');
+    expect(r.domains).not.toContain('dead.gov.hu');
+    expect(r.phantoms).toContain('dead.gov.hu');
+    expect(r.state['dead.gov.hu']).toBe(3);
+  });
+
+  it('keeps a first-miss host in grace on a clean exit', () => {
+    const r = reclassify(0, [{ domain: 'x.gov.hu', addresses: [] }], {}, T);
+    expect(r.domains).toContain('x.gov.hu');
+    expect(r.phantoms).not.toContain('x.gov.hu');
+    expect(r.state['x.gov.hu']).toBe(1);
   });
 });
 

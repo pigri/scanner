@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import os from 'node:os';
-import { classify, loadState, saveState } from './lib/resolve-state.js';
+import { reclassify, loadState, saveState } from './lib/resolve-state.js';
 
 interface Opts {
   parentsFile: string;
@@ -133,25 +133,30 @@ async function main(): Promise<void> {
     const union = [...new Set([...readLines(opts.domainsFile), ...readLines(phantomsFile)])].sort();
     const unionFile = path.join(os.tmpdir(), `refresh-union-${process.pid}.txt`);
     fs.writeFileSync(unionFile, union.join('\n') + '\n');
+    let code: number;
     try {
-      await run('npx', ['tsx', 'src/enrich.ts', unionFile, '--concurrency', '40']);
+      code = await run('npx', ['tsx', 'src/enrich.ts', unionFile, '--concurrency', '40']);
     } finally {
       fs.rmSync(unionFile, { force: true });
     }
 
+    // Read whatever enrich wrote, but do not trust it yet: enriched.jsonl is
+    // truncate-on-open, so a non-zero exit means a partial file. reclassify()
+    // throws on a non-zero code before any of the master lists are touched.
     const rows: { domain: string; addresses: unknown[] }[] = [];
-    for (const line of fs.readFileSync('enriched.jsonl', 'utf8').split('\n')) {
-      if (!line.trim()) continue;
-      rows.push(JSON.parse(line));
+    if (fs.existsSync('enriched.jsonl')) {
+      for (const line of fs.readFileSync('enriched.jsonl', 'utf8').split('\n')) {
+        if (!line.trim()) continue;
+        rows.push(JSON.parse(line));
+      }
     }
-    const resolved = rows.filter((r) => r.addresses.length > 0).map((r) => r.domain);
-    const failed = rows.filter((r) => r.addresses.length === 0).map((r) => r.domain);
-    const { domains, phantoms, state } = classify(
+    const { domains, phantoms, state } = reclassify(
+      code,
+      rows,
       loadState(stateFile),
-      resolved,
-      failed,
       opts.phantomThreshold,
     );
+    const resolved = rows.filter((r) => r.addresses.length > 0);
     fs.writeFileSync(opts.domainsFile, domains.join('\n') + '\n');
     fs.writeFileSync(phantomsFile, phantoms.join('\n') + '\n');
     saveState(stateFile, state);
