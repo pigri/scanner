@@ -34,6 +34,45 @@ describe('computeScore', () => {
     expect(r.breakdown.critical).toBe(0);
   });
 
+  describe('version-match tier', () => {
+    const vm = (cve: string, severity = 'critical') => ({ tool: 'version-match', severity, title: `${cve} on X (version match)`, cve, needsReview: false });
+
+    it('scores on its own curve and stays out of severity and cve buckets', () => {
+      const s = empty();
+      s.findings = [vm('CVE-2024-0001'), vm('CVE-2024-0002', 'high'), vm('CVE-2024-0003', 'medium')];
+      const b = computeScore(s).breakdown;
+      expect(b.versionMatch).toBe(3);
+      expect(b.versionMatchPoints).toBe(9); // 3 distinct * 3
+      expect(b.critical + b.high + b.medium + b.low + b.info).toBe(0);
+      expect(b.criticalPoints + b.highPoints + b.mediumPoints + b.cvePoints).toBe(0);
+      expect(b.reviewSkipped).toBe(0);
+    });
+
+    it('counts a repeated CVE once', () => {
+      const s = empty();
+      s.findings = [vm('CVE-2024-0001'), { ...vm('CVE-2024-0001'), title: 'same CVE, other url' }];
+      const b = computeScore(s).breakdown;
+      expect(b.versionMatch).toBe(1);
+      expect(b.versionMatchPoints).toBe(3);
+    });
+
+    it('uses the tail rate past 5 CVEs and caps at 20', () => {
+      const s = empty();
+      s.findings = Array.from({ length: 8 }, (_, i) => vm(`CVE-2024-${1000 + i}`));
+      expect(computeScore(s).breakdown.versionMatchPoints).toBe(16.5); // 5*3 + 3*0.5
+      s.findings = Array.from({ length: 100 }, (_, i) => vm(`CVE-2024-${2000 + i}`));
+      expect(computeScore(s).breakdown.versionMatchPoints).toBe(20);
+    });
+
+    it('leaves other tools CVE findings on the cvePoints tier', () => {
+      const s = empty();
+      s.findings = [{ tool: 'nuclei', severity: 'medium', title: 'a', cve: 'CVE-2024-0001' }];
+      const b = computeScore(s).breakdown;
+      expect(b.cvePoints).toBe(10);
+      expect(b.versionMatchPoints).toBe(0);
+    });
+  });
+
   it('adds 40 for one critical finding', () => {
     const s = empty();
     s.findings = [{ tool: 'nuclei', severity: 'critical', title: 'RCE', cve: null }];

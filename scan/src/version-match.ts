@@ -180,8 +180,8 @@ function insert(
         nvd_snapshot_at: snapshotAt,
         ...(stale ? { nvd_stale: true } : {}),
       },
-      // needsReview until PR5 adds the version-match scoring tier
-      needsReview: true,
+      // scored by the version-match tier in computeScore
+      needsReview: false,
     }, at, runId);
     return true;
   } catch (e) {

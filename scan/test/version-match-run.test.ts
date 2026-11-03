@@ -60,7 +60,7 @@ describe('runVersionMatch', () => {
     const ap = f.find((x) => x.cve === 'CVE-2017-9798')!;
     expect(ap).toMatchObject({
       tool: 'version-match', target: 'a.example', category: 'cve', severity: 'high',
-      title: 'CVE-2017-9798 on Apache httpd 2.4.6 (version match)', needs_review: 1,
+      title: 'CVE-2017-9798 on Apache httpd 2.4.6 (version match)', needs_review: 0,
       matched_at: 'https://a.example/',
     });
     const meta = JSON.parse(ap.meta_json);
