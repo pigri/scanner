@@ -28,6 +28,7 @@ export interface ExpandOpts {
   maxCandidates: number;
   /** Max ctlogs.dev HTTP requests per run, across all zones. */
   ctBudget: number;
+  ctFallbackBudget: number;
   concurrency: number;
   suffix: string | null;
   exclude: string[];
@@ -112,7 +113,7 @@ export async function runExpand(opts: ExpandOpts, deps: ExpandDeps): Promise<Exp
   try {
     key = deps.loadKey();
   } catch {
-    log('warning: no ctlogs key; using the crt.sh/certspotter fallback only');
+    log('warning: no ctlogs key; zones go DNS-only unless --ct-fallback-budget <n> enables the crt.sh/certspotter fallback');
   }
   if (key !== null) {
     try {
@@ -124,6 +125,7 @@ export async function runExpand(opts: ExpandOpts, deps: ExpandDeps): Promise<Exp
   }
 
   let budget = opts.ctBudget;
+  let fallbackBudget = opts.ctFallbackBudget;
   const tierOf = new Map<string, Tier>();
   for (const [zone, cands] of byZone) {
     let wildIps = new Set<string>();
@@ -149,7 +151,8 @@ export async function runExpand(opts: ExpandOpts, deps: ExpandDeps): Promise<Exp
         log(`  ${zone}: ctlogs error: ${msg(e)}; degrading to fallback`);
       }
     }
-    if (ctHosts === null) {
+    if (ctHosts === null && fallbackBudget > 0) {
+      fallbackBudget--;
       try {
         ctHosts = new Set((await deps.ctFallback(zone)).map((h) => h.toLowerCase()));
       } catch (e) {
@@ -157,6 +160,7 @@ export async function runExpand(opts: ExpandOpts, deps: ExpandDeps): Promise<Exp
         ctHosts = new Set();
       }
     }
+    if (ctHosts === null) ctHosts = new Set();
 
     for (const c of cands) {
       const answers = ips.get(c) ?? [];
@@ -200,6 +204,7 @@ function parseArgs(argv: string[]): CliOpts {
     perZone: 50,
     maxCandidates: 5000,
     ctBudget: 50,
+    ctFallbackBudget: 0,
     concurrency: 20,
     suffix: null,
     exclude: [],
@@ -220,6 +225,7 @@ function parseArgs(argv: string[]): CliOpts {
     else if (a === '--per-zone') opts.perZone = int(opts.perZone);
     else if (a === '--max-candidates') opts.maxCandidates = int(opts.maxCandidates);
     else if (a === '--ct-budget') opts.ctBudget = int(opts.ctBudget);
+    else if (a === '--ct-fallback-budget') opts.ctFallbackBudget = int(opts.ctFallbackBudget);
     else if (a === '--concurrency') opts.concurrency = Math.max(1, int(opts.concurrency));
     else if (a === '--suffix') opts.suffix = next().toLowerCase().replace(/^\./, '');
     else if (a === '--exclude') opts.exclude = next().split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
@@ -245,6 +251,7 @@ Options:
   --per-zone <n>         Max candidates per zone (default: 50)
   --max-candidates <n>   Max candidates validated per run (default: 5000)
   --ct-budget <n>        Max ctlogs.dev requests per run (default: 50)
+  --ct-fallback-budget <n>  Max zones that may use the crt.sh/certspotter fallback (default: 0 = DNS-only)
   --concurrency <n>      Parallel DNS lookups (default: 20)
   --suffix <domain>      Only keep candidates under this suffix
   --exclude <a,b,c>      Skip these apex domains + their subdomains
