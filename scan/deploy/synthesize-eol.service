@@ -1,0 +1,12 @@
+[Unit]
+Description=gen0sec nightly synthesize-eol (turn scan.db http_probes banners into EOL-software findings)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Reads http_probes and writes findings in scan.db only; it never probes a
+# target. Idempotent: findings that already exist are skipped. Sources
+# .env.scan like the scan workers do.
+ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; cd %h/gen0sec/redteam/scan && mkdir -p logs && ENVFILE="$PWD/.env.scan"; [ -r "$ENVFILE" ] && set -a && . "$ENVFILE" && set +a; exec npx tsx src/synthesize-eol.ts --sqlite scan.db >>logs/synthesize-eol.log 2>&1'
+TimeoutStartSec=3600
