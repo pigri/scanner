@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly synthesize-eol over scan.db http_probes
+
+[Timer]
+# Fires 03:30, after the day's scan feed. Persistent=true reruns a missed job.
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
