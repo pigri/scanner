@@ -150,6 +150,14 @@ describe('usage', () => {
     });
   });
 
+  it('survives a pathologically deep response and keeps the shallow figures', async () => {
+    const depth = 50000;
+    const body = '{"month":{"used":1},"deep":' + '{"a":'.repeat(depth) + '1' + '}'.repeat(depth) + '}';
+    const fetchImpl: FetchImpl = async () => resp(200, body);
+    const u = await usage({ fetchImpl, key: KEY });
+    expect(u.figures['month.used']).toBe(1);
+  });
+
   it('throws on a non-ok status', async () => {
     const fetchImpl: FetchImpl = async () => resp(401, 'no');
     await expect(usage({ fetchImpl, key: KEY })).rejects.toThrow(/HTTP 401/);

@@ -122,16 +122,21 @@ export async function fetchSubdomains(zone: string, o: SubdomainsOpts): Promise<
       }
     }
     const next = (body as { after?: unknown } | null)?.after;
+    // Termination rests on the budget ceiling above; this only catches an immediate cursor repeat, not a longer cycle.
     if (typeof next !== 'string' || next === '' || next === after) return { ok: true, hosts, requests };
     after = next;
   }
 }
 
-function flatten(v: unknown, prefix: string, out: Record<string, number>): void {
+/** The usage payload is shallow; deeper levels are ignored so a hostile body cannot overflow the stack. */
+const MAX_FLATTEN_DEPTH = 8;
+
+function flatten(v: unknown, prefix: string, out: Record<string, number>, depth = 0): void {
+  if (depth > MAX_FLATTEN_DEPTH) return;
   if (typeof v === 'number' && Number.isFinite(v)) {
     out[prefix] = v;
   } else if (v && typeof v === 'object' && !Array.isArray(v)) {
-    for (const [k, child] of Object.entries(v)) flatten(child, prefix ? `${prefix}.${k}` : k, out);
+    for (const [k, child] of Object.entries(v)) flatten(child, prefix ? `${prefix}.${k}` : k, out, depth + 1);
   }
 }
 
