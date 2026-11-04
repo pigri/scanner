@@ -14,6 +14,7 @@
     "ptr-sweep": "tsx src/ptr-sweep.ts",
     "dns-brute": "tsx src/dns-brute.ts",
     "wildcard-check": "tsx src/wildcard-check.ts",
+    "expand": "tsx src/expand.ts",
     "refresh": "tsx src/refresh.ts",
     "db-init": "tsx src/db-init.ts",
     "query": "tsx src/query.ts",

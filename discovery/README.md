@@ -22,7 +22,8 @@ discovery/
     ct-log.ts       crt.sh + Certspotter certificate transparency
     ptr-sweep.ts    walk a CIDR list, reverse-DNS every IP
     dns-brute.ts    SecLists wordlist × parent list, dig-based
-    refresh.ts      orchestrator: ct-log → dns-brute → enrich → filter
+    expand.ts       permute known hosts, DNS+CT validate, merge new ones
+    refresh.ts      orchestrator: ct-log → dns-brute → enrich → filter (+ expand, opt-in)
   test/             38 tests (ddg, graph, asn, ct, ptr)
   parents.txt       seed parent list for refresh / dns-brute
   prefixes.txt      seed CIDR list for ptr-sweep
@@ -289,13 +290,31 @@ Or shell out with the `sqlite3` CLI for ad-hoc: `sqlite3 recon.db 'select count(
 
 ### refresh
 
-One-shot orchestrator: CT logs per parent → SecLists brute → enrich → phantom filter. Writes `refresh-summary.json` with a delta count for downstream reporting / cron.
+One-shot orchestrator: CT logs per parent → SecLists brute → enrich → phantom filter, and optionally a fourth pattern-expansion stage (`--expand`, off by default). Writes `refresh-summary.json` with a delta count for downstream reporting / cron.
 
 ```
 npm run refresh -- --seclist top-5000 --ct-sources certspotter
 ```
 
-Key flags: `--parents`, `--suffix`, `--domains`, `--seclist`, `--ct-sources`, `--skip-brute`, `--skip-ct`, `--skip-enrich`.
+Key flags: `--parents`, `--suffix`, `--domains`, `--seclist`, `--ct-sources`, `--skip-brute`, `--skip-ct`, `--skip-enrich`, `--expand`.
+
+`--expand` runs `expand.ts` as stage 4: it mines the naming grammar already in `--domains`, permutes candidate hostnames per zone, validates DNS-first then a quota-bounded CT oracle, and merges the corroborated ones back in. Opt-in and host-side; see `npx tsx src/expand.ts --help` for its own budget / dry-run flags. `--ct-fallback-budget <n>` (default 0) caps how many zones may use the rate-limited crt.sh/certspotter fallback once ctlogs is unavailable or spent; at 0 the rest go DNS-only.
+
+Scheduling the expand stage — a nightly host-side timer, unit files in
+`../scan/deploy/`. It runs `expand.ts` directly (not via `refresh --expand`),
+since the 30-min `enrich-refresh` already keeps `domains.txt` fresh; this pass
+only expands. Fires at 02:20, in the gap between the `:00/:30` ct-mirror and
+`:15/:45` enrich-refresh cycles and before `scan-feed` (03:00), with the safe
+defaults `--ct-budget 50 --ct-fallback-budget 0` (~1500 ctlogs req/mo, no slow
+crt.sh fallback). Opt-in: not enabled until you link and enable it.
+
+```
+ln -sfv $PWD/../scan/deploy/discovery-expand.service ~/.config/systemd/user/
+ln -sfv $PWD/../scan/deploy/discovery-expand.timer   ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now discovery-expand.timer
+systemctl --user start discovery-expand          # run once now (test); writes logs/discovery-expand.log
+```
 
 **With the SQLite store on:** pass `--sqlite recon.db` to every stage (or bake it into the refresh call) and every host / IP / PTR / resolution is stamped with a UTC timestamp. Query "what changed since yesterday" with `npm run query -- new --since 2026-08-18`. Schema at `src/lib/schema.sql`; the tables are `hosts`, `sources`, `ips`, `resolutions`, `ptr_records`, `runs`.
 

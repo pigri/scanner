@@ -192,6 +192,9 @@ Env vars:
   if (runOne('secrets'))    stage3.push(['secrets',    cmd('secrets')]);
   // headers — modern security-header audit. Depends on Stage-2 httpx.
   if (runOne('headers'))    stage3.push(['headers',    cmd('headers')]);
+  // banner-recheck — minimal-request reprobe of hosts httpx got no Server
+  // banner for; inserts a supplementary http_probes row for synthesize-eol.
+  if (runOne('banner-recheck')) stage3.push(['banner-recheck', cmd('banner-recheck')]);
   // ffuf — curated high-signal path list (backup files, .env, .git,
   // phpinfo, server-status). Needs Stage-2 httpx (live filter).
   if (runOne('ffuf'))       stage3.push(['ffuf',       cmd('ffuf')]);
