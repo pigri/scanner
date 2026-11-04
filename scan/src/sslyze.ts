@@ -8,6 +8,7 @@ import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, resolveOutputPath } from './lib/runner.js';
 import { openDb, type Db } from './lib/db.js';
 import { toCertRecords, quoteBigSerials, type SslyzeCertResult } from './lib/sslyze-cert.js';
+import { classifyRobot } from './lib/sslyze-robot.js';
 
 // Live-HTTPS targets from either http_probes (https://) or a 443/tcp port.
 function loadHttpsTargets(db: Db, targets: readonly string[]): string[] {
@@ -161,9 +162,8 @@ Wrapper flags (before '--'):
       emit(target, 'ccs-injection', 'critical', 'OpenSSL CCS Injection (CVE-2014-0224) — MITM', {});
     }
     const robotResult = s.robot?.result?.robot_result;
-    if (robotResult && !robotResult.startsWith('NOT_VULNERABLE')) {
-      emit(target, 'robot', 'critical', `ROBOT vulnerable (${robotResult})`, { detail: robotResult });
-    }
+    const robot = classifyRobot(robotResult);
+    if (robot) emit(target, 'robot', robot.severity, robot.title, { detail: robotResult });
     if (s.tls_compression?.result?.supports_compression) {
       emit(target, 'crime', 'medium', 'TLS compression enabled (CRIME attack path)', {});
     }
