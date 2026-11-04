@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import os from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { reclassify, loadState, saveState } from './lib/resolve-state.js';
 
 interface Opts {
@@ -14,11 +15,12 @@ interface Opts {
   skipBrute: boolean;
   skipCt: boolean;
   skipEnrich: boolean;
+  expand: boolean;
   phantomThreshold: number;
   help?: boolean;
 }
 
-function parseArgs(argv: string[]): Opts {
+export function parseArgs(argv: string[]): Opts {
   const opts: Opts = {
     parentsFile: 'parents.txt',
     suffix: 'gov.hu',
@@ -28,6 +30,7 @@ function parseArgs(argv: string[]): Opts {
     skipBrute: false,
     skipCt: false,
     skipEnrich: false,
+    expand: false,
     phantomThreshold: 3,
   };
   for (let i = 2; i < argv.length; i++) {
@@ -41,6 +44,7 @@ function parseArgs(argv: string[]): Opts {
     else if (a === '--skip-brute') opts.skipBrute = true;
     else if (a === '--skip-ct') opts.skipCt = true;
     else if (a === '--skip-enrich') opts.skipEnrich = true;
+    else if (a === '--expand') opts.expand = true;
     else if (a === '--phantom-threshold') opts.phantomThreshold = Math.max(1, parseInt(next(), 10) || 3);
     else if (a === '-h' || a === '--help') opts.help = true;
   }
@@ -54,6 +58,7 @@ Runs one full discovery refresh cycle:
   1. ct-log:    crt.sh + certspotter for each parent, merge into --domains
   2. dns-brute: SecLists wordlist against each parent, merge into --domains
   3. enrich:    re-resolve domains + phantoms, reclassify (self-healing)
+  4. expand:    permute known hosts, resolve and merge new ones (only with --expand)
 
 Options:
   --parents <file>         Parent domains list (default: parents.txt)
@@ -64,6 +69,7 @@ Options:
   --skip-brute             Skip DNS brute step
   --skip-ct                Skip CT log step
   --skip-enrich            Skip enrichment
+  --expand                 Run pattern expansion after enrichment (opt-in)
   --phantom-threshold <N>  Consecutive failed runs before a host is binned (default: 3)
 `);
 }
@@ -168,6 +174,11 @@ async function main(): Promise<void> {
     );
   }
 
+  if (opts.expand) {
+    console.error('\n=== stage 4: pattern expansion ===');
+    await run('npx', ['tsx', 'src/expand.ts', '--domains', opts.domainsFile, '--suffix', opts.suffix]);
+  }
+
   const finalCount = new Set(
     fs.readFileSync(opts.domainsFile, 'utf8').split('\n').map((s) => s.trim()).filter(Boolean)
   ).size;
@@ -182,7 +193,9 @@ async function main(): Promise<void> {
   }, null, 2));
 }
 
-main().catch((err: unknown) => {
-  console.error('FATAL:', err instanceof Error ? err.message : String(err));
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err: unknown) => {
+    console.error('FATAL:', err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });
+}
