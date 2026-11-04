@@ -10,6 +10,8 @@ export interface PermuteCaps {
 }
 
 const DEFAULT_LOOKAHEAD = 3;
+/** Widest observed range that is gap-filled; wider runs are IDs or stamps. */
+const MAX_SEQ_SPAN = 256;
 const MAX_STEMS = 5;
 const MAX_MODIFIERS = 5;
 
@@ -18,17 +20,23 @@ function renderLabel(seq: NumericSequence, n: number): string {
   return seq.template.replace('#', digits);
 }
 
-function sequenceLabels(seq: NumericSequence, lookahead: number): string[] {
+function sequenceLabels(seq: NumericSequence, lookahead: number, budget: number): string[] {
   const first = seq.values[0];
   const last = seq.values[seq.values.length - 1];
   if (first === undefined || last === undefined) return [];
+  if (last + lookahead >= Number.MAX_SAFE_INTEGER) return [];
   const observed = new Set(seq.values);
-  const lo = first === last ? Math.max(0, first - 1) : first;
-  const hi = last + lookahead;
   const labels: string[] = [];
-  // Gaps inside the range first, then the extension past the max.
-  for (let n = lo; n <= last; n++) if (!observed.has(n)) labels.push(renderLabel(seq, n));
-  for (let n = last + 1; n <= hi; n++) labels.push(renderLabel(seq, n));
+  // Gaps inside a narrow range first, then the extension past the max.
+  if (last - first <= MAX_SEQ_SPAN) {
+    const lo = first === last ? Math.max(0, first - 1) : first;
+    for (let n = lo; n <= last && labels.length < budget; n++) {
+      if (!observed.has(n)) labels.push(renderLabel(seq, n));
+    }
+  }
+  for (let n = last + 1; n <= last + lookahead && labels.length < budget; n++) {
+    labels.push(renderLabel(seq, n));
+  }
   return labels;
 }
 
@@ -56,7 +64,10 @@ function recombinedLabels(tokens: TokenStat[]): string[] {
 function permuteZone(g: ZoneGrammar, known: Set<string>, caps: PermuteCaps): string[] {
   const lookahead = Math.max(0, caps.sequenceLookahead ?? DEFAULT_LOOKAHEAD);
   const labels: string[] = [];
-  for (const seq of g.sequences) labels.push(...sequenceLabels(seq, lookahead));
+  for (const seq of g.sequences) {
+    if (labels.length >= caps.perZone) break;
+    labels.push(...sequenceLabels(seq, lookahead, caps.perZone - labels.length));
+  }
   labels.push(...recombinedLabels(g.tokens));
 
   const out: string[] = [];

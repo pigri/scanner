@@ -65,6 +65,16 @@ describe('permute', () => {
     expect(out).toHaveLength(4);
   });
 
+  it('stays bounded for far-apart and unsafe-magnitude runs', () => {
+    for (const values of [[1, 10_000_000], [1, 9_007_199_254_740_993]]) {
+      const g = grammar(ZONE, [{ template: 'backup#', values }]);
+      const t0 = Date.now();
+      const out = permute(g, new Set(), { perZone: 10 });
+      expect(Date.now() - t0).toBeLessThan(1000);
+      expect(out.length).toBeLessThanOrEqual(10);
+    }
+  });
+
   it('excludes known FQDNs case-insensitively', () => {
     const g = grammar(ZONE, [{ template: 'web#', values: [1, 2] }]);
     const out = permute(g, new Set([`WEB3.${ZONE.toUpperCase()}`]), { perZone: 50 });
