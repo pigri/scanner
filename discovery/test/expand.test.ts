@@ -32,7 +32,7 @@ const logs: string[] = [];
 function opts(over: Partial<ExpandOpts> = {}): ExpandOpts {
   return {
     domains, sidecar, dryRun: false, mergeTierC: false, perZone: 50, maxCandidates: 1000,
-    ctBudget: 20, concurrency: 4, suffix: null, exclude: [], timeoutMs: 1000, ...over,
+    ctBudget: 20, ctFallbackBudget: 100, concurrency: 4, suffix: null, exclude: [], timeoutMs: 1000, ...over,
   };
 }
 
@@ -77,6 +77,35 @@ describe('runExpand', () => {
     expect(lines(sidecar)).toEqual(['web6.ex.gov.hu']);
     expect(r.tiers).toEqual({ A: 1, B: 1, C: 1, D: 3 });
     expect(r.ctRequests).toBeGreaterThan(0);
+  });
+
+  it('--ct-fallback-budget 0 (the default) never calls the fallback and goes DNS-only', async () => {
+    const calls: string[] = [];
+    const r = await runExpand(opts({ ctFallbackBudget: 0 }), deps({
+      loadKey: () => { throw new Error('no key'); },
+      ctFallback: async (zone) => { calls.push(zone); return ['web4.ex.gov.hu']; },
+    }));
+    expect(calls).toEqual([]);
+    expect(r.tiers.A + r.tiers.B).toBe(0);
+  });
+
+  it('--ct-fallback-budget 1 calls the fallback for at most one zone', async () => {
+    const calls: string[] = [];
+    const r = await runExpand(opts({ ctFallbackBudget: 1 }), deps({
+      fetchImpl: async () => json(429, {}),
+      ctFallback: async (zone) => { calls.push(zone); return zone === 'ex.gov.hu' ? ['web4.ex.gov.hu'] : []; },
+    }));
+    expect(calls).toHaveLength(1);
+    expect(r.tiers.A).toBe(1);
+  });
+
+  it('with fallback budget 0 a resolving, non-wildcard, uncorroborated candidate lands in tier C', async () => {
+    const r = await runExpand(opts({ ctFallbackBudget: 0 }), deps({
+      fetchImpl: async () => json(429, {}),
+      ctFallback: async () => ['web6.ex.gov.hu'],
+    }));
+    expect(lines(sidecar)).toContain('web6.ex.gov.hu');
+    expect(r.tiers.C).toBeGreaterThan(0);
   });
 
   it('a wildcard zone demotes a no-CT resolver to D', async () => {

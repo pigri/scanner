@@ -298,7 +298,7 @@ npm run refresh -- --seclist top-5000 --ct-sources certspotter
 
 Key flags: `--parents`, `--suffix`, `--domains`, `--seclist`, `--ct-sources`, `--skip-brute`, `--skip-ct`, `--skip-enrich`, `--expand`.
 
-`--expand` runs `expand.ts` as stage 4: it mines the naming grammar already in `--domains`, permutes candidate hostnames per zone, validates DNS-first then a quota-bounded CT oracle, and merges the corroborated ones back in. Opt-in and host-side; see `npx tsx src/expand.ts --help` for its own budget / dry-run flags.
+`--expand` runs `expand.ts` as stage 4: it mines the naming grammar already in `--domains`, permutes candidate hostnames per zone, validates DNS-first then a quota-bounded CT oracle, and merges the corroborated ones back in. Opt-in and host-side; see `npx tsx src/expand.ts --help` for its own budget / dry-run flags. `--ct-fallback-budget <n>` (default 0) caps how many zones may use the rate-limited crt.sh/certspotter fallback once ctlogs is unavailable or spent; at 0 the rest go DNS-only.
 
 **With the SQLite store on:** pass `--sqlite recon.db` to every stage (or bake it into the refresh call) and every host / IP / PTR / resolution is stamped with a UTC timestamp. Query "what changed since yesterday" with `npm run query -- new --since 2026-08-18`. Schema at `src/lib/schema.sql`; the tables are `hosts`, `sources`, `ips`, `resolutions`, `ptr_records`, `runs`.
 
