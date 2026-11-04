@@ -20,7 +20,7 @@ function renderLabel(seq: NumericSequence, n: number): string {
   return seq.template.replace('#', digits);
 }
 
-function sequenceLabels(seq: NumericSequence, lookahead: number, budget: number): string[] {
+function sequenceLabels(seq: NumericSequence, lookahead: number): string[] {
   const first = seq.values[0];
   const last = seq.values[seq.values.length - 1];
   if (first === undefined || last === undefined) return [];
@@ -30,11 +30,11 @@ function sequenceLabels(seq: NumericSequence, lookahead: number, budget: number)
   // Gaps inside a narrow range first, then the extension past the max.
   if (last - first <= MAX_SEQ_SPAN) {
     const lo = first === last ? Math.max(0, first - 1) : first;
-    for (let n = lo; n <= last && labels.length < budget; n++) {
+    for (let n = lo; n <= last; n++) {
       if (!observed.has(n)) labels.push(renderLabel(seq, n));
     }
   }
-  for (let n = last + 1; n <= last + lookahead && labels.length < budget; n++) {
+  for (let n = last + 1; n <= last + lookahead; n++) {
     labels.push(renderLabel(seq, n));
   }
   return labels;
@@ -66,7 +66,7 @@ function permuteZone(g: ZoneGrammar, known: Set<string>, caps: PermuteCaps): str
   const labels: string[] = [];
   for (const seq of g.sequences) {
     if (labels.length >= caps.perZone) break;
-    labels.push(...sequenceLabels(seq, lookahead, caps.perZone - labels.length));
+    labels.push(...sequenceLabels(seq, lookahead));
   }
   labels.push(...recombinedLabels(g.tokens));
 

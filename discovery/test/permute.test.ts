@@ -75,6 +75,12 @@ describe('permute', () => {
     }
   });
 
+  it('fills perZone from non-known candidates', () => {
+    const g = grammar(ZONE, [{ template: 'web#', values: [1, 10] }]);
+    const known = new Set([2, 3, 4].map((n) => `web${n}.${ZONE}`));
+    expect(permute(g, known, { perZone: 4 })).toHaveLength(4);
+  });
+
   it('excludes known FQDNs case-insensitively', () => {
     const g = grammar(ZONE, [{ template: 'web#', values: [1, 2] }]);
     const out = permute(g, new Set([`WEB3.${ZONE.toUpperCase()}`]), { perZone: 50 });
