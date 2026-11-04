@@ -106,7 +106,7 @@ describe('scan-all stage order', () => {
   };
 
   const STAGE2 = 'httpx,nmap,rustscan,naabu,nmap-udp,masscan,nuclei,takeover,gowitness,katana,gau,waybackurls,dnsx,checkdmarc';
-  const STAGE3 = 'wpscan,nuclei-urls,kiterunner,secrets,headers,ffuf,content-sigs,sslyze,cname-takeover,smb';
+  const STAGE3 = 'wpscan,nuclei-urls,kiterunner,secrets,headers,banner-recheck,ffuf,content-sigs,sslyze,cname-takeover,smb';
 
   it('runs version-match after stage 2 finishes and before cve-rollup starts', () => {
     const stage2NoNmap = STAGE2.replace('nmap,', '');
