@@ -94,6 +94,13 @@ export async function runExpand(opts: ExpandOpts, deps: ExpandDeps): Promise<Exp
     converged: true,
   };
 
+  if (opts.dryRun) {
+    // Preview only: no DNS, no CT, no writes, so no quota is spent.
+    for (const [z, n] of Object.entries(result.zones)) log(`  ${z}: ${n} candidates`);
+    log(`dry-run: projected CT requests: ${Math.min(opts.ctBudget, byZone.size)} (budget ${opts.ctBudget}); no network calls made, nothing written`);
+    return result;
+  }
+
   // VALIDATE: DNS
   const ips = new Map<string, string[]>();
   await pool(candidates, opts.concurrency, async (c) => {
@@ -174,15 +181,9 @@ export async function runExpand(opts: ExpandOpts, deps: ExpandDeps): Promise<Exp
   for (const [z, n] of Object.entries(result.zones)) log(`  ${z}: ${n} candidates`);
   log(`CT requests spent: ${result.ctRequests}/${opts.ctBudget}`);
   log(`tiers: A=${result.tiers.A} B=${result.tiers.B} C=${result.tiers.C} D=${result.tiers.D}`);
-  if (opts.dryRun) {
-    log(`dry-run: would merge ${toDomains.length} into ${opts.domains}, ${toSidecar.length} into ${opts.sidecar}`);
-    for (const h of toDomains) log(`  + ${h}`);
-    for (const h of toSidecar) log(`  ~ ${h} (sidecar)`);
-  } else {
-    if (toDomains.length) mergeInto(opts.domains, toDomains);
-    if (toSidecar.length) mergeInto(opts.sidecar, toSidecar);
-    log(`merged ${toDomains.length} into ${opts.domains}, ${toSidecar.length} into ${opts.sidecar}`);
-  }
+  if (toDomains.length) mergeInto(opts.domains, toDomains);
+  if (toSidecar.length) mergeInto(opts.sidecar, toSidecar);
+  log(`merged ${toDomains.length} into ${opts.domains}, ${toSidecar.length} into ${opts.sidecar}`);
   return result;
 }
 

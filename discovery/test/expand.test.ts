@@ -90,12 +90,28 @@ describe('runExpand', () => {
     expect(lines(domains)).toContain('web6.ex.gov.hu');
   });
 
-  it('--dry-run writes nothing', async () => {
+  it('--dry-run makes zero network calls, writes nothing, and projects the CT spend', async () => {
     const before = readFileSync(domains, 'utf8');
-    const r = await runExpand(opts({ dryRun: true }), deps());
+    let calls = 0;
+    const trap = async (): Promise<never> => { calls++; throw new Error('network call in dry-run'); };
+    const r = await runExpand(opts({ dryRun: true }), deps({
+      fetchImpl: trap,
+      ctFallback: trap,
+      resolveIps: trap,
+    }));
+    expect(calls).toBe(0);
     expect(readFileSync(domains, 'utf8')).toBe(before);
     expect(readdirSync(dir)).toEqual(['domains.txt']);
-    expect(r.tiers.A).toBe(1);
+    expect(r.zones).toEqual({ 'ex.gov.hu': 3, 'wc.gov.hu': 3 });
+    expect(r.ctRequests).toBe(0);
+    const out = logs.join('\n');
+    expect(out).toMatch(/ex\.gov\.hu: 3 candidates/);
+    expect(out).toMatch(/projected CT requests: 2\b/);
+  });
+
+  it('--dry-run caps the projected CT spend at the budget', async () => {
+    await runExpand(opts({ dryRun: true, ctBudget: 1 }), deps());
+    expect(logs.join('\n')).toMatch(/projected CT requests: 1\b/);
   });
 
   it('a 429 from ctlogs degrades to the fallback and still resolves', async () => {
