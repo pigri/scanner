@@ -8,6 +8,7 @@ import type { EnrichedAddress, EnrichedRow } from './lib/graph.js';
 import { fetchCert, certCsvFields } from './lib/cert.js';
 import { openDb, type Db } from './lib/db.js';
 import { ResolverPool, resolveHost, reverseIp, DEFAULT_RESOLVERS } from './lib/resolve.js';
+import { pool } from './lib/pool.js';
 
 const MMDB_URL =
   'https://github.com/gen0sec/geoip-databases/releases/latest/download/ipinfo_lite.mmdb';
@@ -108,20 +109,6 @@ async function ensureMmdb(file: string, force: boolean): Promise<void> {
   await pipeline(Readable.fromWeb(res.body as any), fs.createWriteStream(file));
   const stat = fs.statSync(file);
   console.error(`saved ${file} (${(stat.size / 1024 / 1024).toFixed(1)} MiB)`);
-}
-
-async function pool<T, R>(items: readonly T[], size: number, worker: (item: T, idx: number) => Promise<R>): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let i = 0;
-  async function run(): Promise<void> {
-    while (true) {
-      const idx = i++;
-      if (idx >= items.length) return;
-      results[idx] = await worker(items[idx]!, idx);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(size, items.length) }, run));
-  return results;
 }
 
 function csvEscape(v: unknown): string {
