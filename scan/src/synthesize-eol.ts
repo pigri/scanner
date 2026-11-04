@@ -2,7 +2,7 @@
 // Post-process http_probes into synthetic findings for known-EOL software.
 // Cheap heuristic pass — not a substitute for nuclei's CVE templates, but catches
 // obvious outdated stack disclosures that a severity filter would miss.
-import { openDb } from './lib/db.js';
+import { openDb, type Db } from './lib/db.js';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
 
 interface Opts { db: string; help?: boolean }
@@ -36,29 +36,44 @@ const RULES: Rule[] = [
   // PHP EOL: <=7.4 is EOL, <=8.0 is EOL
   { re: /PHP\/(4\.|5\.|7\.|8\.0\.)([\d.]+)/i, sev: 'high', cat: 'eol-php',
     title: (m) => `EOL PHP ${m[1]}${m[2]} disclosed` },
+  // MinIO Community Edition is unmaintained; any disclosure (server header or console) is signal.
+  { re: /MinIO/i, sev: 'high', cat: 'eol-minio',
+    title: () => 'MinIO disclosed — open-source Community Edition is end-of-life (unmaintained, no security patches since 2025); verify edition and migrate' },
 ];
 
-function main(): void {
-  const opts = parseArgs(process.argv);
-  if (opts.help) { console.error('Usage: synthesize-eol [--sqlite scan.db]'); process.exit(0); }
-  const db = openDb(opts.db);
-  const now = new Date().toISOString();
-  const runId = db.startRun('synthesize-eol', {}, now);
+export function matchRules(webServer: string, techJson: string | null): { cat: string; sev: string; title: string }[] {
+  const hay = webServer + ' ' + (techJson ?? '');
+  const out: { cat: string; sev: string; title: string }[] = [];
+  for (const rule of RULES) {
+    const m = hay.match(rule.re);
+    if (m) out.push({ cat: rule.cat, sev: rule.sev, title: rule.title(m) });
+  }
+  return out;
+}
+
+export function runSynthesizeEol(db: Db, now: string, runId: number | null = null): { added: number; skipped: number; rows: number } {
   const rows = db.raw.prepare(
     'SELECT target, url, web_server, tech_json FROM http_probes WHERE web_server IS NOT NULL'
   ).all() as { target: string; url: string; web_server: string; tech_json: string | null }[];
+  const existing = new Set(
+    (db.raw.prepare(
+      "SELECT target, category, title, matched_at FROM findings WHERE tool='synthesize-eol'"
+    ).all() as { target: string; category: string; title: string; matched_at: string }[])
+      .map((f) => `${f.target}|${f.category}|${f.title}|${f.matched_at}`),
+  );
   let added = 0;
+  let skipped = 0;
   for (const r of rows) {
-    const hay = r.web_server + ' ' + (r.tech_json ?? '');
-    for (const rule of RULES) {
-      const m = hay.match(rule.re);
-      if (!m) continue;
+    for (const f of matchRules(r.web_server, r.tech_json)) {
+      const key = `${r.target}|${f.cat}|${f.title}|${r.url}`;
+      if (existing.has(key)) { skipped++; continue; }
+      existing.add(key);
       db.insertFinding({
         tool: 'synthesize-eol',
         target: r.target,
-        category: rule.cat,
-        severity: rule.sev,
-        title: rule.title(m),
+        category: f.cat,
+        severity: f.sev,
+        title: f.title,
         cve: null,
         matched_at: r.url,
         meta: { web_server: r.web_server, tech: r.tech_json },
@@ -66,9 +81,21 @@ function main(): void {
       added++;
     }
   }
-  db.finishRun(runId, { targetsCount: rows.length, findingsCount: added, at: new Date().toISOString() });
-  db.close();
-  console.error(`synthesized ${added} findings from ${rows.length} http_probes rows`);
+  return { added, skipped, rows: rows.length };
 }
 
-main();
+function main(): void {
+  const opts = parseArgs(process.argv);
+  if (opts.help) { console.error('Usage: synthesize-eol [--sqlite scan.db]'); process.exit(0); }
+  const db = openDb(opts.db);
+  const now = new Date().toISOString();
+  const runId = db.startRun('synthesize-eol', {}, now);
+  const { added, skipped, rows } = runSynthesizeEol(db, now, runId);
+  db.finishRun(runId, { targetsCount: rows, findingsCount: added, at: new Date().toISOString() });
+  db.close();
+  console.error(`synthesized ${added} findings (${skipped} already present) from ${rows} http_probes rows`);
+}
+
+if (process.argv[1] && process.argv[1].endsWith('synthesize-eol.ts')) {
+  main();
+}
