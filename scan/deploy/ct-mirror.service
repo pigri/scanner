@@ -2,6 +2,8 @@
 Description=gen0sec CT-mirror update (scrape-ct-log -> enqueue new scope-matched hosts)
 After=network-online.target
 Wants=network-online.target
+# On a non-zero exit, emit a ct_status error event to Axiom.
+OnFailure=ct-mirror-alert.service
 
 [Service]
 Type=oneshot
@@ -30,8 +32,9 @@ WorkingDirectory=/home/pigri/gen0sec/redteam/discovery
 # fewer than 5M certs append per interval, so it just fetches whatever is new.
 Environment=CT_MAX_ENTRIES=5000000
 # nvm must be sourced explicitly under systemd's clean environment.
+# ../scan/.env.scan supplies the Axiom env for the end-of-update ct_status emission.
 # scrape-ct-log resolves via ~/.local/bin (added to PATH inside the shell).
-ExecStart=/usr/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; export PATH="$HOME/.local/bin:$PATH"; mkdir -p logs && exec npx tsx src/ct-mirror.ts update >> logs/ct-mirror.log 2>&1'
+ExecStart=/usr/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; export PATH="$HOME/.local/bin:$PATH"; ENVFILE="$PWD/../scan/.env.scan"; [ -r "$ENVFILE" ] && set -a && . "$ENVFILE" && set +a; mkdir -p logs && exec npx tsx src/ct-mirror.ts update >> logs/ct-mirror.log 2>&1'
 
 [Install]
 WantedBy=default.target
