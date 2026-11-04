@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, writeLines, resolveOutputPath } from './lib/runner.js';
 import { openDb } from './lib/db.js';
+import { parseHttpxRow } from './lib/httpx-parse.js';
 
 async function main(): Promise<void> {
   const opts = parseCommonCli(process.argv);
@@ -50,6 +51,9 @@ their HTTP endpoint. Default template:
   const args = [
     '-l', tmp, '-json', '-o', outFile,
     '-sc', '-title', '-td', '-web-server', '-tech-detect',
+    // include response headers so the Server banner survives when httpx's
+    // web-server field is empty (error or redirect final hop).
+    '-irh',
     // follow same-host redirects so a root 302 (nginx -> /ords/ etc.) resolves to
     // the real app's status/title/tech instead of a bare empty 302. Host-only to
     // stay in scope (won't chase an external redirect).
@@ -67,38 +71,12 @@ their HTTP endpoint. Default template:
   if (db && runId !== null && fs.existsSync(outFile)) {
     let count = 0;
     for (const line of fs.readFileSync(outFile, 'utf8').split('\n')) {
-      if (!line.trim()) continue;
+      const probe = parseHttpxRow(line);
+      if (!probe) continue;
       try {
-        const row = JSON.parse(line) as {
-          input?: string; url?: string; host?: string;
-          status_code?: number; status?: number;
-          title?: string; webserver?: string; 'web-server'?: string;
-          tech?: string[]; technologies?: string[];
-          content_length?: number; body_hash?: string; hash?: { body_sha256?: string };
-        };
-        // Normalize `target` to the bare hostname (matching scan_queue / ports).
-        // We feed httpx expanded URLs (http://foo + https://foo), so row.input
-        // is scheme-prefixed. Storing it verbatim broke every downstream join
-        // (report-worker, risk.ts, sslyze/headers/ffuf live-only filters,
-        // synthesize-eol, graph-export) because they all key on the bare host.
-        const rawTarget = row.host ?? row.input ?? row.url ?? '';
-        const target = rawTarget
-          .replace(/^https?:\/\//i, '')
-          .replace(/[/:?#].*$/, '')
-          .replace(/\.$/, '')
-          .toLowerCase();
-        db.insertHttpProbe({
-          target,
-          url: row.url ?? '',
-          status_code: row.status_code ?? row.status ?? null,
-          title: row.title ?? null,
-          web_server: row.webserver ?? row['web-server'] ?? null,
-          tech: row.tech ?? row.technologies ?? null,
-          content_length: row.content_length ?? null,
-          hash_body: row.body_hash ?? row.hash?.body_sha256 ?? null,
-        }, now, runId);
+        db.insertHttpProbe(probe, now, runId);
         count++;
-      } catch { /* ignore malformed row */ }
+      } catch { /* ignore unwritable row */ }
     }
     db.finishRun(runId, { targetsCount: targets.length, findingsCount: count, at: new Date().toISOString() });
     db.close();
