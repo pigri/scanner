@@ -51,6 +51,9 @@ their HTTP endpoint. Default template:
   const args = [
     '-l', tmp, '-json', '-o', outFile,
     '-sc', '-title', '-td', '-web-server', '-tech-detect',
+    // include response headers so the Server banner survives when httpx's
+    // web-server field is empty (error or redirect final hop).
+    '-irh',
     // follow same-host redirects so a root 302 (nginx -> /ords/ etc.) resolves to
     // the real app's status/title/tech instead of a bare empty 302. Host-only to
     // stay in scope (won't chase an external redirect).

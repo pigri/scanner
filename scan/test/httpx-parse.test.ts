@@ -26,4 +26,10 @@ describe('parseHttpxRow', () => {
     expect(parseHttpxRow('   ')).toBeNull();
     expect(parseHttpxRow('not json')).toBeNull();
   });
+  it('falls back to header.server', () => {
+    expect(parseHttpxRow(row({ header: { server: 'MinIO' } }))?.web_server).toBe('MinIO');
+  });
+  it('falls back to header.Server', () => {
+    expect(parseHttpxRow(row({ header: { Server: 'MinIO' } }))?.web_server).toBe('MinIO');
+  });
 });

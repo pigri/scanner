@@ -5,6 +5,7 @@ interface HttpxRow {
   status_code?: number; status?: number;
   title?: string; webserver?: string; 'web-server'?: string;
   tech?: string[]; technologies?: string[];
+  header?: { server?: string; Server?: string };
   content_length?: number; body_hash?: string; hash?: { body_sha256?: string };
 }
 
@@ -29,7 +30,7 @@ export function parseHttpxRow(line: string): HttpProbeRow | null {
     url: row.url ?? '',
     status_code: row.status_code ?? row.status ?? null,
     title: row.title ?? null,
-    web_server: row.webserver ?? row['web-server'] ?? null,
+    web_server: row.webserver ?? row['web-server'] ?? row.header?.server ?? row.header?.Server ?? null,
     tech: row.tech ?? row.technologies ?? null,
     content_length: row.content_length ?? null,
     hash_body: row.body_hash ?? row.hash?.body_sha256 ?? null,
