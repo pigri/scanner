@@ -22,7 +22,8 @@ discovery/
     ct-log.ts       crt.sh + Certspotter certificate transparency
     ptr-sweep.ts    walk a CIDR list, reverse-DNS every IP
     dns-brute.ts    SecLists wordlist × parent list, dig-based
-    refresh.ts      orchestrator: ct-log → dns-brute → enrich → filter
+    expand.ts       permute known hosts, DNS+CT validate, merge new ones
+    refresh.ts      orchestrator: ct-log → dns-brute → enrich → filter (+ expand, opt-in)
   test/             38 tests (ddg, graph, asn, ct, ptr)
   parents.txt       seed parent list for refresh / dns-brute
   prefixes.txt      seed CIDR list for ptr-sweep
@@ -289,13 +290,15 @@ Or shell out with the `sqlite3` CLI for ad-hoc: `sqlite3 recon.db 'select count(
 
 ### refresh
 
-One-shot orchestrator: CT logs per parent → SecLists brute → enrich → phantom filter. Writes `refresh-summary.json` with a delta count for downstream reporting / cron.
+One-shot orchestrator: CT logs per parent → SecLists brute → enrich → phantom filter, and optionally a fourth pattern-expansion stage (`--expand`, off by default). Writes `refresh-summary.json` with a delta count for downstream reporting / cron.
 
 ```
 npm run refresh -- --seclist top-5000 --ct-sources certspotter
 ```
 
-Key flags: `--parents`, `--suffix`, `--domains`, `--seclist`, `--ct-sources`, `--skip-brute`, `--skip-ct`, `--skip-enrich`.
+Key flags: `--parents`, `--suffix`, `--domains`, `--seclist`, `--ct-sources`, `--skip-brute`, `--skip-ct`, `--skip-enrich`, `--expand`.
+
+`--expand` runs `expand.ts` as stage 4: it mines the naming grammar already in `--domains`, permutes candidate hostnames per zone, validates DNS-first then a quota-bounded CT oracle, and merges the corroborated ones back in. Opt-in and host-side; see `npx tsx src/expand.ts --help` for its own budget / dry-run flags.
 
 **With the SQLite store on:** pass `--sqlite recon.db` to every stage (or bake it into the refresh call) and every host / IP / PTR / resolution is stamped with a UTC timestamp. Query "what changed since yesterday" with `npm run query -- new --since 2026-08-18`. Schema at `src/lib/schema.sql`; the tables are `hosts`, `sources`, `ips`, `resolutions`, `ptr_records`, `runs`.
 
