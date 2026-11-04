@@ -1,0 +1,21 @@
+[Unit]
+Description=gen0sec discovery pattern-expansion (nightly, before scan-feed)
+
+[Timer]
+# Nightly at 02:20, chosen to sit in the gap between the two 30-min jobs that
+# also rewrite domains.txt: enrich-refresh (:15/:45) finishes within a minute or
+# two, and ct-mirror fires at :00/:30 -- so a ~5-min expand pass runs clear of
+# both. No RandomizedDelaySec: this is a single-box, once-a-night job, so a
+# fixed wall-clock slot keeps that ordering deterministic (jitter only matters to
+# spread load across many machines). It lands before scan-feed (03:00) so any
+# tier-A/B name merged into domains.txt is enqueued the same night. Should a run
+# ever overlap a 30-min cycle, the merge is a self-healing read-modify-write:
+# a lost update is recovered on the next enrich cycle and the next nightly run.
+# OnCalendar (wall-clock) over OnUnitActiveSec: a monotonic timer loses its
+# anchor on a user-manager restart; a calendar timer always recomputes its next
+# elapse. Persistent=true catches up a run missed while the box was off.
+OnCalendar=*-*-* 02:20:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

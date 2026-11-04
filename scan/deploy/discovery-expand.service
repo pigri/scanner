@@ -1,0 +1,27 @@
+[Unit]
+Description=gen0sec discovery pattern-expansion (mine corpus grammar, permute, DNS+CT validate, merge confirmed names)
+After=network-online.target
+Wants=network-online.target
+# The slow, CT-quota-spending discovery stage the enrich-refresh cycle
+# deliberately leaves out, so it runs on its own nightly timer rather than the
+# 30-min enrich cadence. Runs in the MAIN namespace (like enrich-refresh): recon
+# DNS + ctlogs/crt.sh lookups need no VPN egress. Reads the ctlogs.dev key at
+# runtime from the gitignored .ctlogs (or CTLOGS_API_KEY); the key is never
+# logged. The stage always exits 0 (a spent quota is not a failure) and the
+# merge is atomic-last, so an interrupted run writes nothing.
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/pigri/gen0sec/redteam/discovery
+# Safe defaults: --ct-budget 50 (<= the 100/hr free-tier ceiling, ~1500/mo
+# nightly, well under the 10k/mo cap) and --ct-fallback-budget 0 (zones past the
+# ctlogs budget degrade straight to DNS-only, never the slow rate-limited crt.sh
+# bulk fallback). Tier A/B (DNS + CT-corroborated) merge into domains.txt; tier C
+# (resolves, non-wildcard, no CT) goes to the expand-tier-c.txt sidecar for
+# review; everything else is dropped. The 30-min enrich-refresh keeps domains.txt
+# fresh between runs, so this stays a pure expansion pass (no re-enrich here).
+ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; export PATH="$HOME/.local/bin:$PATH"; mkdir -p logs && exec npx tsx src/expand.ts --domains domains.txt --suffix gov.hu >> logs/discovery-expand.log 2>&1'
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=default.target
