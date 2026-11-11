@@ -1,0 +1,13 @@
+[Unit]
+Description=gen0sec CT-mirror heartbeat (every 15 min)
+
+[Timer]
+# Wall-clock, not OnBootSec/OnUnitActiveSec: a monotonic timer silently dies on a
+# user-manager restart, and a liveness heartbeat must not have that failure mode.
+# Fires at :07/:22/:37/:52, offset from ct-mirror (:00/:30) and enrich-refresh (:15/:45).
+OnCalendar=*:07/15
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

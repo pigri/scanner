@@ -1,0 +1,12 @@
+[Unit]
+Description=gen0sec CT-mirror failure alert (OnFailure= target of ct-mirror.service)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/pigri/gen0sec/redteam/discovery
+# Host network (no netns): Axiom ingest is a plain HTTPS POST. nvm must be sourced
+# explicitly under systemd's clean environment. The Axiom env (AXIOM_INGEST_TOKEN,
+# AXIOM_DATASET) comes from ../scan/.env.scan; unset => the command is a no-op.
+ExecStart=/usr/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; export PATH="$HOME/.local/bin:$PATH"; ENVFILE="$PWD/../scan/.env.scan"; [ -r "$ENVFILE" ] && set -a && . "$ENVFILE" && set +a; mkdir -p logs && exec npx tsx src/ct-mirror.ts emit-failure >> logs/ct-mirror.log 2>&1'
