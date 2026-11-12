@@ -12,6 +12,7 @@ export interface TargetRowLike {
   info: number;
   findings: number;
   cves: number;
+  versionMatch: number; // distinct CVEs from version-match (banner-inferred) findings
   created_at: string | null;
   updated_at: string | null;
   organization: string | null;
@@ -130,6 +131,8 @@ export function filterAndFacet<T extends TargetRowLike>(
         return byNum('findings');
       case 'cves':
         return byNum('cves');
+      case 'versionMatch':
+        return byNum('versionMatch');
       case 'updated':
         return (b.updated_at || '').localeCompare(a.updated_at || '') || a.target.localeCompare(b.target);
       case 'created':
