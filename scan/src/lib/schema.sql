@@ -87,8 +87,7 @@ CREATE INDEX IF NOT EXISTS idx_findings_seen     ON findings(seen_at);
 -- group, then cve (the only other selected column) so the index fully covers the
 -- query. Serves the inner grouped scan in index order — no temp B-tree for the
 -- GROUP BY, no table reads. Measured warm on 308,758 rows: 897.5 ms -> 136.6 ms.
--- Same rationale as
--- idx_risk_target_ca_score below.
+-- Same rationale as idx_risk_target_ca_score.
 CREATE INDEX IF NOT EXISTS idx_findings_logical
   ON findings(target, tool, severity, category, title, seen_at, cve);
 -- idx_findings_review (partial index on needs_review = 1) is created inside
@@ -108,13 +107,14 @@ CREATE TABLE IF NOT EXISTS risk_scores (
 CREATE INDEX IF NOT EXISTS idx_risk_target   ON risk_scores(target);
 CREATE INDEX IF NOT EXISTS idx_risk_score    ON risk_scores(score);
 CREATE INDEX IF NOT EXISTS idx_risk_computed ON risk_scores(computed_at);
--- Covering index for the UI's per-target MAX(computed_at)/MIN/MAX aggregations.
--- risk_scores grows unbounded (hourly × N targets), so full-scan aggregates got
--- expensive (~3.5M rows → 2.4s per GROUP BY). This index lets the planner
--- stream ordered rows per target and return score straight from the index.
+-- Per-target lookups of the latest/oldest score row. risk_scores grows unbounded
+-- (hourly × N targets), so full scans are expensive. Serves the risk_latest
+-- backfill/refresh (lib/risk-latest.ts), the UI target detail and report-worker.
 CREATE INDEX IF NOT EXISTS idx_risk_target_ca_score ON risk_scores(target, computed_at, score);
 
 -- Latest risk score per non-URL target; see lib/risk-latest.ts for the definition.
+-- Invariant: every writer skips URL targets (http://, https://), so this table
+-- never holds one and readers need no URL filter.
 CREATE TABLE IF NOT EXISTS risk_latest (
   target     TEXT PRIMARY KEY,
   score      INTEGER NOT NULL,

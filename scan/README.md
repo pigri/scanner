@@ -216,7 +216,7 @@ npm run retention -- --older-than 30 --keep-min 3 --apply  # delete
 - `--keep-min N` — always keep the N newest runs *per tool* even if old (default: 3)
 - `--apply` — actually delete (default is dry-run)
 
-Deletes cascade across `findings`, `ports`, `http_probes`, `screenshots`, `risk_scores`, `runs` in one transaction, then removes the `runs/<id>/` directory. Runs without a directory (e.g. legacy) still get their DB rows pruned.
+Deletes cascade across `findings`, `ports`, `http_probes`, `screenshots`, `risk_scores`, `runs` in one transaction, and `risk_latest` is re-derived for the affected targets (a target with no scores left is dropped), then removes the `runs/<id>/` directory. Runs without a directory (e.g. legacy) still get their DB rows pruned.
 
 Add to cron for automatic housekeeping:
 ```
@@ -250,6 +250,8 @@ A small self-contained web dashboard over `scan.db` (and `../discovery/recon.db`
 npm run ui                                              # scan.db + ../discovery/recon.db, http://127.0.0.1:8787
 npm run ui -- --sqlite /storage/gen0sec-scan/scan.db --recon-db ../discovery/recon.db --port 8787
 ```
+
+The UI reads target scores from the `risk_latest` table. Any scan tool creates and fills it the first time it opens the DB; the UI cannot (it opens the DB read-only), so it exits at startup if the table is missing. Open the DB once with a scan tool, then restart the UI.
 
 Flags: `--sqlite <path>` (scan DB, default `scan.db`), `--recon-db <path>` (auto-detected at `../discovery/recon.db`), `--port` / `-p`, `--host` (default `127.0.0.1`). Env: `UI_PORT`, `UI_HOST`.
 
