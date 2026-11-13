@@ -34,6 +34,11 @@ export interface QueueOps {
   // a worker whose claim was reset and re-taken cannot overwrite the new owner.
   markDone(id: number, runId: number | null, atIso: string, workerId?: string): void;
   markFailed(id: number, error: string, atIso: string, workerId?: string): void;
+  // Return this worker's own in_progress rows to pending without counting an
+  // attempt or an abandonment, for a batch whose result cannot be trusted. Rows
+  // that are not in_progress or are owned by someone else are left alone;
+  // returns how many rows were released.
+  release(ids: readonly number[], workerId?: string): number;
   stats(): QueueStats;
 }
 
@@ -105,6 +110,7 @@ export function makeQueue(raw: Database.Database, table: string, filter: QueueFi
     )`);
   const reapRequeueStmt = raw.prepare(`UPDATE ${table} SET status='pending', attempts=?, abandoned=?, started_at=NULL, claimed_by=NULL, heartbeat_at=NULL WHERE id=?`);
   const reapFailStmt = raw.prepare(`UPDATE ${table} SET status='failed', attempts=?, abandoned=?, error=?, finished_at=?, claimed_by=NULL, heartbeat_at=NULL WHERE id=?`);
+  const releaseStmt = raw.prepare(`UPDATE ${table} SET status='pending', started_at=NULL, claimed_by=NULL, heartbeat_at=NULL WHERE id=? AND status='in_progress' AND claimed_by IS ?`);
   const statsStmt = raw.prepare(`SELECT status, COUNT(*) n FROM ${table} GROUP BY status`);
 
   const enqueueTx = raw.transaction((rows: readonly QueueEntry[], atIso: string): number => {
@@ -129,6 +135,12 @@ export function makeQueue(raw: Database.Database, table: string, filter: QueueFi
   const heartbeatTx = raw.transaction((ids: readonly number[], atIso: string, workerId: string | null): number => {
     let n = 0;
     for (const id of ids) n += heartbeatStmt.run(atIso, id, workerId).changes;
+    return n;
+  }).immediate;
+
+  const releaseTx = raw.transaction((ids: readonly number[], workerId: string | null): number => {
+    let n = 0;
+    for (const id of ids) n += releaseStmt.run(id, workerId).changes;
     return n;
   }).immediate;
 
@@ -158,6 +170,7 @@ export function makeQueue(raw: Database.Database, table: string, filter: QueueFi
       markDoneStmt.run(atIso, runId && runId > 0 ? runId : null, id, workerId ?? null);
     },
     markFailed: (id, error, atIso, workerId) => { markFailedStmt.run(atIso, error, id, workerId ?? null); },
+    release: (ids, workerId) => releaseTx(ids, workerId ?? null),
     stats: (): QueueStats => {
       const acc: QueueStats = { pending: 0, in_progress: 0, done: 0, failed: 0 };
       for (const r of statsStmt.all() as { status: string; n: number }[]) {

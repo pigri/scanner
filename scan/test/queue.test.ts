@@ -302,6 +302,28 @@ describe.each(['scanQueue', 'reportQueue'] as const)('%s claim ownership and rea
     expect([row('a').status, row('b').status]).toEqual(['done', 'failed']);
   });
 
+  it('release returns only this owner\'s in_progress rows to pending without counting anything', () => {
+    db[which].enqueueMany([{ target: 'a', priority: 3 }, { target: 'b', priority: 2 }, { target: 'c', priority: 1 }], T(0));
+    const [a, b, c] = db[which].claimBatch(3, T(1), 'w1');
+    db.raw.prepare(`UPDATE ${table} SET attempts=1, abandoned=1 WHERE id=?`).run(a!.id);
+    db.raw.prepare(`UPDATE ${table} SET claimed_by='w2' WHERE id=?`).run(b!.id);
+    db[which].markDone(c!.id, null, T(2), 'w1');
+    expect(db[which].release([a!.id, b!.id, c!.id], 'w1')).toBe(1);
+    expect(row('a')).toMatchObject({ status: 'pending', attempts: 1, abandoned: 1, started_at: null, claimed_by: null, heartbeat_at: null });
+    expect(row('b')).toMatchObject({ status: 'in_progress', claimed_by: 'w2', heartbeat_at: T(1) });
+    expect(row('c').status).toBe('done');
+    expect(db[which].claimBatch(5, T(3), 'w3').map((x) => x.target)).toEqual(['a']);
+  });
+
+  it('release leaves a row that was reset and re-taken by another worker alone', () => {
+    db[which].enqueueMany([{ target: 'a', priority: 1 }], T(0));
+    const [a] = db[which].claimBatch(1, T(1), 'A');
+    reap({ atIso: T(30), staleBeforeIso: T(15), legacyBeforeIso: T(0) });
+    db[which].claimBatch(1, T(31), 'B');
+    expect(db[which].release([a!.id], 'A')).toBe(0);
+    expect(row('a')).toMatchObject({ status: 'in_progress', claimed_by: 'B' });
+  });
+
   it('requeueMany clears the owner and heartbeat', () => {
     db[which].enqueueMany([{ target: 'a', priority: 1 }], T(0));
     db[which].claimBatch(1, T(1), 'w1');
