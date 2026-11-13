@@ -3,6 +3,7 @@
 // write a per-target markdown report to --out-dir. Runs as a daemon with
 // --watch (systemd: deploy/scan-report-worker.service).
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { openDb } from './lib/db.js';
 import { latestRiskRow } from './lib/risk-latest.js';
@@ -19,6 +20,7 @@ interface Opts {
   pollSec: number;
   logFile: string | null;
   outDir: string;
+  workerId: string;
   help?: boolean;
 }
 
@@ -26,6 +28,7 @@ function parseArgs(argv: string[]): Opts {
   const opts: Opts = {
     db: resolveDbArg(argv), batchSize: 25, maxBatches: 0, watch: false, pollSec: 10,
     logFile: null, outDir: 'reports',
+    workerId: `${os.hostname()}:${process.pid}`,
   };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i]!;
@@ -36,6 +39,7 @@ function parseArgs(argv: string[]): Opts {
     else if (a === '--watch') opts.watch = true;
     else if (a === '--poll-interval') opts.pollSec = parseInt(next(), 10);
     else if (a === '--log') opts.logFile = next();
+    else if (a === '--worker-id') opts.workerId = next();
     else if (a === '--out-dir') opts.outDir = next();
     else if (a === '-h' || a === '--help') opts.help = true;
   }
@@ -54,6 +58,8 @@ Options:
   --max-batches <N>      stop after N batches (default: 0 = unlimited)
   --watch                daemon mode: poll for new work instead of exiting
   --poll-interval <sec>  poll interval in --watch (default: 10)
+  --worker-id <id>       stable owner id for claims (default: <hostname>:<pid>);
+                         a restart with the same id returns its stranded rows
   --log <file>           tee logs to <file> (default: logs/report-worker-<ts>.log)`);
 }
 
@@ -98,6 +104,7 @@ async function main(): Promise<void> {
     watch: opts.watch,
     pollSec: opts.pollSec,
     log,
+    workerId: opts.workerId,
     onIdleTick: checkpointIfDue,
     processBatch: async (claimed): Promise<BatchOutcome> => {
       const now = new Date().toISOString();

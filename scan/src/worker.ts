@@ -2,9 +2,9 @@
 // Loop: claim next batch from scan_queue → write temp targets file →
 // invoke scan-all with it → mark done. Repeats until queue is empty or
 // --max-batches reached. Ctrl-C at any time is safe; unfinished claims stay
-// as in_progress and can be requeued manually if you want (UPDATE ... SET
-// status='pending'). No automatic reaper here — see README.
+// as in_progress; the queue loop returns them to pending (see queue-loop.ts).
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { openDb } from './lib/db.js';
@@ -25,6 +25,7 @@ interface Opts {
   claimSuffixes: string[];
   claimNotSuffixes: string[];
   extraArgs: string[];
+  workerId: string;
   help?: boolean;
 }
 
@@ -33,6 +34,7 @@ function parseArgs(argv: string[]): Opts {
     db: resolveDbArg(argv), batchSize: 25, maxBatches: 0, scope: null, strict: false,
     logFile: null, watch: false, pollSec: 10,
     claimSuffixes: [], claimNotSuffixes: [], extraArgs: [],
+    workerId: `${os.hostname()}:${process.pid}`,
   };
   let passthrough = false;
   for (let i = 2; i < argv.length; i++) {
@@ -46,6 +48,7 @@ function parseArgs(argv: string[]): Opts {
     else if (a === '--scope') opts.scope = next();
     else if (a === '--strict') opts.strict = true;
     else if (a === '--log') opts.logFile = next();
+    else if (a === '--worker-id') opts.workerId = next();
     else if (a === '--watch') opts.watch = true;
     else if (a === '--poll-interval') opts.pollSec = parseInt(next(), 10);
     else if (a === '--claim-suffix') opts.claimSuffixes.push(next());
@@ -69,6 +72,9 @@ Options:
   --strict               refuse out-of-scope targets
   --log <file>           tee timestamped worker logs to <file> (also stderr).
                          Default: logs/worker-<timestamp>.log (always audited).
+  --worker-id <id>       stable owner id for claims (default: <hostname>:<pid>).
+                         Give each unit a fixed id: on start the worker returns
+                         the rows that id left in_progress to the queue.
   --watch                daemon mode: when the queue drains, poll for new work
                          instead of exiting. Runs until SIGINT/SIGTERM.
   --poll-interval <sec>  seconds to sleep between polls in --watch (default: 10)
@@ -164,6 +170,7 @@ async function main(): Promise<void> {
     watch: opts.watch,
     pollSec: opts.pollSec,
     log,
+    workerId: opts.workerId,
     onIdleTick: checkpointIfDue,
     processBatch: async (claimed): Promise<BatchOutcome> => {
       const preRunId = (db.raw.prepare('SELECT COALESCE(MAX(id), 0) m FROM runs').get() as { m: number }).m;
