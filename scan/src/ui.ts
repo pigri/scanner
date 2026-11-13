@@ -16,6 +16,7 @@ import { filterAndFacet } from './lib/target-filter.js';
 import { CERT_ORG_SQL } from './lib/cert-org.js';
 import { TARGET_AGG_SQL } from './lib/target-agg.js';
 import { buildNewsSql } from './lib/news-sql.js';
+import { NO_URL } from './lib/risk-latest.js';
 
 interface Opts {
   scanDb: string;
@@ -91,12 +92,6 @@ const recon =
   opts.reconDb && fs.existsSync(opts.reconDb) ? openReadonly(opts.reconDb) : null;
 
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
-
-// Some tools key risk_scores by scheme-prefixed URL (http://host, https://host)
-// in addition to the bare FQDN. Those URL rows carry no findings and always have
-// a bare-host twin, so they're duplicates that inflate the target list/counts.
-// This fragment filters them out of target-level queries.
-const NO_URL = `target NOT LIKE 'http://%' AND target NOT LIKE 'https://%'`;
 
 function tableExists(db: Database.Database, name: string): boolean {
   return !!db

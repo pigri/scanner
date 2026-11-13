@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
+import { backfillRiskLatest } from './risk-latest.js';
 import { decideHostStates, type HostStateRow } from './host-state.js';
 import { makeQueue, type QueueEntry, type ClaimedRow, type QueueStats, type QueueOps, type QueueFilter } from './queue.js';
 
@@ -174,6 +175,7 @@ export function openDb(dbPath: string, options: OpenDbOptions = {}): Db {
   raw.pragma('busy_timeout = 5000');
   raw.pragma('synchronous = NORMAL');
   raw.exec(loadSchema());
+  backfillRiskLatest(raw);
   // Idempotent migrations for databases that predate a column addition.
   // ADD COLUMN in SQLite errors if the column already exists; probe first.
   const findingsCols = new Set(

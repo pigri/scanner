@@ -114,6 +114,15 @@ CREATE INDEX IF NOT EXISTS idx_risk_computed ON risk_scores(computed_at);
 -- stream ordered rows per target and return score straight from the index.
 CREATE INDEX IF NOT EXISTS idx_risk_target_ca_score ON risk_scores(target, computed_at, score);
 
+-- Latest risk score per non-URL target; see lib/risk-latest.ts for the definition.
+CREATE TABLE IF NOT EXISTS risk_latest (
+  target     TEXT PRIMARY KEY,
+  score      INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_risk_latest_score ON risk_latest(score);
+
 -- Local work queue: hosts to scan, prioritized. A worker claims batches
 -- of `pending` rows, runs scan-all on them, then marks `done` or `failed`.
 -- Nothing else in the pipeline depends on this — it's purely a batching aid.
