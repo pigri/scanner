@@ -83,6 +83,12 @@ and retries with a backoff from `--poll-interval` up to 5 minutes, then carries 
 by itself. The probe queries the nameservers in the namespace's `resolv.conf`
 directly, not through nsswitch, so a host-side resolver cannot answer it.
 
+The namespace (not DNS) is checked again after each batch, before its rows are
+marked. If it changed while the batch ran, or cannot be checked, the rows this
+worker still owns return to the queue without counting an attempt, and the worker
+exits with status 75. Whatever that batch already wrote (its run, findings and
+risk rows) stays in the database until the targets are scanned again.
+
 Fallback: a worker started without `--netns` has no such check. After restarting
 `scanvpn-netns{,-hu}`, restart the matching workers by hand
 (`systemctl --user restart scan-worker-hu@1 scan-worker-hu@2`).

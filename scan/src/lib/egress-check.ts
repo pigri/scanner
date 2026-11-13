@@ -95,6 +95,22 @@ export function makePreflight(o: PreflightOpts): () => Promise<PreflightResult> 
   };
 }
 
+export type PostBatchResult = { action: 'ok' } | { action: 'restart'; reason: string };
+
+// Run after a batch, before its rows are marked: netns only, no DNS, so a
+// resolver hiccup cannot throw away a finished batch. A replaced namespace
+// means the batch ran in the old one and its result cannot be trusted.
+export function postBatchFromOpts(o: { netns: string | null }, deps?: NetnsDeps): (() => PostBatchResult) | undefined {
+  const name = o.netns;
+  if (!name) return undefined;
+  return () => {
+    const n = checkNetns(name, deps);
+    if (n.status === 'mismatch') return { action: 'restart', reason: `batch ran in netns inode ${n.actual}, but ${name} is now inode ${n.expected}` };
+    if (n.status === 'error') return { action: 'restart', reason: `netns ${name} check failed after the batch: ${n.reason}` };
+    return { action: 'ok' };
+  };
+}
+
 export const EXIT_RESTART = 75; // EX_TEMPFAIL: non-zero, so Restart=on-failure starts a fresh worker
 
 export function exitCodeFor(r: { batches: number; restart?: string }): number {

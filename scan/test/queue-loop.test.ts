@@ -6,17 +6,18 @@ import type { Logger } from '../src/lib/log.js';
 const noop = (): void => {};
 const log = { info: noop, warn: noop, error: noop, step: noop, close: noop } as unknown as Logger;
 
-interface Fake { queue: QueueOps; reaps: Parameters<QueueOps['reapStale']>[0][]; beats: { ids: number[]; atIso: string }[]; claims: string[]; calls: string[] }
+interface Fake { released: { ids: number[]; workerId?: string }[]; done: number[]; failed: number[]; queue: QueueOps; reaps: Parameters<QueueOps['reapStale']>[0][]; beats: { ids: number[]; atIso: string }[]; claims: string[]; calls: string[] }
 
 function fakeQueue(batches: ClaimedRow[][]): Fake {
-  const f: Fake = { queue: null as unknown as QueueOps, reaps: [], beats: [], claims: [], calls: [] };
+  const f: Fake = { released: [], done: [], failed: [], queue: null as unknown as QueueOps, reaps: [], beats: [], claims: [], calls: [] };
   const pending = [...batches];
   f.queue = {
     enqueueMany: () => 0,
     requeueMany: () => 0,
     claimBatch: (_s, _a, workerId) => { f.claims.push(workerId ?? ''); f.calls.push('claim'); return pending.shift() ?? []; },
-    markDone: noop,
-    markFailed: noop,
+    markDone: (id) => { f.done.push(id); },
+    markFailed: (id) => { f.failed.push(id); },
+    release: (ids, workerId) => { f.released.push({ ids: [...ids], ...(workerId !== undefined ? { workerId } : {}) }); f.calls.push('release'); return ids.length; },
     heartbeat: (ids, atIso) => { f.beats.push({ ids: [...ids], atIso }); return ids.length; },
     reapStale: (o) => { f.reaps.push(o); f.calls.push('reap'); return { requeued: 2, failed: 1 }; },
     stats: () => ({ pending: 0, in_progress: 0, done: 0, failed: 0 }),
@@ -267,5 +268,78 @@ describe('runQueueLoop preflight', () => {
       preflight: async () => { process.emit('SIGTERM'); return { action: 'ok' }; },
     }));
     expect(f.claims).toEqual([]);
+  });
+});
+
+describe('runQueueLoop post-batch check', () => {
+  type PB = NonNullable<QueueLoopOpts['postBatchCheck']>;
+  const bad: PB = () => ({ action: 'restart', reason: 'netns replaced' });
+
+  it('releases the batch instead of marking it, returns a restart signal and claims no more', async () => {
+    const f = fakeQueue([[row(1), row(2)], [row(3)]]);
+    const error = vi.fn();
+    const onBatchDone = vi.fn();
+    const r = await runQueueLoop(base(f, { log: { ...log, error } as unknown as Logger, postBatchCheck: bad, onBatchDone }));
+    expect(f.released).toEqual([{ ids: [1, 2], workerId: 'hu-1' }]);
+    expect(f.done).toEqual([]);
+    expect(f.failed).toEqual([]);
+    expect(onBatchDone).not.toHaveBeenCalled();
+    expect(f.claims).toHaveLength(1);
+    expect(r).toEqual({ batches: 1, restart: 'netns replaced' });
+    const msg = error.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(msg).toContain('2 row(s)');
+    expect(msg).toContain('netns replaced');
+  });
+
+  it('releases rather than fails a batch whose processing failed', async () => {
+    const f = fakeQueue([[row(1)]]);
+    const r = await runQueueLoop(base(f, { postBatchCheck: bad, processBatch: async () => ({ ok: false, error: 'scan-all exit 1' }) }));
+    expect(f.released).toHaveLength(1);
+    expect(f.failed).toEqual([]);
+    expect(r.restart).toBe('netns replaced');
+  });
+
+  it('checks after the batch and before marking, and marks as before on ok', async () => {
+    const f = fakeQueue([[row(1)], [row(2)]]);
+    const markDone = f.queue.markDone;
+    f.queue.markDone = (...a) => { f.calls.push('done'); markDone(...a); };
+    const pb: PB = () => { f.calls.push('postcheck'); return { action: 'ok' }; };
+    const r = await runQueueLoop(base(f, { maxBatches: 2, postBatchCheck: pb }));
+    expect(f.calls.filter((c) => c !== 'reap')).toEqual(['claim', 'postcheck', 'done', 'claim', 'postcheck', 'done']);
+    expect(f.released).toEqual([]);
+    expect(r).toEqual({ batches: 2 });
+  });
+
+  it('marks failed as before on ok when the batch failed', async () => {
+    const f = fakeQueue([[row(1)]]);
+    await runQueueLoop(base(f, { maxBatches: 1, postBatchCheck: () => ({ action: 'ok' }), processBatch: async () => ({ ok: false, error: 'x' }) }));
+    expect(f.failed).toEqual([1]);
+    expect(f.released).toEqual([]);
+  });
+
+  it('is unchanged without a post-batch check', async () => {
+    const f = fakeQueue([[row(1)]]);
+    const r = await runQueueLoop(base(f, { maxBatches: 1 }));
+    expect(f.done).toEqual([1]);
+    expect(f.released).toEqual([]);
+    expect(r).toEqual({ batches: 1 });
+  });
+
+  it('treats a throwing check as a mismatch (fails closed)', async () => {
+    const f = fakeQueue([[row(1)], [row(2)]]);
+    const r = await runQueueLoop(base(f, { postBatchCheck: () => { throw new Error('boom'); } }));
+    expect(f.released).toHaveLength(1);
+    expect(f.done).toEqual([]);
+    expect(f.claims).toHaveLength(1);
+    expect(r.restart).toContain('boom');
+  });
+
+  it('still returns the restart signal when the release itself throws', async () => {
+    const f = fakeQueue([[row(1)]]);
+    f.queue.release = () => { throw new Error('db locked'); };
+    const r = await runQueueLoop(base(f, { postBatchCheck: bad }));
+    expect(f.done).toEqual([]);
+    expect(f.failed).toEqual([]);
+    expect(r.restart).toBe('netns replaced');
   });
 });

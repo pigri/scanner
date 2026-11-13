@@ -11,7 +11,7 @@ import { openDb } from './lib/db.js';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
 import { createLogger, type Logger } from './lib/log.js';
 import { scanChildEnv, TUNED_SCAN_FLAGS } from './lib/scan-all-runner.js';
-import { preflightFromOpts, exitCodeFor } from './lib/egress-check.js';
+import { preflightFromOpts, postBatchFromOpts, exitCodeFor } from './lib/egress-check.js';
 import { runQueueLoop, type BatchOutcome } from './lib/queue-loop.js';
 
 interface Opts {
@@ -179,6 +179,7 @@ async function main(): Promise<void> {
   };
 
   const preflight = preflightFromOpts(opts);
+  const postBatchCheck = postBatchFromOpts(opts);
 
   const result = await runQueueLoop({
     queue: db.scanQueue,
@@ -191,6 +192,7 @@ async function main(): Promise<void> {
     workerId: opts.workerId,
     onIdleTick: checkpointIfDue,
     ...(preflight ? { preflight } : {}),
+    ...(postBatchCheck ? { postBatchCheck } : {}),
     processBatch: async (claimed): Promise<BatchOutcome> => {
       const preRunId = (db.raw.prepare('SELECT COALESCE(MAX(id), 0) m FROM runs').get() as { m: number }).m;
       const targetsFile = path.resolve(batchDir, `scan-batch-${stamp}-${claimed[0]!.id}.txt`);
