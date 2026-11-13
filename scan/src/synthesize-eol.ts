@@ -25,7 +25,7 @@ const RULES: Rule[] = [
   { re: /Microsoft-IIS\/([\d.]+)/i, sev: 'medium', cat: 'outdated-iis',
     title: (m) => `IIS ${m[1]} disclosed (map to Windows Server release notes for CVE exposure)` },
   // nginx (any explicit version disclosure is signal; specific-CVE mapping needs an external DB)
-  { re: /nginx\/([\d.]+)/i, sev: 'low', cat: 'nginx-version',
+  { re: /nginx[\/:]([\d.]+)/i, sev: 'low', cat: 'nginx-version',
     title: (m) => `nginx ${m[1]} version disclosed` },
   // Apache
   { re: /Apache\/([\d.]+)/i, sev: 'low', cat: 'apache-version',
@@ -35,7 +35,7 @@ const RULES: Rule[] = [
   { re: /Apache(?: HTTP Server)?[\/:](1\.\d+|2\.[02])(?!\d)((?:\.\d+)*)/i, sev: 'high', cat: 'eol-apache',
     title: (m) => `EOL Apache httpd ${m[1]}${m[2]} disclosed (releases before 2.4 are past EOL)` },
   // OpenSSL — 1.0.x / 1.1.x are EOL
-  { re: /OpenSSL\/(1\.0\.[\d]+[a-z]?|1\.1\.[\d]+[a-z]?)/i, sev: 'high', cat: 'eol-openssl',
+  { re: /OpenSSL[\/:](1\.0\.[\d]+[a-z]?|1\.1\.[\d]+[a-z]?)/i, sev: 'high', cat: 'eol-openssl',
     title: (m) => `EOL OpenSSL ${m[1]} disclosed (1.0/1.1 series are past EOL)` },
   // PHP EOL: <=7.4 is EOL, <=8.0 is EOL. Header form `PHP/5.3.3` and tech-list form `PHP:5.3.3`;
   // the minor/patch part is optional (`PHP:7`, `PHP:5.6`) and 8.1+ must not match.

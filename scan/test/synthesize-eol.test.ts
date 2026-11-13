@@ -117,5 +117,33 @@ describe('runSynthesizeEol', () => {
       expect(r.added).toBe(3); // eol-apache, eol-php, apache-version
       expect(runSynthesizeEol(db, NOW)).toMatchObject({ added: 0, skipped: 3 });
     });
+
+    it.each(['OpenSSL:1.0.2k', 'OpenSSL:1.1.1w'])('flags tech %s as high eol-openssl', (t) => {
+      const db = openDb(':memory:');
+      probeTech(db, 'Apache', [t]);
+      runSynthesizeEol(db, NOW);
+      expect(eolCats(db)).toEqual([{ target: 'host.example', category: 'eol-openssl', severity: 'high' }]);
+    });
+
+    it('does not flag tech OpenSSL:3.0.13', () => {
+      const db = openDb(':memory:');
+      probeTech(db, 'Apache', ['OpenSSL:3.0.13']);
+      runSynthesizeEol(db, NOW);
+      expect(eolCats(db)).toEqual([]);
+    });
+
+    it.each(['Nginx:1.18.0', 'nginx:1.24.0'])('flags tech %s as low nginx-version', (t) => {
+      const db = openDb(':memory:');
+      probeTech(db, '', [t]);
+      runSynthesizeEol(db, NOW);
+      expect(findings(db)).toEqual([{ target: 'host.example', category: 'nginx-version', severity: 'low' }]);
+    });
+
+    it('yields one nginx-version finding when header and tech list disclose the same version', () => {
+      const db = openDb(':memory:');
+      probeTech(db, 'nginx/1.18.0', ['Nginx:1.18.0']);
+      runSynthesizeEol(db, NOW);
+      expect(findings(db)).toHaveLength(1);
+    });
   });
 });
