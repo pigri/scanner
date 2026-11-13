@@ -6,6 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { openDb } from './lib/db.js';
+import { deleteRiskScoresForRuns } from './lib/risk-latest.js';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
 
 interface Opts {
@@ -109,7 +110,7 @@ function main(): void {
 
   const tx = raw.transaction(() => {
     raw.prepare(`DELETE FROM findings WHERE run_id IN (${placeholders})`).run(...opts.runs);
-    raw.prepare(`DELETE FROM risk_scores WHERE run_id IN (${placeholders})`).run(...opts.runs);
+    deleteRiskScoresForRuns(raw, opts.runs);
     raw.prepare(`DELETE FROM runs WHERE id IN (${placeholders})`).run(...opts.runs);
   });
   tx();

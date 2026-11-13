@@ -3,6 +3,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { openDb } from './lib/db.js';
 import { computeScore, type TargetSignals, type Finding, type Port, type HttpProbe } from './lib/risk.js';
+import { recordRiskScores } from './lib/risk-latest.js';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
 import { buildTargetResolver } from './lib/identity.js';
 
@@ -144,9 +145,6 @@ function main(): void {
     httpByTarget.get(key)!.push({ url: r.url, status_code: r.status_code, tech });
   }
 
-  const insertStmt = db.raw.prepare(
-    'INSERT INTO risk_scores(target, score, breakdown_json, computed_at, run_id) VALUES(?, ?, ?, ?, ?)'
-  );
   const results: { target: string; score: number; breakdown: unknown }[] = [];
   const rows: { target: string; score: number; breakdownJson: string }[] = [];
   for (const t of targets) {
@@ -168,10 +166,7 @@ function main(): void {
   }
   // Single BEGIN IMMEDIATE txn: takes the write lock once (waiting up to the
   // bumped busy_timeout for it) instead of racing the workers on each row.
-  const writeAll = db.raw.transaction((batch: typeof rows) => {
-    for (const row of batch) insertStmt.run(row.target, row.score, row.breakdownJson, now, runId);
-  });
-  writeAll.immediate(rows);
+  recordRiskScores(db.raw, rows, now, runId);
 
   db.finishRun(runId, { targetsCount: targets.size, findingsCount: results.length, at: new Date().toISOString() });
 

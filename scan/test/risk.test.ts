@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { openDb } from '../src/lib/db.js';
+import type Database from 'better-sqlite3';
+import { recordRiskScores } from '../src/lib/risk-latest.js';
 import { computeScore, matchesRiskKeyword, type TargetSignals } from '../src/lib/risk.js';
 
 const empty = (): TargetSignals => ({
@@ -180,5 +183,29 @@ describe('computeScore', () => {
     for (const [, v] of Object.entries(r.breakdown)) {
       if (typeof v === 'number') expect(v).toBeGreaterThanOrEqual(0);
     }
+  });
+});
+
+describe('recordRiskScores', () => {
+  const rowsFor = (raw: Database.Database) =>
+    raw.prepare('SELECT * FROM risk_latest WHERE target = ?');
+
+  it('updates score and updated_at, keeps created_at', () => {
+    const db = openDb(':memory:');
+    const r1 = db.startRun('risk', {}, '2026-01-01T00:00:00Z');
+    recordRiskScores(db.raw, [{ target: 'a.example.com', score: 10, breakdownJson: '{}' }], '2026-01-01T00:00:00Z', r1);
+    const r2 = db.startRun('risk', {}, '2026-02-01T00:00:00Z');
+    recordRiskScores(db.raw, [{ target: 'a.example.com', score: 60, breakdownJson: '{}' }], '2026-02-01T00:00:00Z', r2);
+    expect(rowsFor(db.raw).get('a.example.com')).toEqual({
+      target: 'a.example.com', score: 60, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-02-01T00:00:00Z',
+    });
+    expect((db.raw.prepare('SELECT count(*) c FROM risk_scores').get() as { c: number }).c).toBe(2);
+  });
+
+  it('keeps URL targets out of risk_latest', () => {
+    const db = openDb(':memory:');
+    const r = db.startRun('risk', {}, '2026-01-01T00:00:00Z');
+    recordRiskScores(db.raw, [{ target: 'https://a.example.com', score: 10, breakdownJson: '{}' }], '2026-01-01T00:00:00Z', r);
+    expect(rowsFor(db.raw).get('https://a.example.com')).toBeUndefined();
   });
 });

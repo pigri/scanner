@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { runsToPrune, type RunRow } from '../src/lib/retention.js';
+import { openDb } from '../src/lib/db.js';
+import { recordRiskScores, deleteRiskScoresForRuns } from '../src/lib/risk-latest.js';
 
 const now = '2026-09-01T00:00:00Z';
 const rows: RunRow[] = [
@@ -34,5 +36,25 @@ describe('runsToPrune', () => {
     const result = runsToPrune(rows, { olderThanDays: 0, now, keepMinPerTool: 2 });
     // 2 newest per tool kept: nmap {1,2}, nuclei {3,4}, httpx {5}
     expect(result).toEqual([]);
+  });
+});
+
+describe('deleteRiskScoresForRuns (retention)', () => {
+  it('falls back to the previous score when the newest run is deleted', () => {
+    const db = openDb(':memory:');
+    const r1 = db.startRun('risk', {}, '2026-01-01T00:00:00Z');
+    const r2 = db.startRun('risk', {}, '2026-01-02T00:00:00Z');
+    recordRiskScores(db.raw, [{ target: 'a.example.com', score: 10, breakdownJson: '{}' }], '2026-01-01T00:00:00Z', r1);
+    recordRiskScores(db.raw, [{ target: 'a.example.com', score: 50, breakdownJson: '{}' }], '2026-01-02T00:00:00Z', r2);
+    db.raw.transaction(() => deleteRiskScoresForRuns(db.raw, [r2]))();
+    expect(db.raw.prepare('SELECT score FROM risk_latest WHERE target = ?').get('a.example.com')).toEqual({ score: 10 });
+  });
+
+  it('removes the row when the only run is deleted', () => {
+    const db = openDb(':memory:');
+    const r1 = db.startRun('risk', {}, '2026-01-01T00:00:00Z');
+    recordRiskScores(db.raw, [{ target: 'a.example.com', score: 10, breakdownJson: '{}' }], '2026-01-01T00:00:00Z', r1);
+    db.raw.transaction(() => deleteRiskScoresForRuns(db.raw, [r1]))();
+    expect(db.raw.prepare('SELECT * FROM risk_latest').all()).toEqual([]);
   });
 });

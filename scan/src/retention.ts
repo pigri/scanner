@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { openDb } from './lib/db.js';
+import { deleteRiskScoresForRuns } from './lib/risk-latest.js';
 import { runsToPrune, type RunRow } from './lib/retention.js';
 
 interface Opts {
@@ -93,7 +94,6 @@ function main(): void {
   }
 
   const del = db.raw.prepare('DELETE FROM runs WHERE id = ?');
-  const delRisk = db.raw.prepare('DELETE FROM risk_scores WHERE run_id = ?');
   const delFindings = db.raw.prepare('DELETE FROM findings WHERE run_id = ?');
   const delPorts = db.raw.prepare('DELETE FROM ports WHERE run_id = ?');
   const delHttp = db.raw.prepare('DELETE FROM http_probes WHERE run_id = ?');
@@ -101,7 +101,7 @@ function main(): void {
 
   const tx = db.raw.transaction((ids: number[]) => {
     for (const id of ids) {
-      delRisk.run(id);
+      deleteRiskScoresForRuns(db.raw, [id]);
       delFindings.run(id);
       delPorts.run(id);
       delHttp.run(id);
