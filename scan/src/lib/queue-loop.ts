@@ -5,6 +5,18 @@ import type { Logger } from './log.js';
 // batch → process it → mark each row done/failed → (optionally) hand off. In
 // --watch mode it idles and polls instead of exiting when the queue drains, and
 // shuts down promptly on SIGINT/SIGTERM (systemd stop).
+//
+// Abandoned claims: a killed worker leaves its rows in_progress. On start the
+// loop returns the rows owned by its own worker id to the queue (a fresh process
+// cannot own a live batch). While a batch runs it heartbeats the claimed rows,
+// and, at most once per reapEveryMs before a claim, it returns rows whose heartbeat
+// went stale, whoever owned them. The pre-claim reap also covers a busy queue,
+// where the loop never idles.
+
+const HEARTBEAT_MS = 60_000;
+const STALE_MS = 15 * 60_000;
+const LEGACY_MS = 3 * 3600_000;
+const REAP_EVERY_MS = 60_000;
 
 export interface BatchOutcome {
   ok: boolean;
@@ -26,11 +38,45 @@ export interface QueueLoopOpts {
   // (e.g. WAL checkpoint) onto the natural quiet moments in the loop. Must be
   // fast and non-throwing; the loop does not await it.
   onIdleTick?: () => void;
+  // Stable identity of this worker; recorded on every claim and used for the
+  // startup reap, so it must survive a restart of the same unit.
+  workerId: string;
+  // Injectable for tests; default to the real clock and timers.
+  now?: () => number;
+  heartbeatMs?: number;       // default 60 s
+  staleMs?: number;           // heartbeat age that counts as abandoned, default 15 min
+  reapEveryMs?: number;       // minimum gap between stale reaps, default 60 s
+  legacyMs?: number;          // age of a heartbeat-less claim that counts as abandoned, default 3 h
+  setIntervalFn?: typeof setInterval;
+  clearIntervalFn?: typeof clearInterval;
 }
 
 export async function runQueueLoop(o: QueueLoopOpts): Promise<{ batches: number }> {
   const { queue, log, label } = o;
+  const now = o.now ?? Date.now;
+  const heartbeatMs = o.heartbeatMs ?? HEARTBEAT_MS;
+  const staleMs = o.staleMs ?? STALE_MS;
+  const legacyMs = o.legacyMs ?? LEGACY_MS;
+  const reapEveryMs = o.reapEveryMs ?? REAP_EVERY_MS;
+  let lastReap = -Infinity;
+  const setIntervalFn = o.setIntervalFn ?? setInterval;
+  const clearIntervalFn = o.clearIntervalFn ?? clearInterval;
   let batchN = 0;
+
+  const reap = (what: string, ownerId?: string): void => {
+    try {
+      const t = now();
+      const r = queue.reapStale({
+        atIso: new Date(t).toISOString(),
+        staleBeforeIso: new Date(t - staleMs).toISOString(),
+        legacyBeforeIso: new Date(t - legacyMs).toISOString(),
+        ...(ownerId !== undefined ? { ownerId } : {}),
+      });
+      if (r.requeued || r.failed) log.warn(`${label}: ${what}: returned ${r.requeued} abandoned row(s) to pending, failed ${r.failed} after repeated abandonment`);
+    } catch (e) {
+      log.warn(`${label}: ${what} failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
 
   let interrupted = false;
   let wake: (() => void) | null = null;
@@ -46,6 +92,7 @@ export async function runQueueLoop(o: QueueLoopOpts): Promise<{ batches: number 
     wake = () => { clearTimeout(t); wake = null; res(); };
   });
 
+  reap('startup reap', o.workerId);
   const s0 = queue.stats();
   log.info(`${label}: queue at start: pending=${s0.pending} in_progress=${s0.in_progress} done=${s0.done} failed=${s0.failed}`);
   if (o.watch) log.info(`${label}: watch mode, polling every ${o.pollSec}s when idle`);
@@ -55,7 +102,8 @@ export async function runQueueLoop(o: QueueLoopOpts): Promise<{ batches: number 
     if (interrupted) { log.warn(`${label}: stopping due to signal`); break; }
     if (o.maxBatches && batchN >= o.maxBatches) { log.info(`${label}: reached --max-batches=${o.maxBatches}; stopping`); break; }
 
-    const claimed = queue.claimBatch(o.batchSize, new Date().toISOString());
+    if (now() - lastReap >= reapEveryMs) { lastReap = now(); reap('stale reap'); }
+    const claimed = queue.claimBatch(o.batchSize, new Date(now()).toISOString(), o.workerId);
     if (!claimed.length) {
       if (o.watch) {
         if (!idle) { log.info(`${label}: queue empty; idling (poll every ${o.pollSec}s)`); idle = true; }
@@ -74,20 +122,30 @@ export async function runQueueLoop(o: QueueLoopOpts): Promise<{ batches: number 
 
     const start = Date.now();
     let outcome: BatchOutcome;
+    const ids = claimed.map((c) => c.id);
+    const beat = setIntervalFn(() => {
+      try {
+        const n = queue.heartbeat(ids, new Date(now()).toISOString(), o.workerId);
+        if (n < ids.length) log.warn(`${label}: heartbeat updated ${n} of ${ids.length} row(s); the rest were reset and are no longer owned by ${o.workerId}`);
+      }
+      catch (e) { log.warn(`${label}: heartbeat failed: ${e instanceof Error ? e.message : String(e)}`); }
+    }, heartbeatMs);
     try {
       outcome = await o.processBatch(claimed, batchN);
     } catch (e) {
       outcome = { ok: false, error: e instanceof Error ? e.message : String(e) };
+    } finally {
+      clearIntervalFn(beat);
     }
     const dt = ((Date.now() - start) / 1000).toFixed(1);
     const doneIso = new Date().toISOString();
 
     if (outcome.ok) {
-      for (const c of claimed) { queue.markDone(c.id, outcome.runId ?? null, doneIso); log.info(`  done  #${c.id} ${c.target} → run_id=${outcome.runId ?? '(none)'}`); }
+      for (const c of claimed) { queue.markDone(c.id, outcome.runId ?? null, doneIso, o.workerId); log.info(`  done  #${c.id} ${c.target} → run_id=${outcome.runId ?? '(none)'}`); }
       log.step(`${label}: batch ${batchN} DONE in ${dt}s → ${claimed.length} row(s) marked done`);
       o.onBatchDone?.(claimed, outcome);
     } else {
-      for (const c of claimed) { queue.markFailed(c.id, outcome.error ?? 'unknown', doneIso); log.error(`  fail  #${c.id} ${c.target} → ${outcome.error ?? 'unknown'}`); }
+      for (const c of claimed) { queue.markFailed(c.id, outcome.error ?? 'unknown', doneIso, o.workerId); log.error(`  fail  #${c.id} ${c.target} → ${outcome.error ?? 'unknown'}`); }
       log.error(`${label}: batch ${batchN} FAILED in ${dt}s → ${claimed.length} row(s) marked failed`);
     }
     const s = queue.stats();

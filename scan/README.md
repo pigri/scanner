@@ -176,10 +176,11 @@ npm run worker  -- --batch-size 50 --scope scope.txt        # loops until queue 
 - Dequeue is atomic (`SELECT` + `UPDATE status='in_progress'` in one transaction) — safe if you ever run two workers, though the DB will serialise them.
 - Dedup via `INSERT OR IGNORE` — re-enqueuing the same host is a no-op.
 - States: `pending → in_progress → done | failed`. Failed rows retain an `error` and `attempts` count.
-- **No auto-reaper for crashed `in_progress` rows** — if a worker is killed mid-scan, requeue them manually:
-  ```
-  sqlite3 scan.db "UPDATE scan_queue SET status='pending' WHERE status='in_progress'"
-  ```
+- **Abandoned claims are reset automatically.** A claim records its owner (`claimed_by`, the worker's `--worker-id`) and `heartbeat_at`, which the worker bumps every 60 s while a batch runs. Each reset counts as an attempt and as an abandonment.
+  - At startup a worker returns every row its own id left `in_progress` to `pending`, so a restarted unit recovers its batch at once. Units pass a fixed id (`foreign-%i`, `hu-%i`, `report`); without `--worker-id` the id is `<hostname>:<pid>` and this step finds nothing.
+  - Before each claim, at most once a minute, any worker returns rows whose heartbeat is older than 15 minutes. Rows claimed before heartbeats existed (no `heartbeat_at`) are returned once `started_at` is older than 3 hours.
+  - A row abandoned for the third time (the `abandoned` counter, reset when the target is re-enqueued with `--requeue`) becomes `failed` with `error = 'abandoned 3 times'` instead of looping forever. Failed scan attempts do not count towards this.
+  - A manual requeue is no longer needed after a crash. To force one anyway: `sqlite3 scan.db "UPDATE scan_queue SET status='pending' WHERE status='in_progress'"` (stop the workers first, or they will lose their running batch).
 
 **Worker loop:**
 1. `claimBatch(N)` — grab next N pending rows.

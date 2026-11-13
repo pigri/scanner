@@ -238,8 +238,8 @@ npm run enqueue -- some.host.gov.hu --sqlite scan.db
 
 - The unit runs `--watch --scope scope.txt`; edit `ExecStart` to change batch
   size (`--batch-size N`), poll interval (`--poll-interval S`), or scope.
-- Interrupted batches leave their rows `in_progress`. Requeue with:
-  `UPDATE scan_queue SET status='pending' WHERE status='in_progress';`
+- Interrupted batches leave their rows `in_progress`; the workers return them to
+  `pending` by themselves (see the queue section of the top-level README).
 - `ExecStart` sources `~/.nvm/nvm.sh` explicitly so nvm-managed node/npx resolve
   under systemd's clean environment (a login shell alone does not, because nvm
   lives in `~/.bashrc`). If you use a system node instead, replace the
