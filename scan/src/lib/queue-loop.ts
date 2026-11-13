@@ -1,6 +1,6 @@
 import type { QueueOps, ClaimedRow } from './queue.js';
 import type { Logger } from './log.js';
-import type { PreflightResult } from './egress-check.js';
+import type { PreflightResult, PostBatchResult } from './egress-check.js';
 
 // Shared drain loop for both the scan worker and the report worker: claim a
 // batch → process it → mark each row done/failed → (optionally) hand off. In
@@ -19,6 +19,11 @@ import type { PreflightResult } from './egress-check.js';
 // 'retry' claims nothing and backs off; 'restart' claims nothing and returns a
 // restart reason so the caller can exit non-zero and let the supervisor start
 // a fresh process.
+//
+// Post-batch check: an optional check that runs after a batch and before its
+// rows are marked. When it says 'restart' (or throws), the batch ran in a
+// namespace that may be gone, so its result is not trusted: the rows go back to
+// pending without counting an attempt, and the loop returns a restart reason.
 
 const HEARTBEAT_MS = 60_000;
 const STALE_MS = 15 * 60_000;
@@ -59,6 +64,9 @@ export interface QueueLoopOpts {
   clearIntervalFn?: typeof clearInterval;
   // Egress check run before every claim. A throw counts as 'retry'.
   preflight?: () => Promise<PreflightResult>;
+  // Egress check run after every batch, before its rows are marked. A throw
+  // counts as 'restart'.
+  postBatchCheck?: () => PostBatchResult | Promise<PostBatchResult>;
   // Replaces the interruptible sleep used for idling and backoff (tests).
   sleepFn?: (ms: number) => Promise<void>;
 }
@@ -168,6 +176,19 @@ export async function runQueueLoop(o: QueueLoopOpts): Promise<{ batches: number;
       outcome = { ok: false, error: e instanceof Error ? e.message : String(e) };
     } finally {
       clearIntervalFn(beat);
+    }
+    if (o.postBatchCheck) {
+      let pb: PostBatchResult;
+      try { pb = await o.postBatchCheck(); }
+      catch (e) { pb = { action: 'restart', reason: `post-batch check threw: ${e instanceof Error ? e.message : String(e)}` }; }
+      if (pb.action === 'restart') {
+        let released = 0;
+        try { released = queue.release(ids, o.workerId); }
+        catch (e) { log.error(`${label}: release failed: ${e instanceof Error ? e.message : String(e)}`); }
+        log.error(`${label}: batch ${batchN}: egress check failed after the batch; released ${released} of ${ids.length} row(s) to pending without counting an attempt, exiting so the supervisor restarts the worker: ${pb.reason}`);
+        restart = pb.reason;
+        break;
+      }
     }
     const dt = ((Date.now() - start) / 1000).toFixed(1);
     const doneIso = new Date().toISOString();
