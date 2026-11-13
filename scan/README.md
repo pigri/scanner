@@ -171,7 +171,7 @@ npm run worker  -- --batch-size 50 --scope scope.txt        # loops until queue 
 
 **Queue design** — SQLite-backed priority queue:
 
-- Table `scan_queue(target UNIQUE, priority, status, queued_at, started_at, finished_at, run_id, attempts, error)`.
+- Table `scan_queue(target UNIQUE, priority, status, queued_at, started_at, finished_at, run_id, attempts, error, claimed_by, heartbeat_at, abandoned)`.
 - Ordering: `priority DESC, id ASC` (highest priority first, FIFO tiebreak).
 - Dequeue is atomic (`SELECT` + `UPDATE status='in_progress'` in one transaction) — safe if you ever run two workers, though the DB will serialise them.
 - Dedup via `INSERT OR IGNORE` — re-enqueuing the same host is a no-op.
@@ -184,11 +184,14 @@ npm run worker  -- --batch-size 50 --scope scope.txt        # loops until queue 
 - **Egress is checked before every claim (`--netns <name>`).** A worker under the VPN units confirms it still runs in the named network namespace and that a probe name (`--dns-probe`, default `example.com`) resolves. After a namespace restart it exits with status 75 and systemd (`Restart=on-failure`) starts it again in the current namespace; a DNS failure only pauses claiming, with a backoff of up to 5 minutes. The namespace (not DNS) is checked again after every batch, before its rows are marked: if it was replaced meanwhile, the batch ran in the old one, so its rows go back to `pending` without counting an attempt and the worker exits with status 75. Without `--netns` there is no check, and workers must be restarted by hand after a namespace restart (see `deploy/README.md`).
 
 **Worker loop:**
-1. `claimBatch(N)` — grab next N pending rows.
-2. Write to `queue-batch-<n>.txt`.
-3. `spawn npx tsx src/scan-all.ts --targets queue-batch-<n>.txt --sqlite scan.db …`.
-4. Mark done (with `run_id`) or failed (with error string).
-5. Repeat until queue empty or `--max-batches` reached.
+1. At startup, return this worker's own `in_progress` rows to `pending`.
+2. Before each claim: at most once a minute, reset stale rows; with `--netns`, check the namespace and DNS (a DNS failure backs off and retries; a namespace mismatch exits 75).
+3. `claimBatch(N)` — grab the next N pending rows, recording the owner and heartbeat.
+4. Write to `queue-batch-<n>.txt`.
+5. `spawn npx tsx src/scan-all.ts --targets queue-batch-<n>.txt --sqlite scan.db …`, bumping the heartbeat every 60 s while it runs.
+6. With `--netns`, check the namespace again. If it changed, release the batch to `pending` (no attempt counted) and exit 75.
+7. Otherwise mark the rows done (with `run_id`) or failed (with the error string), and hand done targets to `report_queue`.
+8. Repeat until the queue is empty (or forever with `--watch`) or `--max-batches` is reached.
 
 **Recipes:**
 ```
@@ -201,8 +204,8 @@ npm run worker  -- --batch-size 50 --scope scope.txt
 npm run enqueue -- --from-risk 5
 npm run worker  -- --batch-size 5 --max-batches 1 --scope scope.txt
 
-# Requeue everything that failed:
-sqlite3 scan.db "UPDATE scan_queue SET status='pending', error=NULL WHERE status='failed'"
+# Requeue everything that failed (also resets the abandonment counter):
+sqlite3 scan.db "UPDATE scan_queue SET status='pending', error=NULL, abandoned=0 WHERE status='failed'"
 ```
 
 ### retention
