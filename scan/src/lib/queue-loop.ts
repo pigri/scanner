@@ -1,5 +1,6 @@
 import type { QueueOps, ClaimedRow } from './queue.js';
 import type { Logger } from './log.js';
+import type { PreflightResult } from './egress-check.js';
 
 // Shared drain loop for both the scan worker and the report worker: claim a
 // batch → process it → mark each row done/failed → (optionally) hand off. In
@@ -12,11 +13,18 @@ import type { Logger } from './log.js';
 // and, at most once per reapEveryMs before a claim, it returns rows whose heartbeat
 // went stale, whoever owned them. The pre-claim reap also covers a busy queue,
 // where the loop never idles.
+//
+// Preflight: an optional check that runs before every claim, after the reap (the
+// reap only touches the queue, so it is safe and useful even on a bad egress).
+// 'retry' claims nothing and backs off; 'restart' claims nothing and returns a
+// restart reason so the caller can exit non-zero and let the supervisor start
+// a fresh process.
 
 const HEARTBEAT_MS = 60_000;
 const STALE_MS = 15 * 60_000;
 const LEGACY_MS = 3 * 3600_000;
 const REAP_EVERY_MS = 60_000;
+const MAX_BACKOFF_MS = 300_000;
 
 export interface BatchOutcome {
   ok: boolean;
@@ -49,9 +57,13 @@ export interface QueueLoopOpts {
   legacyMs?: number;          // age of a heartbeat-less claim that counts as abandoned, default 3 h
   setIntervalFn?: typeof setInterval;
   clearIntervalFn?: typeof clearInterval;
+  // Egress check run before every claim. A throw counts as 'retry'.
+  preflight?: () => Promise<PreflightResult>;
+  // Replaces the interruptible sleep used for idling and backoff (tests).
+  sleepFn?: (ms: number) => Promise<void>;
 }
 
-export async function runQueueLoop(o: QueueLoopOpts): Promise<{ batches: number }> {
+export async function runQueueLoop(o: QueueLoopOpts): Promise<{ batches: number; restart?: string }> {
   const { queue, log, label } = o;
   const now = o.now ?? Date.now;
   const heartbeatMs = o.heartbeatMs ?? HEARTBEAT_MS;
@@ -87,22 +99,42 @@ export async function runQueueLoop(o: QueueLoopOpts): Promise<{ batches: number 
   };
   process.on('SIGINT', () => onSig('SIGINT'));
   process.on('SIGTERM', () => onSig('SIGTERM'));
-  const idleSleep = (ms: number): Promise<void> => new Promise((res) => {
+  const idleSleep = o.sleepFn ?? ((ms: number): Promise<void> => new Promise((res) => {
     const t = setTimeout(() => { wake = null; res(); }, ms);
     wake = () => { clearTimeout(t); wake = null; res(); };
-  });
+  }));
 
   reap('startup reap', o.workerId);
   const s0 = queue.stats();
   log.info(`${label}: queue at start: pending=${s0.pending} in_progress=${s0.in_progress} done=${s0.done} failed=${s0.failed}`);
   if (o.watch) log.info(`${label}: watch mode, polling every ${o.pollSec}s when idle`);
   let idle = false;
+  let backoffMs = o.pollSec * 1000;
+  let restart: string | undefined;
 
   while (true) {
     if (interrupted) { log.warn(`${label}: stopping due to signal`); break; }
     if (o.maxBatches && batchN >= o.maxBatches) { log.info(`${label}: reached --max-batches=${o.maxBatches}; stopping`); break; }
 
     if (now() - lastReap >= reapEveryMs) { lastReap = now(); reap('stale reap'); }
+    if (o.preflight) {
+      let pf: PreflightResult;
+      try { pf = await o.preflight(); }
+      catch (e) { pf = { action: 'retry', reason: `preflight threw: ${e instanceof Error ? e.message : String(e)}` }; }
+      if (interrupted) { log.warn(`${label}: stopping due to signal`); break; }
+      if (pf.action === 'restart') {
+        log.error(`${label}: egress check failed, exiting so the supervisor restarts the worker: ${pf.reason}`);
+        restart = pf.reason;
+        break;
+      }
+      if (pf.action === 'retry') {
+        log.warn(`${label}: egress check failed, not claiming; retrying in ${Math.round(backoffMs / 1000)}s: ${pf.reason}`);
+        await idleSleep(backoffMs);
+        backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
+        continue;
+      }
+      backoffMs = o.pollSec * 1000;
+    }
     const claimed = queue.claimBatch(o.batchSize, new Date(now()).toISOString(), o.workerId);
     if (!claimed.length) {
       if (o.watch) {
@@ -152,5 +184,5 @@ export async function runQueueLoop(o: QueueLoopOpts): Promise<{ batches: number 
     log.info(`${label}: queue after batch ${batchN}: pending=${s.pending} in_progress=${s.in_progress} done=${s.done} failed=${s.failed}`);
   }
 
-  return { batches: batchN };
+  return restart === undefined ? { batches: batchN } : { batches: batchN, restart };
 }

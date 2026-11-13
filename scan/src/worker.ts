@@ -11,6 +11,7 @@ import { openDb } from './lib/db.js';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
 import { createLogger, type Logger } from './lib/log.js';
 import { scanChildEnv, TUNED_SCAN_FLAGS } from './lib/scan-all-runner.js';
+import { preflightFromOpts, exitCodeFor } from './lib/egress-check.js';
 import { runQueueLoop, type BatchOutcome } from './lib/queue-loop.js';
 
 interface Opts {
@@ -26,6 +27,9 @@ interface Opts {
   claimNotSuffixes: string[];
   extraArgs: string[];
   workerId: string;
+  netns: string | null;
+  dnsProbe: string;
+  dnsTimeoutMs: number;
   help?: boolean;
 }
 
@@ -35,6 +39,7 @@ function parseArgs(argv: string[]): Opts {
     logFile: null, watch: false, pollSec: 10,
     claimSuffixes: [], claimNotSuffixes: [], extraArgs: [],
     workerId: `${os.hostname()}:${process.pid}`,
+    netns: null, dnsProbe: 'example.com', dnsTimeoutMs: 5000,
   };
   let passthrough = false;
   for (let i = 2; i < argv.length; i++) {
@@ -49,6 +54,9 @@ function parseArgs(argv: string[]): Opts {
     else if (a === '--strict') opts.strict = true;
     else if (a === '--log') opts.logFile = next();
     else if (a === '--worker-id') opts.workerId = next();
+    else if (a === '--netns') opts.netns = next();
+    else if (a === '--dns-probe') opts.dnsProbe = next();
+    else if (a === '--dns-timeout-ms') opts.dnsTimeoutMs = parseInt(next(), 10);
     else if (a === '--watch') opts.watch = true;
     else if (a === '--poll-interval') opts.pollSec = parseInt(next(), 10);
     else if (a === '--claim-suffix') opts.claimSuffixes.push(next());
@@ -75,6 +83,14 @@ Options:
   --worker-id <id>       stable owner id for claims (default: <hostname>:<pid>).
                          Give each unit a fixed id: on start the worker returns
                          the rows that id left in_progress to the queue.
+  --netns <name>         check before every claim that this process runs in the
+                         named network namespace (/run/netns/<name>) and that
+                         DNS resolves. A namespace mismatch makes the worker
+                         exit 75 so the supervisor restarts it into the current
+                         namespace; a DNS failure pauses claiming and retries
+                         with backoff (up to 5 min). Off by default.
+  --dns-probe <host>     name resolved by the DNS check (default: example.com)
+  --dns-timeout-ms <ms>  DNS probe timeout (default: 5000)
   --watch                daemon mode: when the queue drains, poll for new work
                          instead of exiting. Runs until SIGINT/SIGTERM.
   --poll-interval <sec>  seconds to sleep between polls in --watch (default: 10)
@@ -162,7 +178,9 @@ async function main(): Promise<void> {
     try { db.raw.pragma('wal_checkpoint(TRUNCATE)'); } catch { /* busy: retry next tick */ }
   };
 
-  const { batches } = await runQueueLoop({
+  const preflight = preflightFromOpts(opts);
+
+  const result = await runQueueLoop({
     queue: db.scanQueue,
     label: 'scan',
     batchSize: opts.batchSize,
@@ -172,6 +190,7 @@ async function main(): Promise<void> {
     log,
     workerId: opts.workerId,
     onIdleTick: checkpointIfDue,
+    ...(preflight ? { preflight } : {}),
     processBatch: async (claimed): Promise<BatchOutcome> => {
       const preRunId = (db.raw.prepare('SELECT COALESCE(MAX(id), 0) m FROM runs').get() as { m: number }).m;
       const targetsFile = path.resolve(batchDir, `scan-batch-${stamp}-${claimed[0]!.id}.txt`);
@@ -193,6 +212,7 @@ async function main(): Promise<void> {
     },
   });
 
+  const { batches } = result;
   const totalDt = ((Date.now() - startAll) / 1000).toFixed(0);
   const sq = db.scanQueue.stats();
   const rq = db.reportQueue.stats();
@@ -200,6 +220,7 @@ async function main(): Promise<void> {
   log.info(`scan_queue: pending=${sq.pending} in_progress=${sq.in_progress} done=${sq.done} failed=${sq.failed} | report_queue: pending=${rq.pending} done=${rq.done}`);
   db.close();
   log.close();
+  process.exitCode = exitCodeFor(result);
 }
 
 main().catch((err: unknown) => {

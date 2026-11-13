@@ -73,10 +73,20 @@ fails at once with "network unreachable" and tools fall back to IPv4.
 
 The netns units are **system** units but the workers are **user** units, and a
 worker joins its namespace only when it starts. Restarting `scanvpn-netns{,-hu}`
-replaces the namespace, so restart the matching workers afterwards
-(`systemctl --user restart scan-worker-hu@1 scan-worker-hu@2`); otherwise they
-keep running in the old, deleted namespace. `sudo ip netns pids scanvpn-hu` lists
-the processes in the current one.
+replaces the namespace, so a running worker would keep working in the old,
+deleted one. Each worker is started with `--netns <name>` and checks before every
+claim that it is still in `/run/netns/<name>`. On a mismatch it claims nothing and
+exits with status 75; `Restart=on-failure` then starts it again inside the current
+namespace, after the `ExecStartPre` wait. The same check resolves a probe name
+(`--dns-probe`, default `example.com`). When DNS fails the worker pauses claiming
+and retries with a backoff from `--poll-interval` up to 5 minutes, then carries on
+by itself. The probe queries the nameservers in the namespace's `resolv.conf`
+directly, not through nsswitch, so a host-side resolver cannot answer it.
+
+Fallback: a worker started without `--netns` has no such check. After restarting
+`scanvpn-netns{,-hu}`, restart the matching workers by hand
+(`systemctl --user restart scan-worker-hu@1 scan-worker-hu@2`).
+`sudo ip netns pids scanvpn-hu` lists the processes in the current namespace.
 
 ### Troubleshooting: tunnel comes up but never handshakes
 

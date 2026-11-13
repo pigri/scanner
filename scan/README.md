@@ -181,6 +181,7 @@ npm run worker  -- --batch-size 50 --scope scope.txt        # loops until queue 
   - Before each claim, at most once a minute, any worker returns rows whose heartbeat is older than 15 minutes. Rows claimed before heartbeats existed (no `heartbeat_at`) are returned once `started_at` is older than 3 hours.
   - A row abandoned for the third time (the `abandoned` counter, reset when the target is re-enqueued with `--requeue`) becomes `failed` with `error = 'abandoned 3 times'` instead of looping forever. Failed scan attempts do not count towards this.
   - A manual requeue is no longer needed after a crash. To force one anyway: `sqlite3 scan.db "UPDATE scan_queue SET status='pending' WHERE status='in_progress'"` (stop the workers first, or they will lose their running batch).
+- **Egress is checked before every claim (`--netns <name>`).** A worker under the VPN units confirms it still runs in the named network namespace and that a probe name (`--dns-probe`, default `example.com`) resolves. After a namespace restart it exits with status 75 and systemd (`Restart=on-failure`) starts it again in the current namespace; a DNS failure only pauses claiming, with a backoff of up to 5 minutes. Without `--netns` there is no check, and workers must be restarted by hand after a namespace restart (see `deploy/README.md`).
 
 **Worker loop:**
 1. `claimBatch(N)` — grab next N pending rows.

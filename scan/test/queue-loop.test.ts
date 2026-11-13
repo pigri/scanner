@@ -165,3 +165,107 @@ describe('runQueueLoop reaping and heartbeats', () => {
     expect(idle[0]!.legacyBeforeIso).toBe(new Date(NOW - 3 * 3600_000).toISOString());
   });
 });
+
+describe('runQueueLoop preflight', () => {
+  type PF = NonNullable<QueueLoopOpts['preflight']>;
+  const seq = (...rs: Awaited<ReturnType<PF>>[]): PF => { const q = [...rs]; return async () => q.shift() ?? { action: 'ok' }; };
+
+  it('claims as before when there is no preflight', async () => {
+    const f = fakeQueue([[row(1)]]);
+    const r = await runQueueLoop(base(f, { maxBatches: 1 }));
+    expect(f.claims).toEqual(['hu-1']);
+    expect(r).toEqual({ batches: 1 });
+  });
+
+  it('runs the preflight before each claim and claims on ok', async () => {
+    const f = fakeQueue([[row(1)], [row(2)]]);
+    const pf = vi.fn(async () => { f.calls.push('preflight'); return { action: 'ok' as const }; });
+    await runQueueLoop(base(f, { maxBatches: 2, preflight: pf }));
+    expect(f.calls.filter((c) => c !== 'reap')).toEqual(['preflight', 'claim', 'preflight', 'claim']);
+  });
+
+  it('claims nothing on retry, sleeps with doubling backoff capped at 300 s, and resets on ok', async () => {
+    const f = fakeQueue([[row(1)]]);
+    const sleeps: number[] = [];
+    const retry = { action: 'retry' as const, reason: 'dns down' };
+    const pf = seq(...Array(11).fill(retry), { action: 'ok' }, retry, retry);
+    let stop = false;
+    await runQueueLoop(base(f, {
+      pollSec: 10, preflight: pf, maxBatches: 1,
+      sleepFn: async (ms) => { sleeps.push(ms); },
+      processBatch: async () => { stop = true; return { ok: true }; },
+    }));
+    expect(stop).toBe(true);
+    // 10 s doubling: 10,20,40,80,160,300,300,... then reset after the ok
+    expect(sleeps.slice(0, 8)).toEqual([10_000, 20_000, 40_000, 80_000, 160_000, 300_000, 300_000, 300_000]);
+    expect(f.claims).toHaveLength(1);
+    // claim happened only after the 11 retries
+    expect(sleeps).toHaveLength(11);
+  });
+
+  it('resets the backoff after an ok', async () => {
+    const f = fakeQueue([[row(1)], [row(2)]]);
+    const sleeps: number[] = [];
+    const retry = { action: 'retry' as const, reason: 'x' };
+    await runQueueLoop(base(f, {
+      pollSec: 5, maxBatches: 2,
+      preflight: seq(retry, retry, { action: 'ok' }, retry, { action: 'ok' }),
+      sleepFn: async (ms) => { sleeps.push(ms); },
+    }));
+    expect(sleeps).toEqual([5000, 10_000, 5000]);
+  });
+
+  it('does not claim while the preflight says retry', async () => {
+    const f = fakeQueue([[row(1)]]);
+    let n = 0;
+    await runQueueLoop(base(f, {
+      preflight: async () => ({ action: 'retry', reason: 'dns down' }),
+      sleepFn: async () => { if (++n >= 3) process.emit('SIGTERM'); },
+    }));
+    expect(f.claims).toEqual([]);
+  });
+
+  it('treats a throwing preflight as retry', async () => {
+    const f = fakeQueue([[row(1)]]);
+    const warn = vi.fn();
+    let n = 0;
+    await runQueueLoop(base(f, {
+      log: { ...log, warn } as unknown as Logger,
+      preflight: async () => { throw new Error('probe exploded'); },
+      sleepFn: async () => { if (++n >= 2) process.emit('SIGTERM'); },
+    }));
+    expect(f.claims).toEqual([]);
+    expect(n).toBe(2);
+    expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).toContain('probe exploded');
+  });
+
+  it('claims nothing and returns a restart signal on restart', async () => {
+    const f = fakeQueue([[row(1)]]);
+    const error = vi.fn();
+    // Ends a loop that wrongly keeps going instead of hanging the test.
+    const sleepFn = vi.fn(async () => { process.emit('SIGTERM'); });
+    const r = await runQueueLoop(base(f, {
+      watch: true, log: { ...log, error } as unknown as Logger, sleepFn,
+      preflight: async () => ({ action: 'restart', reason: 'wrong namespace' }),
+    }));
+    expect(f.claims).toEqual([]);
+    expect(sleepFn).not.toHaveBeenCalled();
+    expect(r).toEqual({ batches: 0, restart: 'wrong namespace' });
+    expect(error.mock.calls.map((c) => String(c[0])).join('\n')).toContain('wrong namespace');
+  });
+
+  it('still reaps its own rows at start when the first preflight says restart', async () => {
+    const f = fakeQueue([]);
+    await runQueueLoop(base(f, { preflight: async () => ({ action: 'restart', reason: 'x' }) }));
+    expect(f.reaps[0]).toMatchObject({ ownerId: 'hu-1' });
+  });
+
+  it('does not claim when a signal arrives while the preflight runs', async () => {
+    const f = fakeQueue([[row(1)]]);
+    await runQueueLoop(base(f, {
+      watch: true,
+      preflight: async () => { process.emit('SIGTERM'); return { action: 'ok' }; },
+    }));
+    expect(f.claims).toEqual([]);
+  });
+});
