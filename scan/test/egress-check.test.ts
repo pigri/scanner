@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { checkNetns, checkDns, makePreflight, exitCodeFor, preflightFromOpts, EXIT_RESTART } from '../src/lib/egress-check.js';
+import { checkNetns, checkDns, makePreflight, exitCodeFor, preflightFromOpts, postBatchFromOpts, EXIT_RESTART } from '../src/lib/egress-check.js';
 
 const netnsDeps = (ino: number, link: string) => ({
   statIno: (p: string) => { if (p !== '/run/netns/vpn') throw new Error(`unexpected path ${p}`); return ino; },
@@ -140,5 +140,28 @@ describe('preflightFromOpts', () => {
     const t0 = Date.now();
     expect((await preflightFromOpts({ netns: 'vpn', dnsProbe: 'p', dnsTimeoutMs: 20 }, { netns: netnsDeps(7, 'net:[7]'), dns })!())!.action).toBe('retry');
     expect(Date.now() - t0).toBeLessThan(2000);
+  });
+});
+
+describe('postBatchFromOpts', () => {
+  it('is off without --netns', () => {
+    expect(postBatchFromOpts({ netns: null })).toBeUndefined();
+  });
+
+  it('is ok when the namespace still matches', () => {
+    expect(postBatchFromOpts({ netns: 'vpn' }, netnsDeps(7, 'net:[7]'))!()).toEqual({ action: 'ok' });
+  });
+
+  it('asks for a restart on a mismatch, naming both inodes', () => {
+    const r = postBatchFromOpts({ netns: 'vpn' }, netnsDeps(8, 'net:[7]'))!();
+    expect(r.action).toBe('restart');
+    expect(JSON.stringify(r)).toContain('7');
+    expect(JSON.stringify(r)).toContain('8');
+  });
+
+  it('asks for a restart when the namespace is gone', () => {
+    const r = postBatchFromOpts({ netns: 'vpn' }, { statIno: () => { throw new Error('ENOENT'); }, readlink: () => 'net:[7]' })!();
+    expect(r.action).toBe('restart');
+    expect(JSON.stringify(r)).toContain('ENOENT');
   });
 });
