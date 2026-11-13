@@ -161,18 +161,13 @@ function targetRows(): TargetRow[] {
   const now = Date.now();
   if (targetsCache && now - targetsCache.at < 60000) return targetsCache.rows;
   const sql = hasRiskLatest
-    ? `WITH agg AS MATERIALIZED (
-         SELECT target,
-           SUM(severity='critical') critical, SUM(severity='high') high,
-           SUM(severity='medium') medium, SUM(severity='low') low, SUM(severity='info') info,
-           COUNT(*) findings,
-           SUM(CASE WHEN cve IS NOT NULL AND cve!='' THEN 1 ELSE 0 END) cves
-         FROM findings GROUP BY target),
+    ? `WITH agg AS MATERIALIZED (${TARGET_AGG_SQL}),
        certorg AS MATERIALIZED (${CERT_ORG_SQL})
        SELECT rl.target target, rl.score score, rl.created_at, rl.updated_at,
          COALESCE(agg.critical,0) critical, COALESCE(agg.high,0) high, COALESCE(agg.medium,0) medium,
          COALESCE(agg.low,0) low, COALESCE(agg.info,0) info,
          COALESCE(agg.findings,0) findings, COALESCE(agg.cves,0) cves,
+         COALESCE(agg.versionMatch,0) versionMatch,
          certorg.organization organization,
          COALESCE(host_state.active,1) active
        FROM risk_latest rl
