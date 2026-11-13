@@ -1,12 +1,13 @@
 #!/usr/bin/env -S node --loader tsx
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { openDb } from './lib/db.js';
+import { openDb, type Db } from './lib/db.js';
 import { computeScore, type TargetSignals, type Finding, type Port, type HttpProbe } from './lib/risk.js';
+import { recordRiskScores } from './lib/risk-latest.js';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
 import { buildTargetResolver } from './lib/identity.js';
 
-interface Opts {
+export interface Opts {
   db: string;
   discoveryDb: string | null;
   hostSuffix: string | null;
@@ -91,10 +92,8 @@ function loadHostFactsFromDiscovery(discoveryDbPath: string): Map<string, HostFa
   return map;
 }
 
-function main(): void {
-  const opts = parseArgs(process.argv);
-  if (opts.help) { usage(); process.exit(0); }
-  const db = openDb(opts.db);
+/** Score every target, write risk_scores + risk_latest, and finish the run. */
+export function runRisk(db: Db, opts: Opts): { runId: number; results: { target: string; score: number; breakdown: unknown }[]; targetsCount: number } {
   // The scan workers hold write locks for whole batches; the 5s default on this
   // connection was losing races with them mid-loop (SQLITE_BUSY). 60s is well
   // over the longest observed worker write and still fails loudly if something
@@ -144,9 +143,6 @@ function main(): void {
     httpByTarget.get(key)!.push({ url: r.url, status_code: r.status_code, tech });
   }
 
-  const insertStmt = db.raw.prepare(
-    'INSERT INTO risk_scores(target, score, breakdown_json, computed_at, run_id) VALUES(?, ?, ?, ?, ?)'
-  );
   const results: { target: string; score: number; breakdown: unknown }[] = [];
   const rows: { target: string; score: number; breakdownJson: string }[] = [];
   for (const t of targets) {
@@ -168,16 +164,22 @@ function main(): void {
   }
   // Single BEGIN IMMEDIATE txn: takes the write lock once (waiting up to the
   // bumped busy_timeout for it) instead of racing the workers on each row.
-  const writeAll = db.raw.transaction((batch: typeof rows) => {
-    for (const row of batch) insertStmt.run(row.target, row.score, row.breakdownJson, now, runId);
-  });
-  writeAll.immediate(rows);
+  recordRiskScores(db.raw, rows, now, runId);
 
   db.finishRun(runId, { targetsCount: targets.size, findingsCount: results.length, at: new Date().toISOString() });
 
+  return { runId, results, targetsCount: targets.size };
+}
+
+function main(): void {
+  const opts = parseArgs(process.argv);
+  if (opts.help) { usage(); process.exit(0); }
+  const db = openDb(opts.db);
+  const { runId, results, targetsCount } = runRisk(db, opts);
+
   results.sort((a, b) => b.score - a.score);
   const shown = results.slice(0, opts.top);
-  console.log(`# top ${shown.length} of ${results.length} scored targets (of ${targets.size} total)`);
+  console.log(`# top ${shown.length} of ${results.length} scored targets (of ${targetsCount} total)`);
   for (const r of shown) {
     if (opts.showBreakdown) {
       const b = r.breakdown as {
@@ -210,4 +212,5 @@ function main(): void {
   db.close();
 }
 
-main();
+// Only run when invoked directly, so tests can import runRisk.
+if (process.argv[1] && process.argv[1].endsWith('risk.ts')) main();
