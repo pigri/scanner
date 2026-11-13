@@ -161,7 +161,7 @@ describe('created_at after a prune', () => {
 });
 
 describe('backfill under concurrency', () => {
-  it('a second handle on the same file opens without error', () => {
+  it('reopening the same file from further handles keeps the backfilled row', () => {
     const file = tmpDb();
     const a = openDb(file);
     addScore(a.raw, 'a.example.com', 5, '2026-01-01T00:00:00Z');
@@ -171,6 +171,51 @@ describe('backfill under concurrency', () => {
     const c = openDb(file);
     expect(count(c.raw)).toBe(1);
     b.close(); c.close();
+  });
+
+  it('holds the write lock while the backfill runs (IMMEDIATE, not DEFERRED)', () => {
+    const file = tmpDb();
+    const seed = openDb(file);
+    addScore(seed.raw, 'a.example.com', 5, '2026-01-01T00:00:00Z');
+    addScore(seed.raw, 'b.example.com', 7, '2026-01-01T00:00:00Z');
+    seed.raw.exec('DELETE FROM risk_latest');
+    const rival = new Database(file);
+    rival.pragma('busy_timeout = 0');
+    let rivalError: { code?: string } | undefined;
+    let fired = false;
+    // Fires after the in-transaction re-check has read, i.e. inside the critical section.
+    const racing = new Proxy(seed.raw, {
+      get(target, prop) {
+        const v = Reflect.get(target, prop, target);
+        if (prop !== 'prepare') return typeof v === 'function' ? v.bind(target) : v;
+        return (sql: string) => {
+          const stmt = target.prepare(sql);
+          if (!/FROM risk_latest LIMIT 1/.test(sql)) return stmt;
+          return new Proxy(stmt, {
+            get(st, p2) {
+              const f = Reflect.get(st, p2, st);
+              if (p2 !== 'get') return typeof f === 'function' ? f.bind(st) : f;
+              return (...a: unknown[]) => {
+                const r = (f as (...x: unknown[]) => unknown).apply(st, a);
+                if (target.inTransaction && !fired) {
+                  fired = true;
+                  try {
+                    rival.exec(`INSERT INTO risk_latest(target, score, created_at, updated_at)
+                                VALUES('a.example.com', 5, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`);
+                  } catch (e) { rivalError = e as { code?: string }; }
+                }
+                return r;
+              };
+            },
+          });
+        };
+      },
+    }) as Raw;
+    expect(() => backfillRiskLatest(racing)).not.toThrow();
+    expect(fired).toBe(true);
+    expect(rivalError?.code).toMatch(/^SQLITE_BUSY/);
+    expect(count(seed.raw)).toBe(2);
+    rival.close(); seed.close();
   });
 
   it('does not fail when another handle fills risk_latest after the empty check', () => {
