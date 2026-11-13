@@ -90,24 +90,78 @@ describe('runQueueLoop reaping and heartbeats', () => {
   it('a failing heartbeat does not abort the batch', async () => {
     const f = fakeQueue([[row(1)]]);
     f.queue.heartbeat = () => { throw new Error('busy'); };
+    const done = vi.fn();
+    f.queue.markDone = done;
+    const onBatchDone = vi.fn();
     const t = fakeTimers();
-    const out = await runQueueLoop(base(f, {
-      maxBatches: 1, setIntervalFn: t.setIntervalFn, clearIntervalFn: t.clearIntervalFn,
-      processBatch: async () => { t.tick(); return { ok: true }; },
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const p = runQueueLoop(base(f, {
+      maxBatches: 1, setIntervalFn: t.setIntervalFn, clearIntervalFn: t.clearIntervalFn, onBatchDone,
+      processBatch: async () => { await gate; return { ok: true }; },
     }));
-    expect(out.batches).toBe(1);
+    await vi.waitFor(() => expect(t.live.size).toBe(1));
+    expect(() => t.tick()).not.toThrow();
+    release();
+    await p;
+    expect(done).toHaveBeenCalledTimes(1);
+    expect(onBatchDone).toHaveBeenCalledTimes(1);
   });
 
-  it('reaps stale and legacy rows on an idle tick with the 15 min and 3 h cutoffs', async () => {
-    const f = fakeQueue([]);
-    let ticks = 0;
-    await runQueueLoop(base(f, {
-      watch: true, pollSec: 0.01,
-      onIdleTick: () => { if (++ticks >= 1) process.emit('SIGTERM'); },
+  it('warns when a heartbeat updates fewer rows than it was given (lost claim)', async () => {
+    const f = fakeQueue([[row(1), row(2)]]);
+    f.queue.heartbeat = () => 1;
+    const warn = vi.fn();
+    const t = fakeTimers();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const p = runQueueLoop(base(f, {
+      maxBatches: 1, setIntervalFn: t.setIntervalFn, clearIntervalFn: t.clearIntervalFn,
+      log: { ...log, warn } as unknown as Logger,
+      processBatch: async () => { await gate; return { ok: true }; },
     }));
-    const idleReap = f.reaps[1]!;
-    expect(idleReap.ownerId).toBeUndefined();
-    expect(idleReap.staleBeforeIso).toBe(new Date(NOW - 15 * 60_000).toISOString());
-    expect(idleReap.legacyBeforeIso).toBe(new Date(NOW - 3 * 3600_000).toISOString());
+    await vi.waitFor(() => expect(t.live.size).toBe(1));
+    t.tick();
+    release();
+    await p;
+    expect(warn.mock.calls.some((c) => /lost|heartbeat/.test(String(c[0])))).toBe(true);
+  });
+
+  it('passes the worker id to markDone and markFailed', async () => {
+    const f = fakeQueue([[row(1)], [row(2)]]);
+    const done = vi.fn(); const failed = vi.fn();
+    f.queue.markDone = done; f.queue.markFailed = failed;
+    let n = 0;
+    await runQueueLoop(base(f, { maxBatches: 2, processBatch: async () => (++n === 1 ? { ok: true } : { ok: false, error: 'x' }) }));
+    expect(done.mock.calls[0]![3]).toBe('hu-1');
+    expect(failed.mock.calls[0]![3]).toBe('hu-1');
+  });
+
+  it('keeps reaping while a backlog means every claim succeeds, but not more than once per gate', async () => {
+    let t = NOW;
+    const mk = (step: number) => {
+      const f = fakeQueue([[row(1)], [row(2)], [row(3)]]);
+      return { f, opts: base(f, { maxBatches: 3, now: () => t, reapEveryMs: 60_000, processBatch: async () => { t += step; return { ok: true }; } }) };
+    };
+    const slow = mk(61_000);
+    await runQueueLoop(slow.opts);
+    expect(slow.f.reaps.filter((r) => r.ownerId === undefined)).toHaveLength(3);
+    t = NOW;
+    const fast = mk(1_000);
+    await runQueueLoop(fast.opts);
+    expect(fast.f.reaps.filter((r) => r.ownerId === undefined)).toHaveLength(1);
+  });
+
+  it('reaps stale and legacy rows on idle polls with the 15 min and 3 h cutoffs, gated', async () => {
+    const f = fakeQueue([]);
+    let t = NOW; let ticks = 0;
+    await runQueueLoop(base(f, {
+      watch: true, pollSec: 0.01, now: () => t, reapEveryMs: 60_000,
+      onIdleTick: () => { t += ticks === 0 ? 1_000 : 61_000; if (++ticks >= 3) process.emit('SIGTERM'); },
+    }));
+    const idle = f.reaps.filter((r) => r.ownerId === undefined);
+    expect(idle).toHaveLength(2);
+    expect(idle[0]!.staleBeforeIso).toBe(new Date(NOW - 15 * 60_000).toISOString());
+    expect(idle[0]!.legacyBeforeIso).toBe(new Date(NOW - 3 * 3600_000).toISOString());
   });
 });
