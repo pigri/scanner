@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import puppeteer, { type Browser, type Page } from 'puppeteer';
-import { decodeDdgUrl, hostOf, makeDomainFilter, type DomainFilter } from './lib/ddg.js';
+import { browserLaunchOptions, decodeDdgUrl, hostOf, makeDomainFilter, type DomainFilter } from './lib/ddg.js';
 import { openDb, type Db } from './lib/db.js';
 
 interface Opts {
@@ -261,10 +261,7 @@ async function main(): Promise<void> {
     log(`egress IP: ${ip || 'unknown'}${opts.rotateCmd ? ` (will rotate via: ${opts.rotateCmd})` : ''}`);
   }
 
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-  });
+  const browser = await puppeteer.launch(browserLaunchOptions());
 
   try {
     let i = 0;

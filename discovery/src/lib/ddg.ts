@@ -37,3 +37,19 @@ export function makeDomainFilter(
     return h;
   };
 }
+
+export interface BrowserLaunchOptions {
+  headless: true;
+  pipe: true;
+  args: string[];
+}
+
+// pipe: a DevTools WebSocket binds 127.0.0.1, which a network namespace with
+// loopback down does not have.
+export function browserLaunchOptions(): BrowserLaunchOptions {
+  return {
+    headless: true,
+    pipe: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+  };
+}
