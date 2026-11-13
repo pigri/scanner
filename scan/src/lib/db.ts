@@ -196,6 +196,17 @@ export function openDb(dbPath: string, options: OpenDbOptions = {}): Db {
     if (!certCols.has(col)) raw.exec(`ALTER TABLE certificates ADD COLUMN ${col} TEXT`);
   }
 
+  // Queue claim ownership: who holds an in_progress row and when it last proved
+  // it is alive, so abandoned rows can be reset (see queue.ts reapStale).
+  for (const table of ['scan_queue', 'report_queue'] as const) {
+    const qCols = new Set(
+      (raw.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((r) => r.name)
+    );
+    for (const col of ['claimed_by', 'heartbeat_at'] as const) {
+      if (!qCols.has(col)) raw.exec(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT`);
+    }
+  }
+
   const startRunStmt = raw.prepare(
     'INSERT INTO runs(tool, started_at, args_json) VALUES(?, ?, ?)'
   );

@@ -20,11 +20,32 @@ export interface QueueOps {
   // (clears started/finished/run_id/error). Used by the weekly full re-scan to
   // re-queue hosts that were already marked done.
   requeueMany(entries: readonly QueueEntry[], atIso: string): number;
-  claimBatch(size: number, atIso: string): ClaimedRow[];
+  // workerId is recorded as the owner of the claim; heartbeat_at starts at atIso.
+  claimBatch(size: number, atIso: string, workerId?: string): ClaimedRow[];
+  // Bump heartbeat_at for rows a live worker is still processing.
+  heartbeat(ids: readonly number[], atIso: string): number;
+  // Return abandoned in_progress rows to pending, counting an attempt; rows that
+  // reach maxAttempts become failed instead. See ReapOpts for what counts as
+  // abandoned.
+  reapStale(o: ReapOpts): ReapResult;
   markDone(id: number, runId: number | null, atIso: string): void;
   markFailed(id: number, error: string, atIso: string): void;
   stats(): QueueStats;
 }
+
+export interface ReapOpts {
+  atIso: string;
+  // in_progress rows with heartbeat_at before this are abandoned.
+  staleBeforeIso: string;
+  // Rows claimed by code that predates heartbeats (heartbeat_at NULL) are
+  // abandoned once started_at is before this.
+  legacyBeforeIso: string;
+  // Also reap every row this worker owns, however fresh its heartbeat: a worker
+  // that has just started cannot own a live batch.
+  ownerId?: string;
+  maxAttempts?: number;       // default 3
+}
+export interface ReapResult { requeued: number; failed: number }
 
 // Suffix-based filter for claimBatch. Used to split the worker fleet by
 // geographical egress: HU workers claim only .gov.hu / .hu targets (matched by
@@ -45,7 +66,8 @@ export function makeQueue(raw: Database.Database, table: string, filter: QueueFi
     INSERT INTO ${table}(target, priority, queued_at) VALUES(?, ?, ?)
     ON CONFLICT(target) DO UPDATE SET
       priority=excluded.priority, status='pending', queued_at=excluded.queued_at,
-      started_at=NULL, finished_at=NULL, run_id=NULL, error=NULL
+      started_at=NULL, finished_at=NULL, run_id=NULL, error=NULL,
+      claimed_by=NULL, heartbeat_at=NULL
   `);
   // Build the claim SELECT with optional suffix filters baked in. Suffixes are
   // normalized to LIKE patterns: '.gov.hu' → target LIKE '%.gov.hu' OR target='gov.hu'.
@@ -64,9 +86,21 @@ export function makeQueue(raw: Database.Database, table: string, filter: QueueFi
   }
   const claimSql = `SELECT id, target, priority FROM ${table} WHERE ${claimWhere.join(' AND ')} ORDER BY priority DESC, id LIMIT ?`;
   const claimSelectStmt = raw.prepare(claimSql);
-  const claimUpdateStmt = raw.prepare(`UPDATE ${table} SET status='in_progress', started_at=? WHERE id=?`);
+  const claimUpdateStmt = raw.prepare(`UPDATE ${table} SET status='in_progress', started_at=?, heartbeat_at=?, claimed_by=? WHERE id=?`);
   const markDoneStmt = raw.prepare(`UPDATE ${table} SET status='done', finished_at=?, run_id=? WHERE id=?`);
   const markFailedStmt = raw.prepare(`UPDATE ${table} SET status='failed', finished_at=?, error=?, attempts=attempts+1 WHERE id=?`);
+  const heartbeatStmt = raw.prepare(`UPDATE ${table} SET heartbeat_at=? WHERE id=? AND status='in_progress'`);
+  // claimed_by = NULL when ownerId is undefined: NULL = NULL is never true, so an
+  // ownerless call matches no row on that branch.
+  const reapSelectStmt = raw.prepare(`
+    SELECT id, attempts FROM ${table}
+    WHERE status='in_progress' AND (
+      heartbeat_at < @stale
+      OR (heartbeat_at IS NULL AND started_at < @legacy)
+      OR claimed_by = @owner
+    )`);
+  const reapRequeueStmt = raw.prepare(`UPDATE ${table} SET status='pending', attempts=?, started_at=NULL, claimed_by=NULL, heartbeat_at=NULL WHERE id=?`);
+  const reapFailStmt = raw.prepare(`UPDATE ${table} SET status='failed', attempts=?, error=?, finished_at=?, claimed_by=NULL, heartbeat_at=NULL WHERE id=?`);
   const statsStmt = raw.prepare(`SELECT status, COUNT(*) n FROM ${table} GROUP BY status`);
 
   const enqueueTx = raw.transaction((rows: readonly QueueEntry[], atIso: string): number => {
@@ -82,16 +116,38 @@ export function makeQueue(raw: Database.Database, table: string, filter: QueueFi
   });
 
   // .immediate acquires the write lock up front → no double-claim across workers.
-  const claimTx = raw.transaction((size: number, atIso: string): ClaimedRow[] => {
+  const claimTx = raw.transaction((size: number, atIso: string, workerId: string | null): ClaimedRow[] => {
     const rows = claimSelectStmt.all(...claimParams, size) as ClaimedRow[];
-    for (const r of rows) claimUpdateStmt.run(atIso, r.id);
+    for (const r of rows) claimUpdateStmt.run(atIso, atIso, workerId, r.id);
     return rows;
+  }).immediate;
+
+  const heartbeatTx = raw.transaction((ids: readonly number[], atIso: string): number => {
+    let n = 0;
+    for (const id of ids) n += heartbeatStmt.run(atIso, id).changes;
+    return n;
+  }).immediate;
+
+  // IMMEDIATE for the same reason as claimTx: a deferred read-then-write upgrade
+  // can fail with SQLITE_BUSY under concurrent workers.
+  const reapTx = raw.transaction((o: ReapOpts): ReapResult => {
+    const max = o.maxAttempts ?? 3;
+    const rows = reapSelectStmt.all({ stale: o.staleBeforeIso, legacy: o.legacyBeforeIso, owner: o.ownerId ?? null }) as { id: number; attempts: number }[];
+    const res: ReapResult = { requeued: 0, failed: 0 };
+    for (const r of rows) {
+      const attempts = r.attempts + 1;
+      if (attempts >= max) { reapFailStmt.run(attempts, `abandoned ${attempts} times`, o.atIso, r.id); res.failed++; }
+      else { reapRequeueStmt.run(attempts, r.id); res.requeued++; }
+    }
+    return res;
   }).immediate;
 
   return {
     enqueueMany: (entries, atIso) => enqueueTx(entries, atIso),
     requeueMany: (entries, atIso) => requeueTx(entries, atIso),
-    claimBatch: (size, atIso) => claimTx(size, atIso),
+    claimBatch: (size, atIso, workerId) => claimTx(size, atIso, workerId ?? null),
+    heartbeat: (ids, atIso) => heartbeatTx(ids, atIso),
+    reapStale: (o) => reapTx(o),
     markDone: (id, runId, atIso) => {
       // run_id is a nullable FK to runs(id); never store 0 (no such run row).
       markDoneStmt.run(atIso, runId && runId > 0 ? runId : null, id);

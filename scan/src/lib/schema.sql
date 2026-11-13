@@ -136,7 +136,9 @@ CREATE TABLE IF NOT EXISTS scan_queue (
   finished_at  TEXT,
   run_id       INTEGER REFERENCES runs(id) ON DELETE SET NULL,
   attempts     INTEGER NOT NULL DEFAULT 0,
-  error        TEXT
+  error        TEXT,
+  claimed_by   TEXT,                         -- worker id that holds the claim
+  heartbeat_at TEXT                          -- last sign of life from that worker
 );
 CREATE INDEX IF NOT EXISTS idx_queue_status_prio ON scan_queue(status, priority DESC);
 CREATE INDEX IF NOT EXISTS idx_queue_target ON scan_queue(target);
@@ -186,7 +188,9 @@ CREATE TABLE IF NOT EXISTS report_queue (
   finished_at  TEXT,
   run_id       INTEGER REFERENCES runs(id) ON DELETE SET NULL,
   attempts     INTEGER NOT NULL DEFAULT 0,
-  error        TEXT
+  error        TEXT,
+  claimed_by   TEXT,                         -- worker id that holds the claim
+  heartbeat_at TEXT                          -- last sign of life from that worker
 );
 CREATE INDEX IF NOT EXISTS idx_report_queue_status_prio ON report_queue(status, priority DESC);
 CREATE INDEX IF NOT EXISTS idx_report_queue_target ON report_queue(target);

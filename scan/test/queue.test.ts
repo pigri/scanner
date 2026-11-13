@@ -164,3 +164,134 @@ describe('queueStats', () => {
     expect(stats.failed).toBe(0);
   });
 });
+
+type Row = { status: string; attempts: number; error: string | null; started_at: string | null; finished_at: string | null; claimed_by: string | null; heartbeat_at: string | null };
+
+describe.each(['scanQueue', 'reportQueue'] as const)('%s claim ownership and reaping', (which) => {
+  const T = (m: number): string => `2026-08-19T12:${String(m).padStart(2, '0')}:00.000Z`;
+  const table = which === 'scanQueue' ? 'scan_queue' : 'report_queue';
+  const row = (target: string): Row => db.raw.prepare(`SELECT status, attempts, error, started_at, finished_at, claimed_by, heartbeat_at FROM ${table} WHERE target=?`).get(target) as Row;
+  const reap = (o: { atIso: string; staleBeforeIso: string; legacyBeforeIso: string; ownerId?: string; maxAttempts?: number }) => db[which].reapStale(o);
+
+  it('a claim records the owner and the first heartbeat', () => {
+    db[which].enqueueMany([{ target: 'a', priority: 1 }], T(0));
+    db[which].claimBatch(1, T(1), 'w1');
+    expect(row('a')).toMatchObject({ status: 'in_progress', claimed_by: 'w1', heartbeat_at: T(1) });
+  });
+
+  it('heartbeat bumps heartbeat_at for the given ids only', () => {
+    db[which].enqueueMany([{ target: 'a', priority: 2 }, { target: 'b', priority: 1 }], T(0));
+    const [a, b] = db[which].claimBatch(2, T(1), 'w1');
+    db[which].heartbeat([a!.id], T(5));
+    expect(row(a!.target).heartbeat_at).toBe(T(5));
+    expect(row(b!.target).heartbeat_at).toBe(T(1));
+  });
+
+  it('a stale heartbeat resets the row to pending and counts an attempt', () => {
+    db[which].enqueueMany([{ target: 'a', priority: 1 }], T(0));
+    db[which].claimBatch(1, T(1), 'w1');
+    const r = reap({ atIso: T(30), staleBeforeIso: T(15), legacyBeforeIso: T(0) });
+    expect(r).toEqual({ requeued: 1, failed: 0 });
+    expect(row('a')).toMatchObject({ status: 'pending', attempts: 1, started_at: null, claimed_by: null, heartbeat_at: null });
+    expect(db[which].claimBatch(1, T(31), 'w2').map((c) => c.target)).toEqual(['a']);
+  });
+
+  it('leaves a fresh heartbeat alone', () => {
+    db[which].enqueueMany([{ target: 'a', priority: 1 }], T(0));
+    db[which].claimBatch(1, T(1), 'w1');
+    db[which].heartbeat([1], T(20));
+    expect(reap({ atIso: T(30), staleBeforeIso: T(15), legacyBeforeIso: T(0) })).toEqual({ requeued: 0, failed: 0 });
+    expect(row('a')).toMatchObject({ status: 'in_progress', attempts: 0, claimed_by: 'w1' });
+  });
+
+  it('reaps a legacy row (no heartbeat) only once it is older than the legacy cutoff', () => {
+    db[which].enqueueMany([{ target: 'old', priority: 2 }, { target: 'young', priority: 1 }], T(0));
+    db[which].claimBatch(2, T(1), 'w1');
+    db.raw.prepare(`UPDATE ${table} SET claimed_by=NULL, heartbeat_at=NULL`).run();
+    db.raw.prepare(`UPDATE ${table} SET started_at=? WHERE target='young'`).run(T(25));
+    const r = reap({ atIso: T(30), staleBeforeIso: T(15), legacyBeforeIso: T(20) });
+    expect(r).toEqual({ requeued: 1, failed: 0 });
+    expect(row('old').status).toBe('pending');
+    expect(row('young').status).toBe('in_progress');
+  });
+
+  it('an owner reap hits only that owner, even with a fresh heartbeat', () => {
+    db[which].enqueueMany([{ target: 'mine', priority: 2 }, { target: 'theirs', priority: 1 }], T(0));
+    db[which].claimBatch(1, T(1), 'w1');
+    db[which].claimBatch(1, T(1), 'w2');
+    const r = reap({ atIso: T(2), staleBeforeIso: T(0), legacyBeforeIso: T(0), ownerId: 'w1' });
+    expect(r).toEqual({ requeued: 1, failed: 0 });
+    expect(row('mine').status).toBe('pending');
+    expect(row('theirs')).toMatchObject({ status: 'in_progress', claimed_by: 'w2' });
+  });
+
+  it('an undefined owner does not match rows without an owner', () => {
+    db[which].enqueueMany([{ target: 'a', priority: 1 }], T(0));
+    db[which].claimBatch(1, T(1));
+    db.raw.prepare(`UPDATE ${table} SET heartbeat_at=?`).run(T(2));
+    expect(reap({ atIso: T(3), staleBeforeIso: T(0), legacyBeforeIso: T(0) })).toEqual({ requeued: 0, failed: 0 });
+    expect(row('a').status).toBe('in_progress');
+  });
+
+  it('the third reset marks the row failed with abandoned N times', () => {
+    db[which].enqueueMany([{ target: 'a', priority: 1 }], T(0));
+    for (let i = 0; i < 2; i++) {
+      db[which].claimBatch(1, T(1), 'w1');
+      expect(reap({ atIso: T(30), staleBeforeIso: T(15), legacyBeforeIso: T(0) })).toEqual({ requeued: 1, failed: 0 });
+    }
+    db[which].claimBatch(1, T(1), 'w1');
+    expect(reap({ atIso: T(30), staleBeforeIso: T(15), legacyBeforeIso: T(0) })).toEqual({ requeued: 0, failed: 1 });
+    expect(row('a')).toMatchObject({ status: 'failed', attempts: 3, error: 'abandoned 3 times', finished_at: T(30) });
+  });
+
+  it('honours maxAttempts', () => {
+    db[which].enqueueMany([{ target: 'a', priority: 1 }], T(0));
+    db[which].claimBatch(1, T(1), 'w1');
+    expect(reap({ atIso: T(30), staleBeforeIso: T(15), legacyBeforeIso: T(0), maxAttempts: 1 })).toEqual({ requeued: 0, failed: 1 });
+  });
+
+  it('never touches pending, done or failed rows', () => {
+    db[which].enqueueMany([{ target: 'd', priority: 3 }, { target: 'f', priority: 2 }, { target: 'p', priority: 1 }], T(0));
+    db[which].claimBatch(2, T(1), 'w1');
+    db[which].markDone(1, null, T(2));
+    db[which].markFailed(2, 'x', T(2));
+    expect(reap({ atIso: T(30), staleBeforeIso: T(29), legacyBeforeIso: T(29), ownerId: 'w1' })).toEqual({ requeued: 0, failed: 0 });
+    expect([row('p').status, row('d').status, row('f').status]).toEqual(['pending', 'done', 'failed']);
+  });
+
+  it('requeueMany clears the owner and heartbeat', () => {
+    db[which].enqueueMany([{ target: 'a', priority: 1 }], T(0));
+    db[which].claimBatch(1, T(1), 'w1');
+    db[which].requeueMany([{ target: 'a', priority: 1 }], T(2));
+    expect(row('a')).toMatchObject({ status: 'pending', claimed_by: null, heartbeat_at: null });
+  });
+});
+
+describe('claim-ownership migration', () => {
+  it('adds claimed_by and heartbeat_at to queue tables created without them', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const BetterSqlite = (await import('better-sqlite3')).default;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'queue-migrate-'));
+    const file = path.join(dir, 'old.db');
+    try {
+      const old = new BetterSqlite(file);
+      for (const t of ['scan_queue', 'report_queue']) {
+        old.exec(`CREATE TABLE ${t} (id INTEGER PRIMARY KEY, target TEXT NOT NULL UNIQUE, priority INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'pending', queued_at TEXT NOT NULL, started_at TEXT, finished_at TEXT,
+          run_id INTEGER, attempts INTEGER NOT NULL DEFAULT 0, error TEXT)`);
+        old.prepare(`INSERT INTO ${t}(target, queued_at, status, started_at) VALUES('x', '2026-08-19T12:00:00Z', 'in_progress', '2026-08-19T12:01:00Z')`).run();
+      }
+      old.close();
+      for (let i = 0; i < 2; i++) { // second open proves the migration is idempotent
+        const migrated = openDb(file);
+        for (const t of ['scan_queue', 'report_queue']) {
+          const cols = (migrated.raw.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
+          expect(cols).toEqual(expect.arrayContaining(['claimed_by', 'heartbeat_at']));
+        }
+        migrated.close();
+      }
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+});
