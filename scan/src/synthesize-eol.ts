@@ -25,16 +25,21 @@ const RULES: Rule[] = [
   { re: /Microsoft-IIS\/([\d.]+)/i, sev: 'medium', cat: 'outdated-iis',
     title: (m) => `IIS ${m[1]} disclosed (map to Windows Server release notes for CVE exposure)` },
   // nginx (any explicit version disclosure is signal; specific-CVE mapping needs an external DB)
-  { re: /nginx\/([\d.]+)/i, sev: 'low', cat: 'nginx-version',
+  { re: /\bnginx[\/:]([\d.]+)/i, sev: 'low', cat: 'nginx-version',
     title: (m) => `nginx ${m[1]} version disclosed` },
   // Apache
-  { re: /Apache\/([\d.]+)/i, sev: 'low', cat: 'apache-version',
+  { re: /\bApache\/([\d.]+)/i, sev: 'low', cat: 'apache-version',
     title: (m) => `Apache ${m[1]} version disclosed` },
+  // Apache httpd < 2.4 is EOL (2.2 since 2017). Header `Apache/2.2.15` and tech-list `Apache HTTP Server:2.2.15`.
+  // The title carries only the version so both forms dedup to one finding.
+  { re: /\bApache(?: HTTP Server)?[\/:](1\.\d+|2\.[02])(?!\d)((?:\.\d+)*)/i, sev: 'high', cat: 'eol-apache',
+    title: (m) => `EOL Apache httpd ${m[1]}${m[2]} disclosed (releases before 2.4 are past EOL)` },
   // OpenSSL — 1.0.x / 1.1.x are EOL
-  { re: /OpenSSL\/(1\.0\.[\d]+[a-z]?|1\.1\.[\d]+[a-z]?)/i, sev: 'high', cat: 'eol-openssl',
+  { re: /\bOpenSSL[\/:](1\.0\.[\d]+[a-z]?|1\.1\.[\d]+[a-z]?)/i, sev: 'high', cat: 'eol-openssl',
     title: (m) => `EOL OpenSSL ${m[1]} disclosed (1.0/1.1 series are past EOL)` },
-  // PHP EOL: <=7.4 is EOL, <=8.0 is EOL
-  { re: /PHP\/(4\.|5\.|7\.|8\.0\.)([\d.]+)/i, sev: 'high', cat: 'eol-php',
+  // PHP EOL: <=7.4 is EOL, <=8.0 is EOL. Header form `PHP/5.3.3` and tech-list form `PHP:5.3.3`;
+  // the minor/patch part is optional (`PHP:7`, `PHP:5.6`) and 8.1+ must not match.
+  { re: /\bPHP[\/:](4|5|7|8\.0)(?!\d)((?:\.\d+)*)/i, sev: 'high', cat: 'eol-php',
     title: (m) => `EOL PHP ${m[1]}${m[2]} disclosed` },
   // MinIO Community Edition is unmaintained; any disclosure (server header or console) is signal.
   { re: /MinIO/i, sev: 'high', cat: 'eol-minio',
@@ -53,8 +58,8 @@ export function matchRules(webServer: string, techJson: string | null): { cat: s
 
 export function runSynthesizeEol(db: Db, now: string, runId: number | null = null): { added: number; skipped: number; rows: number } {
   const rows = db.raw.prepare(
-    'SELECT target, url, web_server, tech_json FROM http_probes WHERE web_server IS NOT NULL'
-  ).all() as { target: string; url: string; web_server: string; tech_json: string | null }[];
+    'SELECT target, url, web_server, tech_json FROM http_probes WHERE web_server IS NOT NULL OR tech_json IS NOT NULL'
+  ).all() as { target: string; url: string; web_server: string | null; tech_json: string | null }[];
   const existing = new Set(
     (db.raw.prepare(
       "SELECT target, category, title, matched_at FROM findings WHERE tool='synthesize-eol'"
@@ -64,7 +69,7 @@ export function runSynthesizeEol(db: Db, now: string, runId: number | null = nul
   let added = 0;
   let skipped = 0;
   for (const r of rows) {
-    for (const f of matchRules(r.web_server, r.tech_json)) {
+    for (const f of matchRules(r.web_server ?? '', r.tech_json)) {
       const key = `${r.target}|${f.cat}|${f.title}|${r.url}`;
       if (existing.has(key)) { skipped++; continue; }
       existing.add(key);
