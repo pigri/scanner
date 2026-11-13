@@ -165,12 +165,12 @@ describe('queueStats', () => {
   });
 });
 
-type Row = { status: string; attempts: number; error: string | null; started_at: string | null; finished_at: string | null; claimed_by: string | null; heartbeat_at: string | null };
+type Row = { status: string; attempts: number; abandoned: number; error: string | null; started_at: string | null; finished_at: string | null; claimed_by: string | null; heartbeat_at: string | null };
 
 describe.each(['scanQueue', 'reportQueue'] as const)('%s claim ownership and reaping', (which) => {
   const T = (m: number): string => `2026-08-19T12:${String(m).padStart(2, '0')}:00.000Z`;
   const table = which === 'scanQueue' ? 'scan_queue' : 'report_queue';
-  const row = (target: string): Row => db.raw.prepare(`SELECT status, attempts, error, started_at, finished_at, claimed_by, heartbeat_at FROM ${table} WHERE target=?`).get(target) as Row;
+  const row = (target: string): Row => db.raw.prepare(`SELECT status, attempts, abandoned, error, started_at, finished_at, claimed_by, heartbeat_at FROM ${table} WHERE target=?`).get(target) as Row;
   const reap = (o: { atIso: string; staleBeforeIso: string; legacyBeforeIso: string; ownerId?: string; maxAttempts?: number }) => db[which].reapStale(o);
 
   it('a claim records the owner and the first heartbeat', () => {
@@ -182,7 +182,7 @@ describe.each(['scanQueue', 'reportQueue'] as const)('%s claim ownership and rea
   it('heartbeat bumps heartbeat_at for the given ids only', () => {
     db[which].enqueueMany([{ target: 'a', priority: 2 }, { target: 'b', priority: 1 }], T(0));
     const [a, b] = db[which].claimBatch(2, T(1), 'w1');
-    db[which].heartbeat([a!.id], T(5));
+    db[which].heartbeat([a!.id], T(5), 'w1');
     expect(row(a!.target).heartbeat_at).toBe(T(5));
     expect(row(b!.target).heartbeat_at).toBe(T(1));
   });
@@ -199,7 +199,7 @@ describe.each(['scanQueue', 'reportQueue'] as const)('%s claim ownership and rea
   it('leaves a fresh heartbeat alone', () => {
     db[which].enqueueMany([{ target: 'a', priority: 1 }], T(0));
     db[which].claimBatch(1, T(1), 'w1');
-    db[which].heartbeat([1], T(20));
+    db[which].heartbeat([1], T(20), 'w1');
     expect(reap({ atIso: T(30), staleBeforeIso: T(15), legacyBeforeIso: T(0) })).toEqual({ requeued: 0, failed: 0 });
     expect(row('a')).toMatchObject({ status: 'in_progress', attempts: 0, claimed_by: 'w1' });
   });
@@ -241,7 +241,7 @@ describe.each(['scanQueue', 'reportQueue'] as const)('%s claim ownership and rea
     }
     db[which].claimBatch(1, T(1), 'w1');
     expect(reap({ atIso: T(30), staleBeforeIso: T(15), legacyBeforeIso: T(0) })).toEqual({ requeued: 0, failed: 1 });
-    expect(row('a')).toMatchObject({ status: 'failed', attempts: 3, error: 'abandoned 3 times', finished_at: T(30) });
+    expect(row('a')).toMatchObject({ status: 'failed', attempts: 3, abandoned: 3, error: 'abandoned 3 times', finished_at: T(30) });
   });
 
   it('honours maxAttempts', () => {
@@ -253,10 +253,53 @@ describe.each(['scanQueue', 'reportQueue'] as const)('%s claim ownership and rea
   it('never touches pending, done or failed rows', () => {
     db[which].enqueueMany([{ target: 'd', priority: 3 }, { target: 'f', priority: 2 }, { target: 'p', priority: 1 }], T(0));
     db[which].claimBatch(2, T(1), 'w1');
-    db[which].markDone(1, null, T(2));
-    db[which].markFailed(2, 'x', T(2));
+    db[which].markDone(1, null, T(2), 'w1');
+    db[which].markFailed(2, 'x', T(2), 'w1');
     expect(reap({ atIso: T(30), staleBeforeIso: T(29), legacyBeforeIso: T(29), ownerId: 'w1' })).toEqual({ requeued: 0, failed: 0 });
     expect([row('p').status, row('d').status, row('f').status]).toEqual(['pending', 'done', 'failed']);
+  });
+
+  it('the cap counts abandonments, not lifetime failed attempts', () => {
+    db[which].enqueueMany([{ target: 'a', priority: 1 }], T(0));
+    for (let i = 0; i < 2; i++) {
+      const [c] = db[which].claimBatch(1, T(1), 'w1');
+      db[which].markFailed(c!.id, 'scan error', T(2), 'w1');
+      db[which].requeueMany([{ target: 'a', priority: 1 }], T(3));
+    }
+    db[which].claimBatch(1, T(4), 'w1');
+    expect(reap({ atIso: T(30), staleBeforeIso: T(15), legacyBeforeIso: T(0) })).toEqual({ requeued: 1, failed: 0 });
+    expect(row('a')).toMatchObject({ status: 'pending', abandoned: 1 });
+  });
+
+  it('requeueMany resets the abandoned count', () => {
+    db[which].enqueueMany([{ target: 'a', priority: 1 }], T(0));
+    db[which].claimBatch(1, T(1), 'w1');
+    reap({ atIso: T(30), staleBeforeIso: T(15), legacyBeforeIso: T(0) });
+    expect(row('a').abandoned).toBe(1);
+    db[which].requeueMany([{ target: 'a', priority: 1 }], T(31));
+    expect(row('a').abandoned).toBe(0);
+  });
+
+  it('a worker that lost its claim cannot finish, fail or heartbeat the new owner row', () => {
+    db[which].enqueueMany([{ target: 'a', priority: 1 }], T(0));
+    const [a] = db[which].claimBatch(1, T(1), 'A');
+    reap({ atIso: T(30), staleBeforeIso: T(15), legacyBeforeIso: T(0) });
+    db[which].claimBatch(1, T(31), 'B');
+    expect(db[which].heartbeat([a!.id], T(32), 'A')).toBe(0);
+    db[which].markDone(a!.id, null, T(33), 'A');
+    db[which].markFailed(a!.id, 'late', T(33), 'A');
+    expect(row('a')).toMatchObject({ status: 'in_progress', claimed_by: 'B', heartbeat_at: T(31), error: null });
+    db[which].markDone(a!.id, null, T(34), 'B');
+    expect(row('a').status).toBe('done');
+  });
+
+  it('claims made without an owner can still be finished without one', () => {
+    db[which].enqueueMany([{ target: 'a', priority: 2 }, { target: 'b', priority: 1 }], T(0));
+    const [a, b] = db[which].claimBatch(2, T(1));
+    expect(db[which].heartbeat([a!.id], T(2))).toBe(1);
+    db[which].markDone(a!.id, null, T(3));
+    db[which].markFailed(b!.id, 'x', T(3));
+    expect([row('a').status, row('b').status]).toEqual(['done', 'failed']);
   });
 
   it('requeueMany clears the owner and heartbeat', () => {
@@ -288,7 +331,7 @@ describe('claim-ownership migration', () => {
         const migrated = openDb(file);
         for (const t of ['scan_queue', 'report_queue']) {
           const cols = (migrated.raw.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
-          expect(cols).toEqual(expect.arrayContaining(['claimed_by', 'heartbeat_at']));
+          expect(cols).toEqual(expect.arrayContaining(['claimed_by', 'heartbeat_at', 'abandoned']));
         }
         migrated.close();
       }

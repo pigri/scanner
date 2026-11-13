@@ -205,6 +205,7 @@ export function openDb(dbPath: string, options: OpenDbOptions = {}): Db {
     for (const col of ['claimed_by', 'heartbeat_at'] as const) {
       if (!qCols.has(col)) raw.exec(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT`);
     }
+    if (!qCols.has('abandoned')) raw.exec(`ALTER TABLE ${table} ADD COLUMN abandoned INTEGER NOT NULL DEFAULT 0`);
   }
 
   const startRunStmt = raw.prepare(
