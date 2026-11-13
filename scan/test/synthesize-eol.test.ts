@@ -145,5 +145,40 @@ describe('runSynthesizeEol', () => {
       runSynthesizeEol(db, NOW);
       expect(findings(db)).toHaveLength(1);
     });
+
+    it.each([
+      [['CakePHP:4.4.14', 'Nginx', 'PHP:8.2.12']],
+      [['PHP:8.1.2', 'ThinkPHP:5.0.24']],
+      [['KPHP:5.1']],
+    ] as [string[]][])('does not treat a product ending in PHP as PHP: %j', (tech) => {
+      const db = openDb(':memory:');
+      probeTech(db, 'nginx', tech);
+      runSynthesizeEol(db, NOW);
+      expect(eolCats(db)).toEqual([]);
+    });
+
+    it('does not match product names that merely end in openssl, nginx or apache', () => {
+      const db = openDb(':memory:');
+      probeTech(db, '', ['LibOpenSSL:1.0.2k', 'Xnginx:1.2.3', 'MyApache HTTP Server:2.2.15']);
+      runSynthesizeEol(db, NOW);
+      expect(findings(db)).toEqual([]);
+    });
+
+    it('still matches PHP inside JSON quotes and after a space in the header', () => {
+      const db = openDb(':memory:');
+      probeTech(db, 'X PHP/5.3.3', []);
+      probeTech(db, '', ['PHP:5.3.3'], 'b.example');
+      runSynthesizeEol(db, NOW);
+      expect(eolCats(db)).toHaveLength(2);
+      expect(eolCats(db)).toContainEqual({ target: 'host.example', category: 'eol-php', severity: 'high' });
+      expect(eolCats(db)).toContainEqual({ target: 'b.example', category: 'eol-php', severity: 'high' });
+    });
+
+    it('reads probes with a NULL Server header: tech-only PHP:7.1.33 gives one eol-php finding', () => {
+      const db = openDb(':memory:');
+      db.insertHttpProbe({ target: 'host.example', url: 'https://host.example/', web_server: null, tech: ['PHP:7.1.33'] }, '2026-11-03T00:00:00Z', null);
+      runSynthesizeEol(db, NOW);
+      expect(findings(db)).toEqual([{ target: 'host.example', category: 'eol-php', severity: 'high' }]);
+    });
   });
 });
