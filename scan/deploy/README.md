@@ -80,10 +80,14 @@ exits with status 75; `Restart=on-failure` then starts it again inside the curre
 namespace, after the `ExecStartPre` wait. The same check resolves a probe name
 (`--dns-probe`, default `example.com`). When DNS fails the worker pauses claiming
 and retries with a backoff from `--poll-interval` up to 5 minutes, then carries on
-by itself. The namespace is checked again after each batch, before its rows are
-marked; if it changed while the batch ran, the rows return to the queue without
-counting an attempt and the worker exits with status 75. The probe queries the nameservers in the namespace's `resolv.conf`
+by itself. The probe queries the nameservers in the namespace's `resolv.conf`
 directly, not through nsswitch, so a host-side resolver cannot answer it.
+
+The namespace (not DNS) is checked again after each batch, before its rows are
+marked. If it changed while the batch ran, or cannot be checked, the rows this
+worker still owns return to the queue without counting an attempt, and the worker
+exits with status 75. Whatever that batch already wrote (its run, findings and
+risk rows) stays in the database until the targets are scanned again.
 
 Fallback: a worker started without `--netns` has no such check. After restarting
 `scanvpn-netns{,-hu}`, restart the matching workers by hand
