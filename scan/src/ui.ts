@@ -13,9 +13,8 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { resolveDbArg } from './lib/db-arg.js';
 import { filterAndFacet } from './lib/target-filter.js';
-import { CERT_ORG_SQL } from './lib/cert-org.js';
-import { TARGET_AGG_SQL } from './lib/target-agg.js';
 import { buildNewsSql } from './lib/news-sql.js';
+import { TARGET_ROWS_SQL, riskLatestMissingMessage } from './lib/target-rows-sql.js';
 import { NO_URL } from './lib/risk-latest.js';
 
 interface Opts {
@@ -99,6 +98,12 @@ function tableExists(db: Database.Database, name: string): boolean {
     .get(name);
 }
 
+const missing = riskLatestMissingMessage(tableExists(scan, 'risk_latest'));
+if (missing) {
+  console.error(missing);
+  process.exit(1);
+}
+
 // A "logical finding" collapses every historical sighting of the same issue
 // (target · tool · severity · category · title) into one row, tracking when it
 // was first and last seen and how many times it was observed. A finding is
@@ -155,26 +160,7 @@ function targetRows(): TargetRow[] {
   const now = Date.now();
   if (targetsCache && now - targetsCache.at < 60000) return targetsCache.rows;
   const rows = scan
-    .prepare(
-      `WITH latest AS MATERIALIZED (
-         SELECT target, score FROM (SELECT target, score, MAX(computed_at) FROM risk_scores WHERE ${NO_URL} GROUP BY target)),
-       rstime AS MATERIALIZED (
-         SELECT target, MIN(computed_at) created_at, MAX(computed_at) updated_at
-         FROM risk_scores WHERE ${NO_URL} GROUP BY target),
-       agg AS MATERIALIZED (${TARGET_AGG_SQL}),
-       certorg AS MATERIALIZED (${CERT_ORG_SQL})
-       SELECT latest.target target, latest.score score, rstime.created_at, rstime.updated_at,
-         COALESCE(agg.critical,0) critical, COALESCE(agg.high,0) high, COALESCE(agg.medium,0) medium,
-         COALESCE(agg.low,0) low, COALESCE(agg.info,0) info,
-         COALESCE(agg.findings,0) findings, COALESCE(agg.cves,0) cves,
-         COALESCE(agg.versionMatch,0) versionMatch,
-         certorg.organization organization,
-         COALESCE(host_state.active,1) active
-       FROM latest JOIN rstime ON rstime.target = latest.target
-       LEFT JOIN agg ON agg.target = latest.target
-       LEFT JOIN certorg ON certorg.target = latest.target
-       LEFT JOIN host_state ON host_state.target = latest.target`,
-    )
+    .prepare(TARGET_ROWS_SQL)
     .all() as TargetRow[];
   targetsCache = { rows, at: now };
   return rows;
@@ -276,8 +262,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
       .all();
     const topRisk = scan
       .prepare(
-        `SELECT target, score FROM (SELECT target, score, MAX(computed_at) FROM risk_scores WHERE ${NO_URL} GROUP BY target)
-         ORDER BY score DESC, target LIMIT 10`,
+        `SELECT target, score FROM risk_latest ORDER BY score DESC, target LIMIT 10`,
       )
       .all();
     // Recently scanned hosts: last time each target produced any finding
@@ -286,7 +271,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
     const recentTargets = scan
       .prepare(
         `SELECT t.target, t.last_scan,
-           (SELECT score FROM risk_scores r WHERE r.target=t.target ORDER BY computed_at DESC LIMIT 1) score,
+           (SELECT score FROM risk_latest WHERE target=t.target) score,
            (SELECT COUNT(*) FROM findings f WHERE f.target=t.target AND f.severity='critical') critical,
            (SELECT COUNT(*) FROM findings f WHERE f.target=t.target AND f.severity='high') high,
            (SELECT COUNT(*) FROM findings f WHERE f.target=t.target) findings
@@ -353,7 +338,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
                  UNION SELECT target FROM findings     WHERE ${NO_URL}
                  UNION SELECT target FROM dns_records  WHERE ${NO_URL}
                  UNION SELECT target FROM cves         WHERE ${NO_URL}
-                 UNION SELECT target FROM risk_scores  WHERE ${NO_URL}
+                 UNION SELECT target FROM risk_latest
                )`,
             )
             .get() as { c: number }
@@ -690,7 +675,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
     }
     const scoreMap = new Map<string, number>();
     for (const s of scan
-      .prepare(`SELECT target, score FROM (SELECT target, score, MAX(computed_at) FROM risk_scores WHERE ${NO_URL} GROUP BY target)`)
+      .prepare(`SELECT target, score FROM risk_latest`)
       .all() as { target: string; score: number }[]) scoreMap.set(s.target, s.score);
     const byCvss = (a: Item, b: Item) => (b.cvss ?? 0) - (a.cvss ?? 0);
     const cap = (xs: Item[]) => xs.sort(byCvss).slice(0, 12);
@@ -808,8 +793,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
     if (!isHost) {
       // Not an exact host → treat the input as a search and offer matches to
       // pick from (filtered by what was typed, else the highest-risk hosts).
-      const latest =
-        `SELECT target, score FROM (SELECT target, score, MAX(computed_at) FROM risk_scores WHERE ${NO_URL} GROUP BY target)`;
+      const latest = `SELECT target, score FROM risk_latest`;
       const suggest = t
         ? scan
             .prepare(`${latest} WHERE target LIKE ? ORDER BY score DESC, target LIMIT 50`)
