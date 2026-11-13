@@ -15,7 +15,7 @@ import { resolveDbArg } from './lib/db-arg.js';
 import { filterAndFacet } from './lib/target-filter.js';
 import { CERT_ORG_SQL } from './lib/cert-org.js';
 import { TARGET_AGG_SQL } from './lib/target-agg.js';
-import { NEWS_FIRSTS_SQL } from './lib/news-sql.js';
+import { buildNewsSql } from './lib/news-sql.js';
 
 interface Opts {
   scanDb: string;
@@ -882,37 +882,14 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
     const day = (q.get('day') || '').trim();
     const sev = q.get('severity');
     const search = (q.get('q') || '').trim();
-    const clauses: string[] = [];
-    const args: unknown[] = [];
-    if (/^\d{4}-\d{2}-\d{2}$/.test(day)) {
-      clauses.push(`substr(first_seen,1,10) = ?`);
-      args.push(day);
-    }
-    if (sev && SEVERITY_ORDER.includes(sev)) {
-      clauses.push('severity = ?');
-      args.push(sev);
-    }
-    if (search) {
-      clauses.push('(target LIKE ? OR title LIKE ? OR cve LIKE ?)');
-      args.push(`%${search}%`, `%${search}%`, `%${search}%`);
-    }
-    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-    const firsts = NEWS_FIRSTS_SQL;
-    const rows = scan
-      .prepare(
-        `SELECT * FROM (${firsts}) ${where}
-         ORDER BY first_seen DESC,
-           CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2
-             WHEN 'low' THEN 3 ELSE 4 END
-         LIMIT 800`,
-      )
-      .all(...args);
+    const built = buildNewsSql({
+      day: /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : '',
+      severity: sev && SEVERITY_ORDER.includes(sev) ? sev : '',
+      search,
+    });
+    const rows = scan.prepare(built.rows.sql).all(...built.rows.params);
     // New-findings count per day, for the day picker.
-    const days = scan
-      .prepare(
-        `SELECT substr(first_seen,1,10) day, COUNT(*) c FROM (${firsts}) GROUP BY day ORDER BY day DESC`,
-      )
-      .all();
+    const days = scan.prepare(built.days.sql).all();
     return { rows, days };
   },
 };

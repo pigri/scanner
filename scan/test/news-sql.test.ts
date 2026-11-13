@@ -5,7 +5,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, rmSync } from 'node:fs';
 import Database from 'better-sqlite3';
-import { NEWS_FIRSTS_SQL } from '../src/lib/news-sql.js';
+import { NEWS_FIRSTS_SQL, buildNewsSql } from '../src/lib/news-sql.js';
 
 const SCHEMA = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '../src/lib/schema.sql'),
@@ -85,5 +85,80 @@ describe('news aggregation results', () => {
     expect(rows).toHaveLength(2);
     expect(rows[0]).toMatchObject({ target: 'a.example.com', first_seen: '2026-10-05T00:00:00Z' });
     expect(rows[1]).toMatchObject({ target: 'b.example.com', first_seen: '2026-10-07T00:00:00Z' });
+  });
+});
+
+// Live DB has sqlite_stat1; without ANALYZE the planner can pick differently.
+// Skewed severities (mostly info) and many groups make the stats realistic.
+function seededDb(): Database.Database {
+  const db = newDb();
+  const sevs = ['info', 'info', 'info', 'info', 'low', 'low', 'medium', 'high', 'critical'];
+  const ins = db.prepare(
+    `INSERT INTO findings (tool, target, category, severity, title, cve, seen_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  );
+  db.transaction(() => {
+    for (let g = 0; g < 3000; g++) {
+      for (let seen = 0; seen < 3; seen++) {
+        ins.run(
+          g % 3 ? 'nuclei' : 'httpx',
+          `host${g % 400}.example.com`,
+          `cat${g % 7}`,
+          sevs[g % sevs.length],
+          `finding ${g}`,
+          g % 11 ? null : `CVE-2021-${g}`,
+          `2026-10-${String(1 + ((g + seen) % 28)).padStart(2, '0')}T00:00:00Z`,
+        );
+      }
+    }
+  })();
+  db.exec('ANALYZE');
+  return db;
+}
+const planOf = (db: Database.Database, sql: string, params: unknown[] = []): string =>
+  (db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params) as { detail: string }[])
+    .map((r) => r.detail)
+    .join('\n');
+
+describe('buildNewsSql query plans', () => {
+  const cases: [string, Parameters<typeof buildNewsSql>[0]][] = [
+    ['unfiltered', {}],
+    ['severity-filtered', { severity: 'high' }],
+    ['severity info', { severity: 'info' }],
+    ['day-filtered', { day: '2026-10-05' }],
+    ['search-filtered', { search: 'host1' }],
+    ['all filters', { day: '2026-10-05', severity: 'low', search: 'host1' }],
+  ];
+  for (const [name, filter] of cases) {
+    it(`${name}: inner grouping uses the covering index, no temp B-tree`, () => {
+      const db = seededDb();
+      const q = buildNewsSql(filter).rows;
+      const plan = planOf(db, q.sql, q.params);
+      db.close();
+      expect(plan).toContain('COVERING INDEX idx_findings_logical');
+      expect(plan).not.toContain('idx_findings_severity');
+      expect(plan).not.toContain('TEMP B-TREE FOR GROUP BY');
+    });
+  }
+
+  it("days query's inner scan uses the covering index", () => {
+    const db = seededDb();
+    const plan = planOf(db, buildNewsSql({}).days.sql);
+    db.close();
+    expect(plan).toContain('COVERING INDEX idx_findings_logical');
+    expect(plan).not.toMatch(/SCAN findings(?! USING)/);
+  });
+
+  it('passes params in clause order and filters severity to exact matches', () => {
+    const db = seededDb();
+    const q = buildNewsSql({ day: '2026-10-05', severity: 'high', search: 'host1' }).rows;
+    expect(q.params).toEqual(['2026-10-05', 'high', '%host1%', '%host1%', '%host1%']);
+    const rows = db.prepare(q.sql).all(...q.params) as { severity: string; first_seen: string }[];
+    db.close();
+    expect(rows.length).toBeGreaterThan(0);
+    for (const r of rows) {
+      expect(r.severity).toBe('high');
+      expect(r.first_seen.slice(0, 10)).toBe('2026-10-05');
+    }
   });
 });
