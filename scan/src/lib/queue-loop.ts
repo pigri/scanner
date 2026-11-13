@@ -121,6 +121,7 @@ export async function runQueueLoop(o: QueueLoopOpts): Promise<{ batches: number;
       let pf: PreflightResult;
       try { pf = await o.preflight(); }
       catch (e) { pf = { action: 'retry', reason: `preflight threw: ${e instanceof Error ? e.message : String(e)}` }; }
+      if (interrupted) { log.warn(`${label}: stopping due to signal`); break; }
       if (pf.action === 'restart') {
         log.error(`${label}: egress check failed, exiting so the supervisor restarts the worker: ${pf.reason}`);
         restart = pf.reason;

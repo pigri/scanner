@@ -259,4 +259,13 @@ describe('runQueueLoop preflight', () => {
     await runQueueLoop(base(f, { preflight: async () => ({ action: 'restart', reason: 'x' }) }));
     expect(f.reaps[0]).toMatchObject({ ownerId: 'hu-1' });
   });
+
+  it('does not claim when a signal arrives while the preflight runs', async () => {
+    const f = fakeQueue([[row(1)]]);
+    await runQueueLoop(base(f, {
+      watch: true,
+      preflight: async () => { process.emit('SIGTERM'); return { action: 'ok' }; },
+    }));
+    expect(f.claims).toEqual([]);
+  });
 });
