@@ -1,8 +1,8 @@
 import { CERT_ORG_SQL } from './cert-org.js';
-import { NO_URL } from './risk-latest.js';
 import { TARGET_AGG_SQL } from './target-agg.js';
 
-// One row per non-URL target for the Targets list: score and assessment times
+// One row per non-URL target for the Targets list (risk_latest never holds URL
+// targets, see lib/risk-latest.ts): score and assessment times
 // from risk_latest, plus the findings aggregate, cert organization and host
 // state. Shared by src/ui.ts and test/target-rows-sql.test.ts (no drift).
 export const TARGET_ROWS_SQL = `WITH agg AS MATERIALIZED (${TARGET_AGG_SQL}),
@@ -14,7 +14,7 @@ export const TARGET_ROWS_SQL = `WITH agg AS MATERIALIZED (${TARGET_AGG_SQL}),
          COALESCE(agg.versionMatch,0) versionMatch,
          certorg.organization organization,
          COALESCE(host_state.active,1) active
-       FROM (SELECT * FROM risk_latest WHERE ${NO_URL}) rl
+       FROM risk_latest rl
        LEFT JOIN agg ON agg.target = rl.target
        LEFT JOIN certorg ON certorg.target = rl.target
        LEFT JOIN host_state ON host_state.target = rl.target`;

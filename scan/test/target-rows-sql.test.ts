@@ -62,10 +62,11 @@ describe('TARGET_ROWS_SQL', () => {
 
   it('excludes URL targets and defaults the aggregate columns to 0', () => {
     const db = newDb();
-    const ins = db.prepare(`INSERT INTO risk_latest (target, score, created_at, updated_at) VALUES (?, 1, 'c', 'u')`);
-    ins.run('b.example');
-    ins.run('http://b.example');
-    ins.run('https://b.example');
+    // URL targets only reach risk_scores/findings; writers never put them in risk_latest.
+    db.prepare(`INSERT INTO risk_latest (target, score, created_at, updated_at) VALUES ('b.example', 1, 'c', 'u')`).run();
+    const sc = db.prepare(`INSERT INTO risk_scores (target, score, breakdown_json, computed_at) VALUES (?, 1, '{}', 'c')`);
+    const fd = db.prepare(`INSERT INTO findings (tool, target, category, severity, title, seen_at) VALUES ('nuclei', ?, 'x', 'high', 't', 's')`);
+    for (const u of ['http://b.example', 'https://b.example']) { sc.run(u); fd.run(u); }
     const rows = db.prepare(TARGET_ROWS_SQL).all() as { target: string; versionMatch: number; findings: number }[];
     expect(rows.map((r) => r.target)).toEqual(['b.example']);
     expect(rows[0]).toMatchObject({ versionMatch: 0, findings: 0 });
