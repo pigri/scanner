@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { decodeDdgUrl, hostOf, makeDomainFilter } from '../src/lib/ddg.js';
+import { browserLaunchOptions, decodeDdgUrl, hostOf, makeDomainFilter } from '../src/lib/ddg.js';
 
 describe('decodeDdgUrl', () => {
   it('unwraps DDG /l/?uddg= redirect wrappers', () => {
@@ -80,5 +80,17 @@ describe('makeDomainFilter', () => {
   it('with no suffix, accepts any host', () => {
     const keep = makeDomainFilter(null, []);
     expect(keep('anything.example.io')).toBe('anything.example.io');
+  });
+});
+
+describe('browserLaunchOptions', () => {
+  it('drives the browser over a pipe, not a loopback socket', () => {
+    expect(browserLaunchOptions().pipe).toBe(true);
+  });
+
+  it('launches headless without the sandbox', () => {
+    const o = browserLaunchOptions();
+    expect(o.headless).toBe(true);
+    expect(o.args).toEqual(['--no-sandbox', '--disable-setuid-sandbox']);
   });
 });
