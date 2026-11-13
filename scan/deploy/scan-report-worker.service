@@ -6,7 +6,7 @@ After=network-online.target
 Type=simple
 WorkingDirectory=/home/pigri/gen0sec/redteam/scan
 # Source nvm explicitly so npx/node resolve under systemd's clean environment.
-ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; exec npx tsx src/report-worker.ts --sqlite scan.db --out-dir reports --watch --log logs/report-worker.service.log'
+ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; exec npx tsx src/report-worker.ts --sqlite scan.db --out-dir reports --watch --worker-id report --log logs/report-worker.service.log'
 Restart=on-failure
 RestartSec=10
 KillSignal=SIGTERM
