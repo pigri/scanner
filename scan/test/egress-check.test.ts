@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { checkNetns, checkDns, makePreflight } from '../src/lib/egress-check.js';
+import { checkNetns, checkDns, makePreflight, exitCodeFor, preflightFromOpts, EXIT_RESTART } from '../src/lib/egress-check.js';
 
 const netnsDeps = (ino: number, link: string) => ({
   statIno: (p: string) => { if (p !== '/run/netns/vpn') throw new Error(`unexpected path ${p}`); return ino; },
@@ -57,6 +57,14 @@ describe('checkDns', () => {
     expect(r).toEqual({ status: 'timeout' });
   });
 
+  it('cancels the pending lookup on timeout, and not otherwise', async () => {
+    let cancelled = 0;
+    await checkDns('probe.test', 20, { resolve: () => new Promise<void>(() => {}), cancel: () => { cancelled++; } });
+    expect(cancelled).toBe(1);
+    await checkDns('probe.test', 1000, { resolve: async () => undefined, cancel: () => { cancelled++; } });
+    expect(cancelled).toBe(1);
+  });
+
   it('passes the host to the resolver', async () => {
     let seen = '';
     await checkDns('probe.test', 1000, { resolve: async (h) => { seen = h; } });
@@ -97,5 +105,40 @@ describe('makePreflight', () => {
 
   it('retries on a DNS timeout', async () => {
     expect((await mk(7, () => new Promise(() => {}))()).action).toBe('retry');
+  });
+});
+
+describe('exitCodeFor', () => {
+  it('is 75 when the loop asked for a restart', () => {
+    expect(EXIT_RESTART).toBe(75);
+    expect(exitCodeFor({ batches: 0, restart: 'wrong namespace' })).toBe(75);
+  });
+
+  it('is 0 on a normal finish', () => {
+    expect(exitCodeFor({ batches: 3 })).toBe(0);
+  });
+});
+
+describe('preflightFromOpts', () => {
+  it('is off without --netns', () => {
+    expect(preflightFromOpts({ netns: null, dnsProbe: 'probe.test', dnsTimeoutMs: 20 })).toBeUndefined();
+  });
+
+  it('checks the given netns and resolves the given probe', async () => {
+    let seen = '';
+    const pf = preflightFromOpts(
+      { netns: 'vpn', dnsProbe: 'probe.test', dnsTimeoutMs: 20 },
+      { netns: netnsDeps(7, 'net:[7]'), dns: { resolve: async (h) => { seen = h; } } },
+    );
+    expect(await pf!()).toEqual({ action: 'ok' });
+    expect(seen).toBe('probe.test');
+  });
+
+  it('restarts on a mismatch and uses the given DNS timeout', async () => {
+    const dns = { resolve: () => new Promise<void>(() => {}) };
+    expect((await preflightFromOpts({ netns: 'vpn', dnsProbe: 'p', dnsTimeoutMs: 20 }, { netns: netnsDeps(8, 'net:[7]'), dns })!())!.action).toBe('restart');
+    const t0 = Date.now();
+    expect((await preflightFromOpts({ netns: 'vpn', dnsProbe: 'p', dnsTimeoutMs: 20 }, { netns: netnsDeps(7, 'net:[7]'), dns })!())!.action).toBe('retry');
+    expect(Date.now() - t0).toBeLessThan(2000);
   });
 });

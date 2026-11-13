@@ -11,7 +11,7 @@ import { openDb } from './lib/db.js';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
 import { createLogger, type Logger } from './lib/log.js';
 import { scanChildEnv, TUNED_SCAN_FLAGS } from './lib/scan-all-runner.js';
-import { makePreflight } from './lib/egress-check.js';
+import { preflightFromOpts, exitCodeFor } from './lib/egress-check.js';
 import { runQueueLoop, type BatchOutcome } from './lib/queue-loop.js';
 
 interface Opts {
@@ -178,11 +178,9 @@ async function main(): Promise<void> {
     try { db.raw.pragma('wal_checkpoint(TRUNCATE)'); } catch { /* busy: retry next tick */ }
   };
 
-  const preflight = opts.netns
-    ? makePreflight({ netns: opts.netns, dnsProbe: opts.dnsProbe, timeoutMs: opts.dnsTimeoutMs })
-    : undefined;
+  const preflight = preflightFromOpts(opts);
 
-  const { batches, restart } = await runQueueLoop({
+  const result = await runQueueLoop({
     queue: db.scanQueue,
     label: 'scan',
     batchSize: opts.batchSize,
@@ -214,6 +212,7 @@ async function main(): Promise<void> {
     },
   });
 
+  const { batches } = result;
   const totalDt = ((Date.now() - startAll) / 1000).toFixed(0);
   const sq = db.scanQueue.stats();
   const rq = db.reportQueue.stats();
@@ -221,8 +220,7 @@ async function main(): Promise<void> {
   log.info(`scan_queue: pending=${sq.pending} in_progress=${sq.in_progress} done=${sq.done} failed=${sq.failed} | report_queue: pending=${rq.pending} done=${rq.done}`);
   db.close();
   log.close();
-  // EX_TEMPFAIL: non-zero so Restart=on-failure starts a fresh worker.
-  if (restart !== undefined) process.exitCode = 75;
+  process.exitCode = exitCodeFor(result);
 }
 
 main().catch((err: unknown) => {

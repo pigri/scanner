@@ -43,16 +43,24 @@ export function checkNetns(name: string, deps: NetnsDeps = defaultNetnsDeps): Ne
 
 export interface DnsDeps {
   resolve: (host: string) => Promise<unknown>;
+  cancel?: () => void;
 }
 
 export type DnsResult = { status: 'ok' } | { status: 'fail'; reason: string } | { status: 'timeout' };
 
-// dns.lookup goes through getaddrinfo, so it uses the namespace's resolv.conf.
-const defaultDnsDeps: DnsDeps = { resolve: (h) => dns.promises.lookup(h) };
+// c-ares reads resolv.conf and queries the nameservers itself. getaddrinfo
+// (dns.lookup) would also run nsswitch modules, which can reach a resolver over
+// a unix socket on the host and so succeed from the wrong namespace. Only A
+// records are probed: the probe tests that the namespace has a working resolver
+// path, not which address families the target has.
+function defaultDnsDeps(timeoutMs: number): DnsDeps {
+  const r = new dns.promises.Resolver({ timeout: timeoutMs, tries: 1 });
+  return { resolve: (h) => r.resolve4(h), cancel: () => r.cancel() };
+}
 
-export async function checkDns(host: string, timeoutMs: number, deps: DnsDeps = defaultDnsDeps): Promise<DnsResult> {
+export async function checkDns(host: string, timeoutMs: number, deps: DnsDeps = defaultDnsDeps(timeoutMs)): Promise<DnsResult> {
   let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<DnsResult>((res) => { timer = setTimeout(() => res({ status: 'timeout' }), timeoutMs); });
+  const timeout = new Promise<DnsResult>((res) => { timer = setTimeout(() => { deps.cancel?.(); res({ status: 'timeout' }); }, timeoutMs); });
   const lookup = (async (): Promise<DnsResult> => {
     try { await deps.resolve(host); return { status: 'ok' }; }
     catch (e) { return { status: 'fail', reason: errMsg(e) }; }
@@ -85,4 +93,18 @@ export function makePreflight(o: PreflightOpts): () => Promise<PreflightResult> 
     if (d.status === 'timeout') return { action: 'retry', reason: `dns probe ${o.dnsProbe} timed out after ${o.timeoutMs} ms` };
     return { action: 'ok' };
   };
+}
+
+export const EXIT_RESTART = 75; // EX_TEMPFAIL: non-zero, so Restart=on-failure starts a fresh worker
+
+export function exitCodeFor(r: { batches: number; restart?: string }): number {
+  return r.restart === undefined ? 0 : EXIT_RESTART;
+}
+
+export function preflightFromOpts(
+  o: { netns: string | null; dnsProbe: string; dnsTimeoutMs: number },
+  deps?: PreflightOpts['deps'],
+): (() => Promise<PreflightResult>) | undefined {
+  if (!o.netns) return undefined;
+  return makePreflight({ netns: o.netns, dnsProbe: o.dnsProbe, timeoutMs: o.dnsTimeoutMs, ...(deps ? { deps } : {}) });
 }
