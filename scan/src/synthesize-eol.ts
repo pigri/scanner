@@ -30,6 +30,10 @@ const RULES: Rule[] = [
   // Apache
   { re: /Apache\/([\d.]+)/i, sev: 'low', cat: 'apache-version',
     title: (m) => `Apache ${m[1]} version disclosed` },
+  // Apache httpd < 2.4 is EOL (2.2 since 2017). Header `Apache/2.2.15` and tech-list `Apache HTTP Server:2.2.15`.
+  // The title carries only the version so both forms dedup to one finding.
+  { re: /Apache(?: HTTP Server)?[\/:](1\.\d+|2\.[02])(?!\d)((?:\.\d+)*)/i, sev: 'high', cat: 'eol-apache',
+    title: (m) => `EOL Apache httpd ${m[1]}${m[2]} disclosed (releases before 2.4 are past EOL)` },
   // OpenSSL — 1.0.x / 1.1.x are EOL
   { re: /OpenSSL\/(1\.0\.[\d]+[a-z]?|1\.1\.[\d]+[a-z]?)/i, sev: 'high', cat: 'eol-openssl',
     title: (m) => `EOL OpenSSL ${m[1]} disclosed (1.0/1.1 series are past EOL)` },

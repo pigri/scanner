@@ -76,11 +76,46 @@ describe('runSynthesizeEol', () => {
       expect(eolCats(db)).toEqual([{ target: 'host.example', category: 'eol-php', severity: 'high' }]);
     });
 
+    it.each([
+      ['Apache/2.2.15', []],
+      ['Apache/2.0.64', []],
+      ['Apache/1.3.42', []],
+      ['', ['Apache HTTP Server:2.2.15']],
+      ['', ['Apache HTTP Server:2.0.59']],
+      ['', ['Apache HTTP Server:1.3.37']],
+    ] as [string, string[]][])('flags web_server=%j tech=%j as high eol-apache', (ws, tech) => {
+      const db = openDb(':memory:');
+      probeTech(db, ws, tech);
+      runSynthesizeEol(db, NOW);
+      expect(eolCats(db)).toEqual([{ target: 'host.example', category: 'eol-apache', severity: 'high' }]);
+    });
+
+    it.each([
+      ['Apache/2.4.58', []],
+      ['', ['Apache HTTP Server:2.4.58']],
+      ['Apache-Coyote/1.1', []],
+      ['', ['Apache Tomcat:9.0.1']],
+    ] as [string, string[]][])('does not flag web_server=%j tech=%j as EOL Apache', (ws, tech) => {
+      const db = openDb(':memory:');
+      probeTech(db, ws, tech);
+      runSynthesizeEol(db, NOW);
+      expect(eolCats(db)).toEqual([]);
+    });
+
+    it('keeps the low apache-version disclosure for the header form', () => {
+      const db = openDb(':memory:');
+      probe(db, 'Apache/2.2.15');
+      runSynthesizeEol(db, NOW);
+      expect(findings(db).map((f) => f.category)).toEqual(['apache-version', 'eol-apache']);
+    });
+
     it('yields one finding per category when header and tech list disclose the same versions', () => {
       const db = openDb(':memory:');
-      probeTech(db, 'nginx PHP/5.3.3', ['PHP:5.3.3']);
-      runSynthesizeEol(db, NOW);
-      expect(eolCats(db).map((f) => f.category)).toEqual(['eol-php']);
+      probeTech(db, 'Apache/2.2.15 (CentOS) PHP/5.3.3', ['Apache HTTP Server:2.2.15', 'PHP:5.3.3']);
+      const r = runSynthesizeEol(db, NOW);
+      expect(eolCats(db).map((f) => f.category)).toEqual(['eol-apache', 'eol-php']);
+      expect(r.added).toBe(3); // eol-apache, eol-php, apache-version
+      expect(runSynthesizeEol(db, NOW)).toMatchObject({ added: 0, skipped: 3 });
     });
   });
 });
