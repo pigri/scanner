@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { openDb } from '../src/lib/db.js';
 import type Database from 'better-sqlite3';
 import { recordRiskScores } from '../src/lib/risk-latest.js';
+import { runRisk } from '../src/risk.js';
 import { computeScore, matchesRiskKeyword, type TargetSignals } from '../src/lib/risk.js';
 
 const empty = (): TargetSignals => ({
@@ -207,5 +208,21 @@ describe('recordRiskScores', () => {
     const r = db.startRun('risk', {}, '2026-01-01T00:00:00Z');
     recordRiskScores(db.raw, [{ target: 'https://a.example.com', score: 10, breakdownJson: '{}' }], '2026-01-01T00:00:00Z', r);
     expect(rowsFor(db.raw).get('https://a.example.com')).toBeUndefined();
+  });
+});
+
+describe('runRisk (the risk CLI body)', () => {
+  it('writes risk_scores and risk_latest for each scored target', () => {
+    const db = openDb(':memory:');
+    db.raw.prepare(
+      `INSERT INTO findings(tool, target, severity, title, seen_at) VALUES('nuclei', 'a.example.com', 'high', 't', '2026-01-01T00:00:00Z')`
+    ).run();
+    const { runId, targetsCount } = runRisk(db, {
+      db: ':memory:', discoveryDb: null, hostSuffix: null, top: 25, minScore: 0, showBreakdown: false,
+    });
+    expect(targetsCount).toBe(1);
+    const scores = db.raw.prepare('SELECT target, score FROM risk_scores WHERE run_id = ?').all(runId) as { target: string; score: number }[];
+    expect(scores).toHaveLength(1);
+    expect(db.raw.prepare('SELECT target, score FROM risk_latest').all()).toEqual(scores);
   });
 });

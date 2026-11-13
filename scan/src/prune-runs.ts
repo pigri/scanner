@@ -5,6 +5,7 @@
 // can't delete the wrong rows).
 import fs from 'node:fs';
 import path from 'node:path';
+import type Database from 'better-sqlite3';
 import { openDb } from './lib/db.js';
 import { deleteRiskScoresForRuns } from './lib/risk-latest.js';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
@@ -68,6 +69,16 @@ Backs up to <db>.bak first. With --expect, aborts unless each run's tool matches
   --yes              actually delete (dry-run prints the plan otherwise)`);
 }
 
+/** Delete the given runs, their findings and their risk_scores in one write transaction. */
+export function applyPrune(raw: Database.Database, runs: number[]): void {
+  const placeholders = runs.map(() => '?').join(',');
+  raw.transaction(() => {
+    raw.prepare(`DELETE FROM findings WHERE run_id IN (${placeholders})`).run(...runs);
+    deleteRiskScoresForRuns(raw, runs);
+    raw.prepare(`DELETE FROM runs WHERE id IN (${placeholders})`).run(...runs);
+  }).immediate();
+}
+
 function main(): void {
   const opts = parseArgs(process.argv);
   if (opts.help || opts.runs.length === 0) { usage(); process.exit(opts.help ? 0 : 1); }
@@ -108,15 +119,10 @@ function main(): void {
   fs.copyFileSync(opts.db, bak);
   console.error(`backup written: ${path.resolve(bak)}`);
 
-  const tx = raw.transaction(() => {
-    raw.prepare(`DELETE FROM findings WHERE run_id IN (${placeholders})`).run(...opts.runs);
-    deleteRiskScoresForRuns(raw, opts.runs);
-    raw.prepare(`DELETE FROM runs WHERE id IN (${placeholders})`).run(...opts.runs);
-  });
-  tx();
+  applyPrune(raw, opts.runs);
   console.error(`deleted: ${JSON.stringify(plan)}`);
   db.close();
 }
 
-// Only run when invoked directly, so tests can import parseRunIds/parseExpect.
+// Only run when invoked directly, so tests can import parseRunIds/parseExpect/applyPrune.
 if (process.argv[1] && process.argv[1].endsWith('prune-runs.ts')) main();

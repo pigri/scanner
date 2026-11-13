@@ -4,11 +4,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { openDb } from '../src/lib/db.js';
+import { applyRetention } from '../src/retention.js';
 import {
   NO_URL,
   backfillRiskLatest,
   upsertRiskLatest,
   refreshRiskLatest,
+  recordRiskScores,
+  deleteRiskScoresForRuns,
 } from '../src/lib/risk-latest.js';
 
 type Raw = Database.Database;
@@ -128,5 +131,99 @@ describe('refreshRiskLatest', () => {
     raw.exec('DELETE FROM risk_scores');
     refreshRiskLatest(raw, ['a.example.com']);
     expect(latest(raw, 'a.example.com')).toBeUndefined();
+  });
+});
+
+const tmpDb = (): string =>
+  path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'risk-latest-')), 'scan.db');
+
+describe('created_at after a prune', () => {
+  it('is re-derived as the oldest remaining computed_at, not kept from the deleted run', () => {
+    const db = openDb(':memory:');
+    const runs = ['2026-01-01', '2026-01-02', '2026-01-03'].map((d) => db.startRun('risk', {}, `${d}T00:00:00Z`));
+    ['2026-01-01', '2026-01-02', '2026-01-03'].forEach((d, i) =>
+      recordRiskScores(db.raw, [{ target: 'a.example.com', score: 10 + i, breakdownJson: '{}' }], `${d}T00:00:00Z`, runs[i]!));
+    expect(latest(db.raw, 'a.example.com')!.created_at).toBe('2026-01-01T00:00:00Z');
+    db.raw.transaction(() => deleteRiskScoresForRuns(db.raw, [runs[0]!])).immediate();
+    expect(latest(db.raw, 'a.example.com')).toMatchObject({
+      score: 12, created_at: '2026-01-02T00:00:00Z', updated_at: '2026-01-03T00:00:00Z',
+    });
+  });
+
+  it('a new run keeps the existing created_at', () => {
+    const db = openDb(':memory:');
+    const r1 = db.startRun('risk', {}, '2026-01-01T00:00:00Z');
+    const r2 = db.startRun('risk', {}, '2026-01-02T00:00:00Z');
+    recordRiskScores(db.raw, [{ target: 'a.example.com', score: 1, breakdownJson: '{}' }], '2026-01-01T00:00:00Z', r1);
+    recordRiskScores(db.raw, [{ target: 'a.example.com', score: 2, breakdownJson: '{}' }], '2026-01-02T00:00:00Z', r2);
+    expect(latest(db.raw, 'a.example.com')!.created_at).toBe('2026-01-01T00:00:00Z');
+  });
+});
+
+describe('backfill under concurrency', () => {
+  it('a second handle on the same file opens without error', () => {
+    const file = tmpDb();
+    const a = openDb(file);
+    addScore(a.raw, 'a.example.com', 5, '2026-01-01T00:00:00Z');
+    a.raw.exec('DELETE FROM risk_latest');
+    a.close();
+    const b = openDb(file);
+    const c = openDb(file);
+    expect(count(c.raw)).toBe(1);
+    b.close(); c.close();
+  });
+
+  it('does not fail when another handle fills risk_latest after the empty check', () => {
+    const file = tmpDb();
+    const seed = openDb(file);
+    addScore(seed.raw, 'a.example.com', 5, '2026-01-01T00:00:00Z');
+    seed.raw.exec('DELETE FROM risk_latest');
+    const rival = new Database(file);
+    rival.pragma('busy_timeout = 5000');
+    let fired = false;
+    const hook = () => {
+      if (fired) return;
+      fired = true;
+      rival.exec(`INSERT INTO risk_latest(target, score, created_at, updated_at)
+                  VALUES('a.example.com', 5, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`);
+    };
+    // Stand-in for a concurrent opener that wins the race between the check and the write.
+    const racing = new Proxy(seed.raw, {
+      get(target, prop) {
+        if (prop !== 'transaction') {
+          const v = Reflect.get(target, prop, target);
+          return typeof v === 'function' ? v.bind(target) : v;
+        }
+        return (fn: (...a: unknown[]) => unknown) => {
+          const t = target.transaction(fn);
+          const wrap = Object.assign((...a: unknown[]) => { hook(); return t(...a); }, {
+            immediate: (...a: unknown[]) => { hook(); return t.immediate(...a); },
+          });
+          return wrap;
+        };
+      },
+    }) as Raw;
+    expect(() => backfillRiskLatest(racing)).not.toThrow();
+    expect(fired).toBe(true);
+    expect(count(seed.raw)).toBe(1);
+    rival.close(); seed.close();
+  });
+});
+
+describe('deleteRiskScoresForRuns in WAL with a competing writer', () => {
+  it('waits out busy_timeout instead of failing at once', () => {
+    const file = tmpDb();
+    const db = openDb(file);
+    const r1 = db.startRun('risk', {}, '2026-01-01T00:00:00Z');
+    recordRiskScores(db.raw, [{ target: 'a.example.com', score: 1, breakdownJson: '{}' }], '2026-01-01T00:00:00Z', r1);
+    const other = new Database(file);
+    other.exec('BEGIN IMMEDIATE');
+    db.raw.pragma('busy_timeout = 400');
+    const t0 = Date.now();
+    expect(() => applyRetention(db.raw, [r1])).toThrow(/SQLITE_BUSY|database is locked/);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(350);
+    other.exec('ROLLBACK');
+    expect(() => applyRetention(db.raw, [r1])).not.toThrow();
+    other.close(); db.close();
   });
 });

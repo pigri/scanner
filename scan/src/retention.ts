@@ -1,6 +1,7 @@
 #!/usr/bin/env -S node --loader tsx
 import fs from 'node:fs';
 import path from 'node:path';
+import type Database from 'better-sqlite3';
 import { openDb } from './lib/db.js';
 import { deleteRiskScoresForRuns } from './lib/risk-latest.js';
 import { runsToPrune, type RunRow } from './lib/retention.js';
@@ -62,6 +63,26 @@ function deleteDirRecursive(dirPath: string): void {
   fs.rmSync(dirPath, { recursive: true, force: true });
 }
 
+/** Delete the given runs, their child rows and their risk_scores in one write transaction. */
+export function applyRetention(raw: Database.Database, runIds: number[]): void {
+  const del = raw.prepare('DELETE FROM runs WHERE id = ?');
+  const delFindings = raw.prepare('DELETE FROM findings WHERE run_id = ?');
+  const delPorts = raw.prepare('DELETE FROM ports WHERE run_id = ?');
+  const delHttp = raw.prepare('DELETE FROM http_probes WHERE run_id = ?');
+  const delShots = raw.prepare('DELETE FROM screenshots WHERE run_id = ?');
+
+  raw.transaction((ids: number[]) => {
+    for (const id of ids) {
+      deleteRiskScoresForRuns(raw, [id]);
+      delFindings.run(id);
+      delPorts.run(id);
+      delHttp.run(id);
+      delShots.run(id);
+      del.run(id);
+    }
+  }).immediate(runIds);
+}
+
 function main(): void {
   const opts = parseArgs(process.argv);
   if (opts.help) { usage(); process.exit(0); }
@@ -93,23 +114,7 @@ function main(): void {
     return;
   }
 
-  const del = db.raw.prepare('DELETE FROM runs WHERE id = ?');
-  const delFindings = db.raw.prepare('DELETE FROM findings WHERE run_id = ?');
-  const delPorts = db.raw.prepare('DELETE FROM ports WHERE run_id = ?');
-  const delHttp = db.raw.prepare('DELETE FROM http_probes WHERE run_id = ?');
-  const delShots = db.raw.prepare('DELETE FROM screenshots WHERE run_id = ?');
-
-  const tx = db.raw.transaction((ids: number[]) => {
-    for (const id of ids) {
-      deleteRiskScoresForRuns(db.raw, [id]);
-      delFindings.run(id);
-      delPorts.run(id);
-      delHttp.run(id);
-      delShots.run(id);
-      del.run(id);
-    }
-  });
-  tx(prunable.map((r) => r.id));
+  applyRetention(db.raw, prunable.map((r) => r.id));
 
   let removed = 0;
   for (const r of prunable) {
@@ -120,4 +125,5 @@ function main(): void {
   db.close();
 }
 
-main();
+// Only run when invoked directly, so tests can import applyRetention.
+if (process.argv[1] && process.argv[1].endsWith('retention.ts')) main();

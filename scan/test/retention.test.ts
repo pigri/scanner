@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { applyRetention } from '../src/retention.js';
 import { runsToPrune, type RunRow } from '../src/lib/retention.js';
 import { openDb } from '../src/lib/db.js';
 import { recordRiskScores, deleteRiskScoresForRuns } from '../src/lib/risk-latest.js';
@@ -56,5 +57,22 @@ describe('deleteRiskScoresForRuns (retention)', () => {
     recordRiskScores(db.raw, [{ target: 'a.example.com', score: 10, breakdownJson: '{}' }], '2026-01-01T00:00:00Z', r1);
     db.raw.transaction(() => deleteRiskScoresForRuns(db.raw, [r1]))();
     expect(db.raw.prepare('SELECT * FROM risk_latest').all()).toEqual([]);
+  });
+});
+
+describe('applyRetention (the retention CLI body)', () => {
+  it('deletes runs and children and keeps risk_latest in step', () => {
+    const db = openDb(':memory:');
+    const r1 = db.startRun('risk', {}, '2026-01-01T00:00:00Z');
+    const r2 = db.startRun('risk', {}, '2026-01-02T00:00:00Z');
+    recordRiskScores(db.raw, [{ target: 'a.example.com', score: 10, breakdownJson: '{}' }], '2026-01-01T00:00:00Z', r1);
+    recordRiskScores(db.raw, [
+      { target: 'a.example.com', score: 50, breakdownJson: '{}' },
+      { target: 'b.example.com', score: 5, breakdownJson: '{}' },
+    ], '2026-01-02T00:00:00Z', r2);
+    applyRetention(db.raw, [r2]);
+    expect(db.raw.prepare('SELECT id FROM runs').all()).toEqual([{ id: r1 }]);
+    expect(db.raw.prepare('SELECT target, score FROM risk_latest ORDER BY target').all())
+      .toEqual([{ target: 'a.example.com', score: 10 }]);
   });
 });
