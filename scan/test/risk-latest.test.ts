@@ -46,9 +46,11 @@ describe('latestRiskRow', () => {
   it('returns the newest row, ties broken by the highest id', () => {
     const { raw } = openDb(':memory:');
     addScore(raw, 'a.example.com', 10, '2026-01-01');
-    addScore(raw, 'a.example.com', 20, '2026-01-02');
+    // The higher id gets the lower score: idx_risk_target_ca_score orders ties by
+    // score, so only id DESC can pick 20 here.
     addScore(raw, 'a.example.com', 55, '2026-01-02');
-    expect(latestRiskRow(raw).get('a.example.com')).toEqual({ score: 55, breakdown_json: '{}', computed_at: '2026-01-02' });
+    addScore(raw, 'a.example.com', 20, '2026-01-02');
+    expect(latestRiskRow(raw).get('a.example.com')).toEqual({ score: 20, breakdown_json: '{}', computed_at: '2026-01-02' });
     expect(latestRiskRow(raw).get('missing.example.com')).toBeUndefined();
   });
 });
@@ -59,13 +61,13 @@ describe('backfillRiskLatest', () => {
     addScore(raw, 'a.example.com', 10, '2026-01-01');
     addScore(raw, 'a.example.com', 30, '2026-01-03');
     addScore(raw, 'a.example.com', 20, '2026-01-02');
-    addScore(raw, 'b.example.com', 5, '2026-01-01');
-    addScore(raw, 'b.example.com', 7, '2026-01-01'); // tie: higher id wins
+    addScore(raw, 'b.example.com', 7, '2026-01-01');
+    addScore(raw, 'b.example.com', 5, '2026-01-01'); // tie: higher id wins, though its score is lower
     addScore(raw, 'https://a.example.com', 99, '2026-01-05');
     backfillRiskLatest(raw);
     expect(count(raw)).toBe(2);
     expect(latest(raw, 'a.example.com')).toMatchObject({ score: 30, updated_at: '2026-01-03', created_at: '2026-01-01' });
-    expect(latest(raw, 'b.example.com')?.score).toBe(7);
+    expect(latest(raw, 'b.example.com')?.score).toBe(5);
   });
 
   it('does nothing on a populated table', () => {
