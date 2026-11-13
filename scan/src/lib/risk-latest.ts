@@ -9,9 +9,25 @@ export const NO_URL = `target NOT LIKE 'http://%' AND target NOT LIKE 'https://%
 const isUrlTarget = (t: string): boolean => t.startsWith('http://') || t.startsWith('https://');
 
 // risk_latest holds one row per non-URL target: the risk_scores row with the
-// greatest computed_at, ties broken by the highest id. Queries below walk
-// idx_risk_target_ca_score (target, computed_at, score); the id tie-break needs a
-// small temp b-tree per target, so they are index-assisted, not index-only.
+// greatest computed_at, ties broken by the highest id. Invariant: every writer
+// (recordRiskScores, deleteRiskScoresForRuns) skips URL targets, so risk_latest
+// never holds one and readers need no NO_URL filter on it. risk_scores itself
+// can hold URL rows.
+// Queries below walk idx_risk_target_ca_score (target, computed_at, score); the id
+// tie-break needs a small temp b-tree per target, so they are index-assisted, not
+// index-only.
+
+/** SQL selecting `cols` from the latest risk_scores row of `target` (a SQL expression). */
+export const latestRiskRowSql = (cols: string, target = '?'): string =>
+  `SELECT ${cols} FROM risk_scores WHERE target = ${target} ORDER BY computed_at DESC, id DESC LIMIT 1`;
+
+export interface LatestRiskRow { score: number; breakdown_json: string; computed_at: string }
+
+/** Prepared lookup: get(target) -> the latest score row, or undefined. */
+export function latestRiskRow(raw: Database.Database): Database.Statement<[string], LatestRiskRow | undefined> {
+  return raw.prepare(latestRiskRowSql('score, breakdown_json, computed_at')) as
+    Database.Statement<[string], LatestRiskRow | undefined>;
+}
 
 /**
  * Fill risk_latest from risk_scores when it is empty. Idempotent and safe against
@@ -29,10 +45,7 @@ export function backfillRiskLatest(raw: Database.Database): void {
              (SELECT MIN(computed_at) FROM risk_scores WHERE target = t.target),
              r.computed_at
       FROM (SELECT DISTINCT target FROM risk_scores WHERE ${NO_URL}) t
-      JOIN risk_scores r ON r.id = (
-        SELECT id FROM risk_scores WHERE target = t.target
-        ORDER BY computed_at DESC, id DESC LIMIT 1
-      )
+      JOIN risk_scores r ON r.id = (${latestRiskRowSql('id', 't.target')})
     `);
   }).immediate();
 }
@@ -59,9 +72,7 @@ export function upsertRiskLatest(
 
 /** Re-derive each target from the risk_scores that remain; drop it if none. */
 export function refreshRiskLatest(raw: Database.Database, targets: Iterable<string>): void {
-  const newest = raw.prepare(
-    'SELECT score, computed_at FROM risk_scores WHERE target = ? ORDER BY computed_at DESC, id DESC LIMIT 1'
-  );
+  const newest = raw.prepare(latestRiskRowSql('score, computed_at'));
   const oldest = raw.prepare('SELECT MIN(computed_at) m FROM risk_scores WHERE target = ?');
   const del = raw.prepare('DELETE FROM risk_latest WHERE target = ?');
   const up = upsertRiskLatest(raw, 'reset-created');

@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { openDb } from './lib/db.js';
+import { latestRiskRow } from './lib/risk-latest.js';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
 import { createLogger } from './lib/log.js';
 import { runQueueLoop, type BatchOutcome } from './lib/queue-loop.js';
@@ -61,7 +62,7 @@ function gatherTargetData(db: ReturnType<typeof openDb>, target: string, nowIso:
   const http = (db.raw.prepare('SELECT url, status_code, web_server, tech_json FROM http_probes WHERE target = ?').all(target) as { url: string; status_code: number | null; web_server: string | null; tech_json: string | null }[])
     .map((r): ReportHttp => ({ url: r.url, status_code: r.status_code, web_server: r.web_server, tech: r.tech_json ? JSON.parse(r.tech_json) as string[] : null }));
   const findings = db.raw.prepare('SELECT severity, tool, title, cve FROM findings WHERE target = ?').all(target) as ReportFinding[];
-  const risk = db.raw.prepare('SELECT score FROM risk_scores WHERE target = ? ORDER BY computed_at DESC LIMIT 1').get(target) as { score: number } | undefined;
+  const risk = latestRiskRow(db.raw).get(target);
   return { target, generatedAt: nowIso, riskScore: risk?.score ?? null, ports, http, findings };
 }
 
