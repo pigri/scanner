@@ -15,6 +15,7 @@ import { resolveDbArg } from './lib/db-arg.js';
 import { NEWS_FIRSTS_SQL } from './lib/news-sql.js';
 import { filterAndFacet } from './lib/target-filter.js';
 import { CERT_ORG_SQL } from './lib/cert-org.js';
+import { TARGET_AGG_SQL } from './lib/target-agg.js';
 
 interface Opts {
   scanDb: string;
@@ -150,7 +151,7 @@ function logicalFindings(): LogicalFinding[] {
 interface TargetRow {
   target: string; score: number; created_at: string | null; updated_at: string | null;
   critical: number; high: number; medium: number; low: number; info: number;
-  findings: number; cves: number;
+  findings: number; cves: number; versionMatch: number;
   organization: string | null;
   active: number;
 }
@@ -183,18 +184,13 @@ function targetRows(): TargetRow[] {
        rstime AS MATERIALIZED (
          SELECT target, MIN(computed_at) created_at, MAX(computed_at) updated_at
          FROM risk_scores WHERE ${NO_URL} GROUP BY target),
-       agg AS MATERIALIZED (
-         SELECT target,
-           SUM(severity='critical') critical, SUM(severity='high') high,
-           SUM(severity='medium') medium, SUM(severity='low') low, SUM(severity='info') info,
-           COUNT(*) findings,
-           SUM(CASE WHEN cve IS NOT NULL AND cve!='' THEN 1 ELSE 0 END) cves
-         FROM findings GROUP BY target),
+       agg AS MATERIALIZED (${TARGET_AGG_SQL}),
        certorg AS MATERIALIZED (${CERT_ORG_SQL})
        SELECT latest.target target, latest.score score, rstime.created_at, rstime.updated_at,
          COALESCE(agg.critical,0) critical, COALESCE(agg.high,0) high, COALESCE(agg.medium,0) medium,
          COALESCE(agg.low,0) low, COALESCE(agg.info,0) info,
          COALESCE(agg.findings,0) findings, COALESCE(agg.cves,0) cves,
+         COALESCE(agg.versionMatch,0) versionMatch,
          certorg.organization organization,
          COALESCE(host_state.active,1) active
        FROM latest JOIN rstime ON rstime.target = latest.target
@@ -1469,7 +1465,7 @@ async function renderTargets(){
   })(),el('span',{class:'muted'},num(d.total)+' targets'));
   const cveSel=fsel(tState.cve,[{value:'',label:'CVE: any'},{value:'1',label:'has CVE'},{value:'0',label:'no CVE'}],v=>{tState.cve=v;tState.offset=0;renderTargets();});
   const orgSel=fsel(tState.org,[{value:'',label:'org: any'},...(d.orgs||[]).map(o=>({value:o.org,label:o.org+' ('+num(o.c)+')'}))],v=>{tState.org=v;tState.offset=0;renderTargets();});
-  const sortSel=fsel(tState.sort,[{value:'score',label:'sort: risk score'},{value:'critical',label:'sort: critical'},{value:'high',label:'sort: high'},{value:'findings',label:'sort: findings'},{value:'cves',label:'sort: CVEs'},{value:'updated',label:'sort: updated'},{value:'created',label:'sort: created'},{value:'target',label:'sort: name'}],v=>{tState.sort=v;tState.offset=0;renderTargets();});
+  const sortSel=fsel(tState.sort,[{value:'score',label:'sort: risk score'},{value:'critical',label:'sort: critical'},{value:'high',label:'sort: high'},{value:'findings',label:'sort: findings'},{value:'cves',label:'sort: CVEs'},{value:'versionMatch',label:'sort: version-match CVEs'},{value:'updated',label:'sort: updated'},{value:'created',label:'sort: created'},{value:'target',label:'sort: name'}],v=>{tState.sort=v;tState.offset=0;renderTargets();});
   const minS=el('input',{type:'number',min:'0',max:'100',placeholder:'min',value:tState.minScore,style:'width:70px',title:'min risk score'});
   minS.addEventListener('change',()=>{tState.minScore=minS.value;tState.offset=0;renderTargets();});
   const maxS=el('input',{type:'number',min:'0',max:'100',placeholder:'max',value:tState.maxScore,style:'width:70px',title:'max risk score'});
@@ -1485,10 +1481,11 @@ async function renderTargets(){
     r.medium?el('span',{class:'pill sev-medium'},r.medium):'',
     num(r.findings),
     r.cves?el('span',{class:'pill sev-critical'},r.cves):'',
+    r.versionMatch?el('span',{class:'pill',title:'distinct CVEs inferred from version banners (version-match)'},r.versionMatch):'',
     el('span',{class:'mono muted'},isoSec(r.created_at)),
     el('span',{class:'mono muted'},isoSec(r.updated_at))]);
   setView(sevChips,filterRow,
-    el('div',{class:'panel'},table(['Target','Organization','Score','Crit','High','Med','Findings','CVEs','Created','Updated'],rows,[2,6]),pager(tState,d.total,renderTargets)));
+    el('div',{class:'panel'},table(['Target','Organization','Score','Crit','High','Med','Findings','CVEs','VM CVEs','Created','Updated'],rows,[2,6]),pager(tState,d.total,renderTargets)));
 }
 
 async function renderTarget(t){

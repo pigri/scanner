@@ -12,6 +12,7 @@ function row(o: Partial<TargetRowLike> & { target: string }): TargetRowLike {
     info: o.info ?? 0,
     findings: o.findings ?? 0,
     cves: o.cves ?? 0,
+    versionMatch: o.versionMatch ?? 0,
     created_at: o.created_at ?? null,
     updated_at: o.updated_at ?? null,
     organization: o.organization ?? null,
@@ -78,6 +79,22 @@ describe('filterAndFacet', () => {
   it('sort=target orders by name ascending', () => {
     const r = filterAndFacet(rows, { sort: 'target' });
     expect(r.rows.map((x) => x.target)).toEqual(['a.example.com', 'b.example.com', 'c.other.com']);
+  });
+
+  it('sort=versionMatch orders by version-match CVE count desc, score then name as tie-breaks', () => {
+    const vm = [
+      row({ target: 'many.example.com', score: 10, versionMatch: 111 }),
+      row({ target: 'few.example.com', score: 95, versionMatch: 2 }),
+      row({ target: 'mid.example.com', score: 50, versionMatch: 40 }),
+      row({ target: 'tie.example.com', score: 30, versionMatch: 40 }),
+    ];
+    const r = filterAndFacet(vm, { sort: 'versionMatch' });
+    expect(r.rows.map((x) => x.target)).toEqual([
+      'many.example.com', // 111
+      'mid.example.com',  // 40, score 50 beats tie's 30
+      'tie.example.com',  // 40, lower score
+      'few.example.com',  // 2
+    ]);
   });
 
   it('org filter keeps only rows with the exact Organization; null-org rows excluded', () => {
