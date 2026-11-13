@@ -33,8 +33,9 @@ const RULES: Rule[] = [
   // OpenSSL — 1.0.x / 1.1.x are EOL
   { re: /OpenSSL\/(1\.0\.[\d]+[a-z]?|1\.1\.[\d]+[a-z]?)/i, sev: 'high', cat: 'eol-openssl',
     title: (m) => `EOL OpenSSL ${m[1]} disclosed (1.0/1.1 series are past EOL)` },
-  // PHP EOL: <=7.4 is EOL, <=8.0 is EOL
-  { re: /PHP\/(4\.|5\.|7\.|8\.0\.)([\d.]+)/i, sev: 'high', cat: 'eol-php',
+  // PHP EOL: <=7.4 is EOL, <=8.0 is EOL. Header form `PHP/5.3.3` and tech-list form `PHP:5.3.3`;
+  // the minor/patch part is optional (`PHP:7`, `PHP:5.6`) and 8.1+ must not match.
+  { re: /PHP[\/:](4|5|7|8\.0)(?!\d)((?:\.\d+)*)/i, sev: 'high', cat: 'eol-php',
     title: (m) => `EOL PHP ${m[1]}${m[2]} disclosed` },
   // MinIO Community Edition is unmaintained; any disclosure (server header or console) is signal.
   { re: /MinIO/i, sev: 'high', cat: 'eol-minio',
