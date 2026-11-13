@@ -5,7 +5,7 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/home/pigri/gen0sec/redteam/scan
-# HU-egress worker fleet. Uses the 'scanvpn-hu' netns (Windscribe-HU) so
+# HU-egress worker fleet. Uses the 'scanvpn-hu' netns (WireGuard, HU exit) so
 # HU-geo-blocked targets (nebih.gov.hu et al.) actually respond. Only claims
 # rows whose target ends in .gov.hu or .hu — everything else is left to the
 # foreign-egress fleet (scan-worker@). The two fleets partition scan_queue by

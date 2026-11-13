@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Recreate the 'scanvpn-hu' network namespace + wgscan-hu WireGuard interface so
-# the HU-egress scan workers (scan-worker-hu@) leave via the Windscribe HU
-# tunnel and never the host IP. This is the HU twin of scanvpn-netns.sh; the two
+# the HU-egress scan workers (scan-worker-hu@) leave via a WireGuard tunnel with
+# a Hungarian exit and never the host IP. This is the HU twin of scanvpn-netns.sh; the two
 # namespaces are independent and the fleet is split by target suffix (see
 # scan-worker-hu@.service / scan-worker@.service).
 #
@@ -21,13 +21,13 @@
 # => "latest handshake" absent, 0 B received) while TCP egress still works, the
 # usual cause is the host firewall dropping the UDP *return* traffic, not a bad
 # config. On the Hetzner stateless firewall that means a missing inbound rule for
-# "udp, source port 443" — see deploy/README.md.
+# udp with the endpoint's port as SOURCE port — see deploy/README.md.
 set -euo pipefail
 
 NS=scanvpn-hu
 IF=wgscan-hu
 CONF=/etc/wireguard/scanvpn-hu.conf
-MTU=1320   # Windscribe WireGuard MTU; not carried in the .conf, so set here.
+MTU=1320   # Conservative WireGuard MTU; not carried in the .conf, so set here.
 
 # Address(es) and DNS are read straight from $CONF so this script never carries a
 # per-key assignment (the keys rotate, and the repo is public). wg-quick strip
@@ -101,7 +101,7 @@ check() {
   probe=${dns:-1.1.1.1}   # a routed-through-the-tunnel target to provoke a handshake
   for _ in $(seq 8); do
     ip netns exec "$NS" ping -c1 -W2 "$probe" >/dev/null 2>&1 || true
-    # First peer only: the Windscribe conf is single-peer. `|| true` so a transient
+    # First peer only: the conf is single-peer. `|| true` so a transient
     # `wg show` error is retried like a missing handshake, not treated as fatal
     # (pipefail would otherwise abort the whole retry loop on one hiccup).
     hs=$(ip netns exec "$NS" wg show "$IF" latest-handshakes 2>/dev/null | awk '{print $2; exit}') || true
@@ -112,7 +112,7 @@ check() {
     sleep 2
   done
   echo "scanvpn-netns-hu: $IF has no recent WireGuard handshake — tunnel is not passing traffic." >&2
-  echo "scanvpn-netns-hu: WireGuard is UDP-only; check the host firewall allows inbound udp src-port 443 (see deploy/README.md)." >&2
+  echo "scanvpn-netns-hu: WireGuard is UDP-only; check the host firewall allows inbound udp from the endpoint's port (see deploy/README.md)." >&2
   down   # tear the dead tunnel down ourselves so the stale netns can't linger and
          # fool scan-worker-hu@'s presence-only guard into draining the queue.
   return 1

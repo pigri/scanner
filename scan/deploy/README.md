@@ -28,7 +28,7 @@ never leaves the host IP, and the fleet is split by target country (commit
 | Worker unit            | netns        | Claims                      | Egress        |
 | ---------------------- | ------------ | --------------------------- | ------------- |
 | `scan-worker@`         | `scanvpn`    | everything **except** `.hu` | Windscribe    |
-| `scan-worker-hu@`      | `scanvpn-hu` | **only** `.gov.hu` / `.hu`  | Windscribe-HU |
+| `scan-worker-hu@`      | `scanvpn-hu` | **only** `.gov.hu` / `.hu`  | WireGuard, HU exit |
 
 Each worker's `ExecStartPre` **fails closed** (refuses to start) until its netns
 exists, so the netns units below are a hard prerequisite. If `scanvpn-hu` is
@@ -60,10 +60,23 @@ systemctl --user is-active scan-worker@1 scan-worker@2 scan-worker-hu@1 scan-wor
 ```
 
 Both scripts read the tunnel's address(es) and DNS straight from their
-`/etc/wireguard/scanvpn{,-hu}.conf`, so rotating the Windscribe key means
-replacing only that file and restarting the matching `scanvpn-netns{,-hu}` unit —
-no edit to the script. Re-add the `PersistentKeepalive = 25` line to the new conf
-(the Windscribe export drops it); see the troubleshooting note below for why.
+`/etc/wireguard/scanvpn{,-hu}.conf`, so rotating a key or switching the WireGuard
+provider means replacing only that file and restarting the matching
+`scanvpn-netns{,-hu}` unit — no edit to the script. Re-add the
+`PersistentKeepalive = 25` line to the new conf (many provider exports drop it);
+see the troubleshooting note below for why.
+
+If the conf carries an IPv6 `Address`, `up()` also installs an IPv6 default route
+through the tunnel. Keep IPv6 only when the exit really routes IPv6 to the
+internet; otherwise remove the IPv6 entries from `Address` and `DNS`, so IPv6
+fails at once with "network unreachable" and tools fall back to IPv4.
+
+The netns units are **system** units but the workers are **user** units, and a
+worker joins its namespace only when it starts. Restarting `scanvpn-netns{,-hu}`
+replaces the namespace, so restart the matching workers afterwards
+(`systemctl --user restart scan-worker-hu@1 scan-worker-hu@2`); otherwise they
+keep running in the old, deleted namespace. `sudo ip netns pids scanvpn-hu` lists
+the processes in the current one.
 
 ### Troubleshooting: tunnel comes up but never handshakes
 
@@ -76,10 +89,19 @@ WireGuard is **UDP-only**, and the host's stateless firewall (Hetzner Robot)
 does not auto-allow return packets: outbound "allow all" lets the handshake
 *init* leave, and TCP replies get back in via the usual `tcp established`
 (dport 32768-65535, flag `ack`) rule — but there is **no UDP equivalent**, so the
-server's reply (UDP, **source port 443**) hits the default `discard`. Fix is an
-**incoming** rule: `udp`, source port `443`, action `accept` (match on source
-port — the host's WG listen port is random per restart). Commit that rule into
+server's reply (UDP, **source port = the endpoint's port** from the conf's
+`Endpoint`, e.g. `443` for Windscribe or `51820` for a stock WireGuard server)
+hits the default `discard`. Fix is an **incoming** rule: `udp`, that source port,
+action `accept` (match on source port — the host's WG listen port is random per
+restart). Commit that rule into
 whatever manages the firewall, or the next apply silently re-breaks every tunnel.
+
+On a self-hosted WireGuard server, a newly created peer can also show this
+pattern: the exported conf works only once the server has applied the new peer.
+Until then the server ignores its handshakes, while existing peers keep working.
+Capture on the host uplink (`tcpdump -ni <uplink> udp and host <endpoint-ip>`) to
+tell the cases apart: replies arriving there but not in `wg show` point at the host
+firewall; no replies at all point at the server or an upstream filter.
 
 Both `scanvpn-netns.service` and `scanvpn-netns-hu.service` now **fail closed on
 a dead tunnel**: their `ExecStartPost` (`scanvpn-netns{,-hu}.sh check`) provokes a
@@ -97,8 +119,8 @@ daily recon refresh (`scan-feed`) with no systemd-level error. Failing the netns
 unit closed is what surfaces that instead of letting it rot unnoticed.
 
 Set `PersistentKeepalive = 25` in **both** `scanvpn.conf` and `scanvpn-hu.conf` —
-treat it as a required default, not an optional extra. The Windscribe `.conf`
-export omits it, so it has to be re-added by hand after every key rotation; a conf
+treat it as a required default, not an optional extra. Provider `.conf`
+exports often omit it, so it has to be re-added by hand after every key rotation; a conf
 that is missing it comes up fine but then lets an idle tunnel's handshake age out,
 forcing the netns `check` to re-trigger one on each start. With it, the tunnel
 self-maintains the handshake and the check just confirms it. `up()` loads the
