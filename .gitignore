@@ -65,3 +65,6 @@ rustscan-targets.txt
 # Editor / OS
 .DS_Store
 *.swp
+
+# local CT aggregator API key (ctlogs.dev) — never commit
+.ctlogs
