@@ -15,7 +15,7 @@ import { resolveDbArg } from './lib/db-arg.js';
 import { filterAndFacet } from './lib/target-filter.js';
 import { buildNewsSql } from './lib/news-sql.js';
 import { TARGET_ROWS_SQL, riskLatestMissingMessage } from './lib/target-rows-sql.js';
-import { NO_URL } from './lib/risk-latest.js';
+import { NO_URL, latestRiskRow } from './lib/risk-latest.js';
 
 interface Opts {
   scanDb: string;
@@ -144,10 +144,9 @@ function logicalFindings(): LogicalFinding[] {
   return rows;
 }
 
-// Per-target aggregate: latest risk score, first/last assessment, finding
-// severity tallies and CVE count. Computed once with GROUP-BY passes and cached
-// briefly — risk_scores can be very large (hourly snapshots), so recomputing it
-// on every pagination/filter request was the source of slow paging.
+// Per-target row: latest risk score and first/last assessment (read from the
+// small risk_latest table), finding severity tallies and CVE count. Cached
+// briefly so pagination/filter requests do not recompute the findings aggregate.
 interface TargetRow {
   target: string; score: number; created_at: string | null; updated_at: string | null;
   critical: number; high: number; medium: number; low: number; info: number;
@@ -364,10 +363,9 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
   targets(q) {
     const minRaw = q.get('minScore');
     const maxRaw = q.get('maxScore');
-    // The heavy per-target aggregate (over a now-large risk_scores) is computed
-    // once and cached; all filtering/sorting/paging/faceting happens in JS (in
-    // filterAndFacet) so pagination and filter changes are instant instead of
-    // re-scanning the DB.
+    // The per-target rows (risk_latest joined with the findings aggregate) are
+    // computed once and cached; filtering/sorting/paging/faceting happens in JS
+    // (filterAndFacet), so paging does not re-query the DB.
     return filterAndFacet(targetRows(), {
       search: q.get('q') || '',
       sevList: (q.get('severity') || '').split(','),
@@ -385,12 +383,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
   target(q) {
     const t = (q.get('t') || '').trim();
     if (!t) return { error: 'missing target' };
-    const risk = scan
-      .prepare(
-        `SELECT score, breakdown_json, computed_at FROM risk_scores
-         WHERE target=? ORDER BY computed_at DESC LIMIT 1`,
-      )
-      .get(t) as { score: number; breakdown_json: string; computed_at: string } | undefined;
+    const risk = latestRiskRow(scan).get(t);
     const span = scan
       .prepare(
         `SELECT MIN(computed_at) created_at, MAX(computed_at) updated_at FROM risk_scores WHERE target=?`,

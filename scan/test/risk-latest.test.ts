@@ -12,6 +12,7 @@ import {
   refreshRiskLatest,
   recordRiskScores,
   deleteRiskScoresForRuns,
+  latestRiskRow,
 } from '../src/lib/risk-latest.js';
 
 type Raw = Database.Database;
@@ -38,6 +39,17 @@ describe('NO_URL', () => {
     for (const t of ['a.example.com', 'http://a.example.com', 'https://a.example.com']) addScore(raw, t, 1, '2026-01-01');
     const rows = raw.prepare(`SELECT target FROM risk_scores WHERE ${NO_URL}`).all() as { target: string }[];
     expect(rows.map((r) => r.target)).toEqual(['a.example.com']);
+  });
+});
+
+describe('latestRiskRow', () => {
+  it('returns the newest row, ties broken by the highest id', () => {
+    const { raw } = openDb(':memory:');
+    addScore(raw, 'a.example.com', 10, '2026-01-01');
+    addScore(raw, 'a.example.com', 20, '2026-01-02');
+    addScore(raw, 'a.example.com', 55, '2026-01-02');
+    expect(latestRiskRow(raw).get('a.example.com')).toEqual({ score: 55, breakdown_json: '{}', computed_at: '2026-01-02' });
+    expect(latestRiskRow(raw).get('missing.example.com')).toBeUndefined();
   });
 });
 
