@@ -51,10 +51,10 @@ export interface ScoreOptions {
 
 /**
  * Points for a recent network change (new country or ASN, or an IP in an ASN the
- * target did not use before). The size is the owner's call; 0 keeps scores as
- * they were until it is set.
+ * target did not use before). Kept well below the foreign-host weight: a move is a
+ * weaker signal than where the host is. Measure a new value with `risk-dry-run`.
  */
-export const NETWORK_CHANGED_BUMP = 0;
+export const NETWORK_CHANGED_BUMP = 5;
 
 export interface Breakdown {
   critical: number;

@@ -167,21 +167,26 @@ describe('pickCountry', () => {
 
 describe('computeScore: networkChanged', () => {
   const changed = { count: 2 };
-  it('NETWORK_CHANGED_BUMP is a placeholder 0 until the owner decides', () => {
-    expect(NETWORK_CHANGED_BUMP).toBe(0);
+  it('NETWORK_CHANGED_BUMP is 5', () => {
+    expect(NETWORK_CHANGED_BUMP).toBe(5);
+  });
+  it('adds the default bump once when the target changed network', () => {
+    const r = computeScore({ ...base(), networkChange: changed });
+    expect(r.score).toBe(computeScore(base()).score + 5);
+    expect(r.breakdown.networkChanged).toBe(5);
   });
   it('adds the injected bump once, whatever the event count, and shows it', () => {
     const s = { ...base(), networkChange: changed };
-    const r = computeScore(s, { networkChangedBump: 5 });
-    expect(r.score).toBe(5);
-    expect(r.breakdown.networkChanged).toBe(5);
+    const r = computeScore(s, { networkChangedBump: 3 });
+    expect(r.score).toBe(3);
+    expect(r.breakdown.networkChanged).toBe(3);
     expect(r.breakdown.networkChangedEvents).toBe(2);
-    expect(r.breakdown.total).toBe(5);
+    expect(r.breakdown.total).toBe(3);
   });
-  it('leaves the score unchanged with bump 0 (the default)', () => {
+  it('leaves the score unchanged with an injected bump of 0', () => {
     const s = { ...base(), networkChange: changed };
-    expect(computeScore(s).score).toBe(computeScore(base()).score);
-    expect(computeScore(s).breakdown.networkChanged).toBe(0);
+    expect(computeScore(s, { networkChangedBump: 0 }).score).toBe(computeScore(base()).score);
+    expect(computeScore(s, { networkChangedBump: 0 }).breakdown.networkChanged).toBe(0);
   });
   it('leaves the score unchanged with no events, even with a bump', () => {
     expect(computeScore(base(), { networkChangedBump: 5 }).score).toBe(0);
