@@ -170,11 +170,19 @@ export function ingestSslyzeOutput(db: Db, text: string, now: string, runId: num
   return { rows: rows.length, findings, certs };
 }
 
-// Ingests one sslyze output and always finishes the run and closes the db, even when
-// ingest throws; the error is logged and rethrown, not swallowed.
-export function ingestAndFinishRun(db: Db, text: string, now: string, runId: number, scanned: number): SslyzeIngest | null {
+// Reads and ingests one sslyze output, and always finishes the run and closes the db.
+// A failed read counts as unusable output: one line with the error name, no message.
+// A throw after a successful read is logged and rethrown, not swallowed.
+export function ingestAndFinishRun(db: Db, read: () => string, now: string, runId: number, scanned: number): SslyzeIngest | null {
   let result: SslyzeIngest | null = null;
   try {
+    let text: string;
+    try {
+      text = read();
+    } catch (err) {
+      console.error(`sslyze: cannot read the output file: ${err instanceof Error ? err.name : 'error'}`);
+      return null;
+    }
     result = ingestSslyzeOutput(db, text, now, runId);
     return result;
   } catch (err) {

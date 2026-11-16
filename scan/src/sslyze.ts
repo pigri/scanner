@@ -104,7 +104,7 @@ Wrapper flags (before '--'):
     return;
   }
 
-  const ingested = ingestAndFinishRun(db, fs.readFileSync(outFile, 'utf8'), now, runId, scanTargets.length);
+  const ingested = ingestAndFinishRun(db, () => fs.readFileSync(outFile, 'utf8'), now, runId, scanTargets.length);
   if (!ingested) return;
   const { rows, findings, certs } = ingested;
   console.error(`sslyze done: +${findings} finding(s), +${certs} cert(s) across ${rows} scanned host(s), run #${runId}`);

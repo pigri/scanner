@@ -166,7 +166,7 @@ describe('ingestAndFinishRun', () => {
     const { db, runId } = setup();
     const finish = vi.spyOn(db, 'finishRun');
     const close = vi.spyOn(db, 'close');
-    const r = ingestAndFinishRun(db, text(), NOW, runId, 9);
+    const r = ingestAndFinishRun(db, () => text(), NOW, runId, 9);
     expect(r).toEqual({ rows: 1, findings: 3, certs: 1 });
     expect(finish).toHaveBeenCalledWith(runId, expect.objectContaining({ targetsCount: 1, findingsCount: 3 }));
     expect(close).toHaveBeenCalledTimes(1);
@@ -176,7 +176,7 @@ describe('ingestAndFinishRun', () => {
     const { db, runId } = setup();
     const finish = vi.spyOn(db, 'finishRun');
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    expect(ingestAndFinishRun(db, 'null', NOW, runId, 9)).toBeNull();
+    expect(ingestAndFinishRun(db, () => 'null', NOW, runId, 9)).toBeNull();
     expect(finish).toHaveBeenCalledWith(runId, expect.objectContaining({ targetsCount: 9, findingsCount: 0 }));
   });
 
@@ -186,9 +186,22 @@ describe('ingestAndFinishRun', () => {
     const finish = vi.spyOn(db, 'finishRun');
     const close = vi.spyOn(db, 'close');
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
-    expect(() => ingestAndFinishRun(db, text(), NOW, runId, 9)).toThrow('boom');
+    expect(() => ingestAndFinishRun(db, () => text(), NOW, runId, 9)).toThrow('boom');
     expect(finish).toHaveBeenCalledWith(runId, expect.objectContaining({ targetsCount: 9, findingsCount: 0 }));
     expect(close).toHaveBeenCalledTimes(1);
     expect(log.mock.calls.map((c) => String(c[0])).join('\n')).toContain('boom');
+  });
+
+  it('finishes the run and closes the db when the file cannot be read, without rethrowing', () => {
+    const { db, runId } = setup();
+    const finish = vi.spyOn(db, 'finishRun');
+    const close = vi.spyOn(db, 'close');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const read = (): string => { throw Object.assign(new Error('EACCES: /secret/path'), { code: 'EACCES' }); };
+    expect(ingestAndFinishRun(db, read, NOW, runId, 9)).toBeNull();
+    expect(finish).toHaveBeenCalledWith(runId, expect.objectContaining({ targetsCount: 9, findingsCount: 0 }));
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(String(log.mock.calls[0]?.[0])).not.toContain('/secret/path');
   });
 });
