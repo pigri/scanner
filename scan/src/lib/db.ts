@@ -32,6 +32,7 @@ export interface PortRow {
 export interface HttpProbeRow {
   target: string;
   url: string;
+  ip?: string | null;
   status_code?: number | null;
   title?: string | null;
   web_server?: string | null;
@@ -206,6 +207,19 @@ export function openDb(dbPath: string, options: OpenDbOptions = {}): Db {
     }).immediate();
   }
 
+  // Same pattern for the columns added with the HTTP evidence source.
+  for (const [table, col, ddl] of [
+    ['http_probes', 'ip', 'TEXT'],
+    ['target_network', 'from_http', 'INTEGER NOT NULL DEFAULT 0'],
+  ] as const) {
+    const has = () => (raw.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).some((r) => r.name === col);
+    if (!has()) {
+      raw.transaction(() => {
+        if (!has()) raw.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${ddl}`);
+      }).immediate();
+    }
+  }
+
   // Queue claim ownership: who holds an in_progress row and when it last proved
   // it is alive, so abandoned rows can be reset (see queue.ts reapStale).
   for (const table of ['scan_queue', 'report_queue'] as const) {
@@ -229,8 +243,8 @@ export function openDb(dbPath: string, options: OpenDbOptions = {}): Db {
     VALUES(@target, @ip, @port, @protocol, @service, @product, @version, @tunnel, @extrainfo, @seen_at, @run_id)
   `);
   const insertHttpStmt = raw.prepare(`
-    INSERT INTO http_probes(target, url, status_code, title, web_server, tech_json, content_length, hash_body, seen_at, run_id)
-    VALUES(@target, @url, @status_code, @title, @web_server, @tech_json, @content_length, @hash_body, @seen_at, @run_id)
+    INSERT INTO http_probes(target, url, ip, status_code, title, web_server, tech_json, content_length, hash_body, seen_at, run_id)
+    VALUES(@target, @url, @ip, @status_code, @title, @web_server, @tech_json, @content_length, @hash_body, @seen_at, @run_id)
   `);
   const insertFindingStmt = raw.prepare(`
     INSERT INTO findings(tool, target, category, severity, title, cve, matched_at, meta_json, seen_at, run_id, needs_review)
@@ -320,7 +334,7 @@ export function openDb(dbPath: string, options: OpenDbOptions = {}): Db {
     },
     insertHttpProbe(row, at, runId): void {
       insertHttpStmt.run({
-        target: row.target, url: row.url,
+        target: row.target, url: row.url, ip: row.ip ?? null,
         status_code: row.status_code ?? null,
         title: row.title ?? null,
         web_server: row.web_server ?? null,

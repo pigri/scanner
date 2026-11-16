@@ -17,7 +17,7 @@ import { buildNewsSql } from './lib/news-sql.js';
 import { TARGET_ROWS_SQL, riskLatestMissingMessage } from './lib/target-rows-sql.js';
 import { NO_URL, latestRiskRow } from './lib/risk-latest.js';
 import {
-  TARGET_NETWORK_SQL,
+  targetNetworkSql,
   TARGET_NETWORK_LIST_SQL,
   TARGET_NETWORK_LIST_NO_QUEUE_SQL,
   shapeNetworkRows,
@@ -561,7 +561,9 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
         : { state: queueRow.status === 'failed' ? 'failed' : queueRow.status === 'in_progress' ? 'scanning' : 'queued' };
     const lastAnswered = newestAnswer(answered);
     const network = tableExists(scan, 'target_network')
-      ? shapeNetworkRows(scan.prepare(TARGET_NETWORK_SQL).all(t) as NetworkDbRow[], {
+      ? shapeNetworkRows(scan.prepare(targetNetworkSql(
+          (scan.prepare('PRAGMA table_info(target_network)').all() as { name: string }[]).some((c) => c.name === 'from_http'),
+        )).all(t) as NetworkDbRow[], {
           startedAt: doneStart,
           dnsUntracked: tracking.untracked === 1,
           trackingStart: tracking.tracking_start,

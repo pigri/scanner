@@ -286,3 +286,24 @@ describe('GET /api/target on a DB without dns_records.last_seen', () => {
     expect(d.dnsTrackedSince).toBeNull();
   }, 40_000);
 });
+
+describe('a DB whose target_network predates from_http', () => {
+  const dropFromHttp = (raw: ReturnType<typeof openDb>['raw']) => raw.exec('ALTER TABLE target_network DROP COLUMN from_http');
+
+  it('answers /api/targets with 200', async () => {
+    const base = await startUi(seed(false, dropFromHttp));
+    const r = await fetch(`${base}/api/targets?limit=100`);
+    expect(r.status).toBe(200);
+    const d = (await r.json()) as any;
+    expect(d.rows.find((x: any) => x.target === 'host.example')).toMatchObject({ countries: ['HU'] });
+  }, 40_000);
+
+  it('answers /api/target with 200 and no http in seenVia', async () => {
+    const base = await startUi(seed(false, dropFromHttp));
+    const r = await fetch(`${base}/api/target?t=host.example`);
+    expect(r.status).toBe(200);
+    const d = (await r.json()) as any;
+    expect(d.network.length).toBeGreaterThan(0);
+    expect(d.network.every((n: any) => !n.seenVia.includes('http'))).toBe(true);
+  }, 40_000);
+});

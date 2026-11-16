@@ -1,6 +1,9 @@
-export const TARGET_NETWORK_SQL = `SELECT ip, ip_version, ip_class, asn, as_name, as_domain, country_code, country,
-  geo_checked_at, ptr_json, from_ports, from_dns, first_seen, last_seen
+/** The UI never migrates: pass hasFromHttp=false for a DB whose target_network predates from_http. */
+export const targetNetworkSql = (hasFromHttp: boolean): string => `SELECT ip, ip_version, ip_class, asn, as_name, as_domain, country_code, country,
+  geo_checked_at, ptr_json, from_ports, from_dns, ${hasFromHttp ? 'from_http' : '0 AS from_http'}, first_seen, last_seen
   FROM target_network WHERE target = ? ORDER BY ip LIMIT 500`;
+
+export const TARGET_NETWORK_SQL = targetNetworkSql(true);
 
 /** `started_at` is the target's latest done scan, NULL when it has none. */
 export const TARGET_NETWORK_LIST_SQL = `SELECT tn.target, tn.ip, tn.asn, tn.country_code, tn.country,
@@ -69,6 +72,7 @@ export interface NetworkDbRow {
   ptr_json: string | null;
   from_ports: number;
   from_dns: number;
+  from_http: number;
   first_seen: string;
   last_seen: string;
 }
@@ -86,7 +90,7 @@ export interface NetworkRow {
   geo: 'hit' | 'miss' | 'none';
   /** null = not looked up; [] = looked up, no PTR. */
   ptr: string[] | null;
-  seenVia: ('ports' | 'dns')[];
+  seenVia: ('ports' | 'dns' | 'http')[];
   first_seen: string;
   last_seen: string;
   scanStatus: ScanStatus;
@@ -154,7 +158,7 @@ export function shapeNetworkRows(rows: readonly NetworkDbRow[], scanCtx?: ScanCo
     country: r.country,
     geo: r.geo_checked_at === null ? 'none' : r.asn !== null || r.country_code !== null ? 'hit' : 'miss',
     ptr: parsePtr(r.ptr_json),
-    seenVia: [...(r.from_ports ? ['ports' as const] : []), ...(r.from_dns ? ['dns' as const] : [])],
+    seenVia: [...(r.from_ports ? ['ports' as const] : []), ...(r.from_dns ? ['dns' as const] : []), ...(r.from_http ? ['http' as const] : [])],
     first_seen: r.first_seen,
     last_seen: r.last_seen,
     scanStatus: status[i]!,

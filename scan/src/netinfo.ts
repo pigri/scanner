@@ -1,6 +1,6 @@
 #!/usr/bin/env -S node --loader tsx
 // netinfo: derive per-target network info (IP, version, class, ASN, country)
-// from ports and dns_records evidence into target_network. Local reads and one
+// from ports, dns_records and http_probes evidence into target_network. Local reads and one
 // MMDB file: no network I/O except PTR lookups with --ptr. A missing MMDB still
 // writes the IP rows.
 import fs from 'node:fs';
@@ -13,7 +13,7 @@ const DEFAULT_PTR_BUDGET_SEC = 60;
 
 function usage(): void {
   console.error(commonUsage('netinfo', `
-Writes one target_network row per (target, IP) found in ports / dns_records.
+Writes one target_network row per (target, IP) found in ports / dns_records / http_probes.
 
   --all             derive rows for every scan_queue target (backfill; ignores --targets)
   --mmdb <path>     ip database (default: $GEOIP_MMDB, else ${DEFAULT_MMDB})

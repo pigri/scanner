@@ -52,19 +52,20 @@ interface NetRow {
   ptr_json: string | null;
   from_ports: number;
   from_dns: number;
+  from_http: number;
   first_seen: string;
   last_seen: string;
 }
 
-interface Evidence { ports: boolean; dns: boolean; first: string; last: string }
+interface Evidence { ports: boolean; dns: boolean; http: boolean; first: string; last: string }
 
 const UPSERT = `
 INSERT INTO target_network
   (target, ip, ip_version, ip_class, asn, as_name, as_domain, country_code, country,
-   geo_checked_at, ptr_json, from_ports, from_dns, first_seen, last_seen)
+   geo_checked_at, ptr_json, from_ports, from_dns, from_http, first_seen, last_seen)
 VALUES
   (@target, @ip, @ip_version, @ip_class, @asn, @as_name, @as_domain, @country_code, @country,
-   @geo_checked_at, @ptr_json, @from_ports, @from_dns, @first_seen, @last_seen)
+   @geo_checked_at, @ptr_json, @from_ports, @from_dns, @from_http, @first_seen, @last_seen)
 ON CONFLICT(target, ip) DO UPDATE SET
   ip_version     = excluded.ip_version,
   ip_class       = excluded.ip_class,
@@ -77,6 +78,7 @@ ON CONFLICT(target, ip) DO UPDATE SET
   ptr_json       = COALESCE(excluded.ptr_json, ptr_json),
   from_ports     = MAX(from_ports, excluded.from_ports),
   from_dns       = MAX(from_dns, excluded.from_dns),
+  from_http      = MAX(from_http, excluded.from_http),
   first_seen     = MIN(first_seen, excluded.first_seen),
   last_seen      = MAX(last_seen, excluded.last_seen)`;
 
@@ -84,6 +86,9 @@ const PORTS_SQL = `SELECT ip, MIN(seen_at) f, MAX(seen_at) l FROM ports
   WHERE target = ? AND ip IS NOT NULL AND ip != '' GROUP BY ip`;
 const DNS_SQL = `SELECT value ip, MIN(seen_at) f, MAX(COALESCE(last_seen, seen_at)) l FROM dns_records
   WHERE target = ? AND type IN ('A','AAAA') GROUP BY value`;
+
+const HTTP_SQL = `SELECT ip, MIN(seen_at) f, MAX(seen_at) l FROM http_probes
+  WHERE target = ? AND ip IS NOT NULL AND ip != '' GROUP BY ip`;
 
 type EvidenceRow = { ip: string; f: string; l: string };
 
@@ -141,28 +146,30 @@ function derive(opts: NetinfoOpts): { out: NetRow[]; result: NetinfoResult } {
 
   const portsStmt = db.raw.prepare(PORTS_SQL);
   const dnsStmt = db.raw.prepare(DNS_SQL);
+  const httpStmt = db.raw.prepare(HTTP_SQL);
   const result: NetinfoResult = { targets: targets.size, rowsWritten: 0, skippedInvalid: 0, geoHits: 0, geoMisses: 0, ptr: noPtr() };
   const out: NetRow[] = [];
 
   for (const [target, identityAt] of targets) {
     const ev = new Map<string, { version: 4 | 6; e: Evidence }>();
-    const add = (raw: string, f: string, l: string, source: 'ports' | 'dns'): void => {
+    const add = (raw: string, f: string, l: string, source: 'ports' | 'dns' | 'http'): void => {
       const n = normalizeIp(raw);
       if (!n) { result.skippedInvalid++; return; }
       const cur = ev.get(n.ip);
       if (!cur) {
-        ev.set(n.ip, { version: n.version, e: { ports: source === 'ports', dns: source === 'dns', first: f, last: l } });
+        ev.set(n.ip, { version: n.version, e: { ports: source === 'ports', dns: source === 'dns', http: source === 'http', first: f, last: l } });
         return;
       }
-      if (source === 'ports') cur.e.ports = true; else cur.e.dns = true;
+      if (source === 'ports') cur.e.ports = true; else if (source === 'dns') cur.e.dns = true; else cur.e.http = true;
       if (f < cur.e.first) cur.e.first = f;
       if (l > cur.e.last) cur.e.last = l;
     };
     for (const r of portsStmt.all(target) as EvidenceRow[]) add(r.ip, r.f, r.l, 'ports');
     for (const r of dnsStmt.all(target) as EvidenceRow[]) add(r.ip, r.f, r.l, 'dns');
+    for (const r of httpStmt.all(target) as EvidenceRow[]) add(r.ip, r.f, r.l, 'http');
 
     const self = normalizeIp(target);
-    if (self && !ev.has(self.ip)) ev.set(self.ip, { version: self.version, e: { ports: false, dns: false, first: identityAt, last: identityAt } });
+    if (self && !ev.has(self.ip)) ev.set(self.ip, { version: self.version, e: { ports: false, dns: false, http: false, first: identityAt, last: identityAt } });
     else if (self) {
       const e = ev.get(self.ip)!.e;
       if (identityAt < e.first) e.first = identityAt;
@@ -183,7 +190,7 @@ function derive(opts: NetinfoOpts): { out: NetRow[]; result: NetinfoResult } {
         asn: g?.asn ?? null, as_name: g?.as_name ?? null, as_domain: g?.as_domain ?? null,
         country_code: g?.country_code ?? null, country: g?.country ?? null,
         geo_checked_at: checked, ptr_json: null,
-        from_ports: e.ports ? 1 : 0, from_dns: e.dns ? 1 : 0,
+        from_ports: e.ports ? 1 : 0, from_dns: e.dns ? 1 : 0, from_http: e.http ? 1 : 0,
         first_seen: e.first, last_seen: e.last,
       });
     }

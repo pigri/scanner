@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS http_probes (
   id             INTEGER PRIMARY KEY,
   target         TEXT NOT NULL,
   url            TEXT NOT NULL,
+  ip             TEXT,           -- address that answered; NULL on rows from before it was stored
   status_code    INTEGER,
   title          TEXT,
   web_server     TEXT,
@@ -292,8 +293,8 @@ CREATE TABLE IF NOT EXISTS host_state (
 );
 CREATE INDEX IF NOT EXISTS idx_host_state_active ON host_state(active);
 
--- Per-target network info: one row per (target, IP) derived from ports and
--- dns_records evidence. Written only by lib/netinfo.ts; rows are never deleted.
+-- Per-target network info: one row per (target, IP) derived from ports,
+-- dns_records and http_probes evidence. Written only by lib/netinfo.ts; rows are never deleted.
 CREATE TABLE IF NOT EXISTS target_network (
   target         TEXT NOT NULL,
   ip             TEXT NOT NULL,     -- canonical text form
@@ -308,6 +309,7 @@ CREATE TABLE IF NOT EXISTS target_network (
   ptr_json       TEXT,              -- NULL = not looked up; '[]' = no PTR
   from_ports     INTEGER NOT NULL DEFAULT 0,
   from_dns       INTEGER NOT NULL DEFAULT 0,
+  from_http      INTEGER NOT NULL DEFAULT 0,
   first_seen     TEXT NOT NULL,
   last_seen      TEXT NOT NULL,
   PRIMARY KEY (target, ip)
