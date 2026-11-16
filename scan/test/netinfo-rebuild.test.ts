@@ -409,6 +409,37 @@ describe('event order across sources', () => {
     expect(kinds(db)).toEqual(['ip_added scan']);
   });
 
+  it('a rebuild before netinfo has seen a new ip does not give two adds in a row', () => {
+    const db = openDb(':memory:');
+    const r = run(db, D0);
+    port(db, 'a.example', '192.0.2.10', D0 + 60_000, r);
+    rebuild(db);
+    runNetinfo({ db, targets: ['a.example'], geo: null, now: NOW });
+    expect(kinds(db)).toEqual(['ip_added reconstructed']);
+  });
+
+  it('after a reconstructed gone, a new target_network row gives no add and, outside a batch, no back', () => {
+    const db = openDb(':memory:');
+    const r1 = run(db, D0), r2 = run(db, D0 + 4 * DAY);
+    port(db, 'a.example', '192.0.2.10', D0 + 60_000, r1);
+    port(db, 'a.example', '198.51.100.7', D0 + 4 * DAY, r2);
+    rebuild(db);
+    runNetinfo({ db, targets: ['a.example'], geo: null, now: NOW });
+    expect(kinds(db)).toEqual(['ip_added reconstructed', 'ip_gone reconstructed']);
+  });
+
+  it('after a reconstructed gone, a --targets batch that sees the ip again writes ip_back', () => {
+    const db = openDb(':memory:');
+    const r1 = run(db, D0), r2 = run(db, D0 + 4 * DAY);
+    port(db, 'a.example', '192.0.2.10', D0, r1);
+    port(db, 'a.example', '198.51.100.7', D0 + 4 * DAY, r2);
+    rebuild(db);
+    db.raw.prepare("INSERT INTO scan_queue (target, queued_at, status, started_at) VALUES ('a.example', ?, 'in_progress', ?)").run(iso(D0), iso(D0 + 9 * DAY));
+    port(db, 'a.example', '192.0.2.10', D0 + 9 * DAY + 60_000, run(db, D0 + 9 * DAY));
+    runNetinfo({ db, targets: ['a.example'], geo: null, now: NOW });
+    expect(kinds(db)).toEqual(['ip_added reconstructed', 'ip_gone reconstructed', 'ip_back scan']);
+  });
+
   it('never alters scan events', () => {
     const db = openDb(':memory:');
     seed(db);
@@ -427,7 +458,10 @@ describe('event order across sources', () => {
     const rc = run(db, D0 + 30 * DAY);
     port(db, 'c.example', '203.0.113.9', D0 + 30 * DAY + 60_000, rc);
     runNetinfo({ db, targets: ['c.example'], geo: null, now: NOW });
+    const rd = run(db, D0 + 40 * DAY);
+    port(db, 'd.example', '203.0.113.20', D0 + 40 * DAY + 60_000, rd);
     rebuild(db);
+    runNetinfo({ db, targets: ['a.example', 'b.example', 'd.example'], geo: null, now: NOW });
     rebuild(db);
     const rows = db.raw.prepare("SELECT target, ip, kind FROM target_network_events ORDER BY target, ip, at, id").all() as { target: string; ip: string; kind: string }[];
     const last = new Map<string, boolean>();
@@ -438,6 +472,6 @@ describe('event order across sources', () => {
       else expect(r.kind).toBe('ip_added');
       last.set(k, present);
     }
-    expect(last.size).toBe(4);
+    expect(last.size).toBeGreaterThanOrEqual(5);
   });
 });

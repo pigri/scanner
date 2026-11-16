@@ -247,8 +247,10 @@ function write(opts: NetinfoOpts, out: NetRow[], result: NetinfoResult): void {
         const ev = (kind: string, at: string, oldCc: string | null, newCc: string | null, oldAsn: string | null, newAsn: string | null): void => {
           insertEvent.run({ target: r.target, ip: r.ip, kind, at, old_country_code: oldCc, new_country_code: newCc, old_asn: oldAsn, new_asn: newAsn, run_id: runId });
         };
+        const last = (lastPresence.get(r.target, r.ip) as { kind: string } | undefined)?.kind;
+        // An earlier rebuild may already have recorded this ip: never add a second ip_added.
         if (!before) {
-          ev('ip_added', after.first_seen, null, after.country_code, null, after.asn);
+          if (last === undefined) ev('ip_added', after.first_seen, null, after.country_code, null, after.asn);
         } else if (
           (before.country_code !== null && after.country_code !== before.country_code) ||
           (before.asn !== null && after.asn !== before.asn)
@@ -260,7 +262,6 @@ function write(opts: NetinfoOpts, out: NetRow[], result: NetinfoResult): void {
         if (!c) continue;
         if (trackingStart === undefined) trackingStart = (db.raw.prepare(TRACKING_START_SQL).get() as { t: string | null }).t;
         const status = scanStatus(after.last_seen, c.s, c.untracked, trackingStart);
-        const last = before ? (lastPresence.get(r.target, r.ip) as { kind: string } | undefined)?.kind : undefined;
         const present = last !== 'ip_gone';
         if (status === 'no' && present) ev('ip_gone', c.s, null, null, null, null);
         else if (status === 'yes' && !present) ev('ip_back', c.s, null, null, null, null);
