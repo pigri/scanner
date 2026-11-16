@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import maxmind from 'maxmind';
 import { openGeo, toGeoRow, wrapReader, DEFAULT_MMDB, MMDB_STALE_DAYS } from '../src/lib/geoip.js';
 
 const dirs: string[] = [];
@@ -30,6 +31,21 @@ describe('openGeo', () => {
     const f = join(tmpDir(), 'garbage.mmdb');
     writeFileSync(f, 'this is not a database\n'.repeat(100));
     expect(await openGeo(f)).toBeNull();
+  });
+
+  it('imports maxmind with a callable open, in the form lib/geoip.ts uses', () => {
+    expect(typeof maxmind.open).toBe('function');
+  });
+
+  it('fails a garbage file on parsing, not on a broken import', async () => {
+    const f = join(tmpDir(), 'garbage2.mmdb');
+    writeFileSync(f, 'this is not a database\n'.repeat(100));
+    const errs: unknown[] = [];
+    expect(await openGeo(f, (e) => errs.push(e))).toBeNull();
+    expect(errs).toHaveLength(1);
+    expect(errs[0]).toBeInstanceOf(Error);
+    expect(errs[0]).not.toBeInstanceOf(TypeError);
+    expect((errs[0] as Error).message).not.toMatch(/undefined|not a function/);
   });
 
   it('returns null for an empty file', async () => {

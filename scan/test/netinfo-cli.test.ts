@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { openDb } from '../src/lib/db.js';
-import { mmdbAgeWarning } from '../src/netinfo.js';
+import { mmdbAgeWarning, startNetinfoRun } from '../src/netinfo.js';
 
 const scanDir = path.resolve(__dirname, '..');
 const tsx = path.join(scanDir, 'node_modules', '.bin', 'tsx');
@@ -100,5 +100,25 @@ describe('mmdbAgeWarning', () => {
   });
   it('warns when the build time is unknown', () => {
     expect(mmdbAgeWarning(null, now)).toMatch(/unknown/);
+  });
+});
+
+describe('startNetinfoRun', () => {
+  it('has the 60s busy timeout in place when the first write happens', () => {
+    const db = openDb(path.join(tmp(), 'scan.db'));
+    try {
+      expect(db.raw.pragma('busy_timeout', { simple: true })).toBe(5000);
+      let seen: unknown = null;
+      const realStart = db.startRun.bind(db);
+      db.startRun = (tool, args, at) => {
+        seen = db.raw.pragma('busy_timeout', { simple: true });
+        return realStart(tool, args, at);
+      };
+      const id = startNetinfoRun(db, { mode: 'all' }, '2026-11-16T00:00:00.000Z');
+      expect(id).toBeGreaterThan(0);
+      expect(seen).toBe(60000);
+    } finally {
+      db.close();
+    }
   });
 });

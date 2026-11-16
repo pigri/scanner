@@ -4,7 +4,7 @@
 // MMDB file: no network I/O. A missing MMDB still writes the IP rows.
 import fs from 'node:fs';
 import { parseCommonCli, commonUsage, prepareTargets } from './lib/runner.js';
-import { openDb } from './lib/db.js';
+import { openDb, type Db } from './lib/db.js';
 import { openGeo, DEFAULT_MMDB, MMDB_STALE_DAYS } from './lib/geoip.js';
 import { runNetinfo } from './lib/netinfo.js';
 
@@ -38,6 +38,13 @@ export function mmdbAgeWarning(buildAt: string | null, now: Date): string | null
   return null;
 }
 
+/** Starts the run row. The first write on this connection, so it needs the long busy timeout. */
+export function startNetinfoRun(db: Db, args: Parameters<Db['startRun']>[1], now: string): number {
+  // Scan workers hold write locks for whole batches; openDb's 5s would lose that race.
+  db.raw.pragma('busy_timeout = 60000');
+  return db.startRun('netinfo', args, now);
+}
+
 async function main(): Promise<void> {
   const own = splitOwnFlags(process.argv);
   const opts = parseCommonCli(own.rest);
@@ -50,8 +57,9 @@ async function main(): Promise<void> {
     targets = prepareTargets(opts).targets;
   }
 
-  const geo = await openGeo(own.mmdb);
-  if (!geo) console.error(`WARNING: cannot read mmdb ${own.mmdb}; writing IP rows without geo`);
+  let geoErr: unknown;
+  const geo = await openGeo(own.mmdb, (e) => { geoErr = e; });
+  if (!geo) console.error(`WARNING: cannot read mmdb ${own.mmdb} (${geoErr instanceof Error ? geoErr.message : String(geoErr)}); writing IP rows without geo`);
   else {
     const warn = mmdbAgeWarning(geo.buildAt, new Date());
     if (warn) console.error(`WARNING: ${warn}`);
@@ -60,7 +68,7 @@ async function main(): Promise<void> {
   const db = openDb(opts.sqlite ?? 'scan.db');
   try {
     const now = new Date().toISOString();
-    const runId = db.startRun('netinfo', { mode: own.all ? 'all' : 'targets', mmdb: own.mmdb, geo: geo !== null }, now);
+    const runId = startNetinfoRun(db, { mode: own.all ? 'all' : 'targets', mmdb: own.mmdb, geo: geo !== null }, now);
     const r = runNetinfo({ db, targets, geo });
     db.finishRun(runId, {
       targetsCount: r.targets,

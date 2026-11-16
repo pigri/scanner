@@ -54,11 +54,12 @@ export function wrapReader(reader: MmdbReader): GeoLookup {
   };
 }
 
-/** Never throws: a missing or unreadable database gives null. */
-export async function openGeo(file: string): Promise<GeoLookup | null> {
+/** Never throws: a missing or unreadable database gives null. `onError` receives the reason. */
+export async function openGeo(file: string, onError?: (err: unknown) => void): Promise<GeoLookup | null> {
   try {
     return wrapReader(await maxmind.open<Record<string, unknown>>(file));
-  } catch {
+  } catch (err) {
+    try { onError?.(err); } catch { /* the contract is never to throw */ }
     return null;
   }
 }
