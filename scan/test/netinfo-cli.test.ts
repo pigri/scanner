@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { openDb } from '../src/lib/db.js';
+import { DEFAULT_MMDB } from '../src/lib/geoip.js';
 import { mmdbAgeWarning, startNetinfoRun, splitOwnFlags } from '../src/netinfo.js';
 
 const scanDir = path.resolve(__dirname, '..');
@@ -132,6 +133,16 @@ describe('splitOwnFlags', () => {
   const base = ['node', 'netinfo.ts'];
   it('defaults', () => {
     expect(splitOwnFlags(base)).toMatchObject({ ptr: false, ptrBudgetSec: 60 });
+  });
+  it('takes the mmdb path from GEOIP_MMDB when set', () => {
+    expect(splitOwnFlags(base, { GEOIP_MMDB: '/data/geo/x.mmdb' }).mmdb).toBe('/data/geo/x.mmdb');
+  });
+  it('keeps the default mmdb when GEOIP_MMDB is unset or empty', () => {
+    expect(splitOwnFlags(base, {}).mmdb).toBe(DEFAULT_MMDB);
+    expect(splitOwnFlags(base, { GEOIP_MMDB: '' }).mmdb).toBe(DEFAULT_MMDB);
+  });
+  it('lets --mmdb win over GEOIP_MMDB', () => {
+    expect(splitOwnFlags([...base, '--mmdb', '/flag.mmdb'], { GEOIP_MMDB: '/env.mmdb' }).mmdb).toBe('/flag.mmdb');
   });
   it('last of --ptr / --no-ptr wins', () => {
     expect(splitOwnFlags([...base, '--ptr', '--no-ptr']).ptr).toBe(false);

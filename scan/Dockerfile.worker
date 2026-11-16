@@ -6,7 +6,7 @@
 #                       auto-skips over WG/tun interfaces), nmap-udp (-sU via
 #                       sudo), nuclei (+ templates), takeover, testssl.sh,
 #                       gowitness, katana, gau, waybackurls, dnsx, checkdmarc
-#   scan-all stage 3  : wpscan, nuclei -l urls.txt, kiterunner, secrets (gitleaks
+#   scan-all stage 3  : netinfo (offline ip database, see below), wpscan, nuclei -l urls.txt, kiterunner, secrets (gitleaks
 #                       + trufflehog + gapi-key-check + vendor-key-enrich),
 #                       headers, ffuf, content-sigs, sslyze, cve-rollup,
 #                       cname-takeover
@@ -28,6 +28,11 @@
 #     network with a wg-quick sibling.
 #   * scan.db is expected as a bind-mounted writable file at /data/scan.db.
 #     recon.db (if used) mounts at /data/recon.db.
+#   * netinfo reads the ipinfo_lite MMDB offline; the image does not contain it
+#     and never downloads it. Mount the file read-only at
+#     /data/geo/ipinfo_lite.mmdb (`-v /path/ipinfo_lite.mmdb:/data/geo/ipinfo_lite.mmdb:ro`);
+#     GEOIP_MMDB below points netinfo there. Without the mount the stage still
+#     writes its rows, without geo.
 
 # ============================================================
 # Stage 1 — Go builder. Compiles every ProjectDiscovery / recon Go binary
@@ -220,6 +225,7 @@ USER scan
 # in at /data (writable). Configure via env at run time.
 ENV SCAN_DB=/data/scan.db \
     RECON_DB=/data/recon.db \
+    GEOIP_MMDB=/data/geo/ipinfo_lite.mmdb \
     SCOPE_TXT=/app/scope.txt \
     PATH=/opt/pipx/venvs/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin
 
