@@ -42,6 +42,13 @@ export interface QueueOps {
   stats(): QueueStats;
 }
 
+export interface DiscardedRow { target: string; started_at: string }
+export interface QueueHooks {
+  // Runs inside the transaction that releases, fails or reaps in_progress rows,
+  // before started_at is cleared. Gets only the rows that change.
+  onDiscard?(rows: readonly DiscardedRow[]): void;
+}
+
 export interface ReapOpts {
   atIso: string;
   // in_progress rows with heartbeat_at before this are abandoned.
@@ -65,7 +72,7 @@ export interface QueueFilter {
   excludeSuffixes?: readonly string[];
 }
 
-export function makeQueue(raw: Database.Database, table: string, filter: QueueFilter = {}): QueueOps {
+export function makeQueue(raw: Database.Database, table: string, filter: QueueFilter = {}, hooks: QueueHooks = {}): QueueOps {
   // table is an internal constant, never user input — but validate anyway since
   // it is interpolated into SQL.
   if (!/^[a-z_][a-z0-9_]*$/.test(table)) throw new Error(`invalid queue table name: ${table}`);
@@ -98,11 +105,12 @@ export function makeQueue(raw: Database.Database, table: string, filter: QueueFi
   const claimUpdateStmt = raw.prepare(`UPDATE ${table} SET status='in_progress', started_at=?, heartbeat_at=?, claimed_by=? WHERE id=?`);
   const markDoneStmt = raw.prepare(`UPDATE ${table} SET status='done', finished_at=?, run_id=? WHERE id=? AND status='in_progress' AND claimed_by IS ?`);
   const markFailedStmt = raw.prepare(`UPDATE ${table} SET status='failed', finished_at=?, error=?, attempts=attempts+1 WHERE id=? AND status='in_progress' AND claimed_by IS ?`);
+  const ownedStmt = raw.prepare(`SELECT target, started_at FROM ${table} WHERE id=? AND status='in_progress' AND claimed_by IS ?`);
   const heartbeatStmt = raw.prepare(`UPDATE ${table} SET heartbeat_at=? WHERE id=? AND status='in_progress' AND claimed_by IS ?`);
   // claimed_by = NULL when ownerId is undefined: NULL = NULL is never true, so an
   // ownerless call matches no row on that branch.
   const reapSelectStmt = raw.prepare(`
-    SELECT id, attempts, abandoned FROM ${table}
+    SELECT id, target, started_at, attempts, abandoned FROM ${table}
     WHERE status='in_progress' AND (
       heartbeat_at < @stale
       OR (heartbeat_at IS NULL AND started_at < @legacy)
@@ -138,18 +146,32 @@ export function makeQueue(raw: Database.Database, table: string, filter: QueueFi
     return n;
   }).immediate;
 
+  const discard = (rows: readonly DiscardedRow[]): void => {
+    const live = rows.filter((r) => r.started_at !== null);
+    if (live.length) hooks.onDiscard?.(live);
+  };
+
   const releaseTx = raw.transaction((ids: readonly number[], workerId: string | null): number => {
     let n = 0;
-    for (const id of ids) n += releaseStmt.run(id, workerId).changes;
+    for (const id of ids) {
+      discard(ownedStmt.all(id, workerId) as DiscardedRow[]);
+      n += releaseStmt.run(id, workerId).changes;
+    }
     return n;
+  }).immediate;
+
+  const markFailedTx = raw.transaction((id: number, error: string, atIso: string, workerId: string | null): void => {
+    discard(ownedStmt.all(id, workerId) as DiscardedRow[]);
+    markFailedStmt.run(atIso, error, id, workerId);
   }).immediate;
 
   // IMMEDIATE for the same reason as claimTx: a deferred read-then-write upgrade
   // can fail with SQLITE_BUSY under concurrent workers.
   const reapTx = raw.transaction((o: ReapOpts): ReapResult => {
     const max = o.maxAttempts ?? 3;
-    const rows = reapSelectStmt.all({ stale: o.staleBeforeIso, legacy: o.legacyBeforeIso, owner: o.ownerId ?? null }) as { id: number; attempts: number; abandoned: number }[];
+    const rows = reapSelectStmt.all({ stale: o.staleBeforeIso, legacy: o.legacyBeforeIso, owner: o.ownerId ?? null }) as { id: number; target: string; started_at: string; attempts: number; abandoned: number }[];
     const res: ReapResult = { requeued: 0, failed: 0 };
+    discard(rows);
     for (const r of rows) {
       const attempts = r.attempts + 1;
       const abandoned = r.abandoned + 1;
@@ -169,7 +191,7 @@ export function makeQueue(raw: Database.Database, table: string, filter: QueueFi
       // run_id is a nullable FK to runs(id); never store 0 (no such run row).
       markDoneStmt.run(atIso, runId && runId > 0 ? runId : null, id, workerId ?? null);
     },
-    markFailed: (id, error, atIso, workerId) => { markFailedStmt.run(atIso, error, id, workerId ?? null); },
+    markFailed: (id, error, atIso, workerId) => markFailedTx(id, error, atIso, workerId ?? null),
     release: (ids, workerId) => releaseTx(ids, workerId ?? null),
     stats: (): QueueStats => {
       const acc: QueueStats = { pending: 0, in_progress: 0, done: 0, failed: 0 };

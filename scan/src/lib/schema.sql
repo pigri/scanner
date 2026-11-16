@@ -316,7 +316,8 @@ CREATE TABLE IF NOT EXISTS target_network (
 ) WITHOUT ROWID;
 
 -- History of target_network: one row per change. Written only by netinfo (lib/netinfo.ts,
--- lib/netinfo-rebuild.ts); rows are never updated or deleted. source 'reconstructed' marks
+-- lib/netinfo-rebuild.ts); rows are never updated. The only deletes are the scan
+-- ip_gone/ip_back events of a discarded batch (lib/netinfo.ts retractBatchEvents). source 'reconstructed' marks
 -- events inferred from older evidence by `netinfo --rebuild-history`.
 CREATE TABLE IF NOT EXISTS target_network_events (
   id               INTEGER PRIMARY KEY,
