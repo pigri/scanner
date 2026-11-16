@@ -7,8 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, resolveOutputPath } from './lib/runner.js';
 import { openDb, type Db } from './lib/db.js';
-import { toCertRecords, quoteBigSerials, type SslyzeCertResult } from './lib/sslyze-cert.js';
-import { classifyRobot } from './lib/sslyze-robot.js';
+import { ingestAndFinishRun } from './lib/sslyze-ingest.js';
 
 // Live-HTTPS targets from either http_probes (https://) or a 443/tcp port.
 function loadHttpsTargets(db: Db, targets: readonly string[]): string[] {
@@ -25,41 +24,6 @@ function loadHttpsTargets(db: Db, targets: readonly string[]): string[] {
   for (const r of httpsRows) set.add(r.target);
   for (const r of portRows) set.add(r.target);
   return [...set];
-}
-
-interface SslyzeResult {
-  server_scan_results?: Array<{
-    server_location?: { hostname?: string; ip_address?: string; port?: number };
-    scan_status?: string;
-    scan_result?: {
-      heartbleed?: { result?: { is_vulnerable_to_heartbleed?: boolean } };
-      openssl_ccs_injection?: { result?: { is_vulnerable_to_ccs_injection?: boolean } };
-      robot?: { result?: { robot_result?: string } };
-      tls_compression?: { result?: { supports_compression?: boolean } };
-      session_renegotiation?: { result?: { supports_secure_renegotiation?: boolean; is_vulnerable_to_client_renegotiation_dos?: boolean } };
-      tls_extended_master_secret?: { result?: { supports_ems_extension?: boolean } };
-      tls_fallback_scsv?: { result?: { supports_fallback_scsv?: boolean } };
-      ssl_2_0_cipher_suites?: { result?: { is_tls_version_supported?: boolean } };
-      ssl_3_0_cipher_suites?: { result?: { is_tls_version_supported?: boolean } };
-      tls_1_0_cipher_suites?: { result?: { is_tls_version_supported?: boolean } };
-      tls_1_1_cipher_suites?: { result?: { is_tls_version_supported?: boolean } };
-      tls_1_2_cipher_suites?: { result?: { is_tls_version_supported?: boolean } };
-      tls_1_3_cipher_suites?: { result?: { is_tls_version_supported?: boolean } };
-      certificate_info?: { result?: {
-        certificate_deployments?: Array<{
-          leaf_certificate_has_must_staple_extension?: boolean;
-          leaf_certificate_is_ev?: boolean;
-          leaf_certificate_signed_certificate_timestamps_count?: number;
-          received_chain_contains_anchor_certificate?: boolean;
-          received_chain_has_valid_order?: boolean;
-          verified_chain_has_sha1_signature?: boolean;
-          verified_chain_has_legacy_symantec_anchor?: boolean;
-          ocsp_response?: unknown;
-          ocsp_response_is_trusted?: boolean;
-        }>;
-      } };
-    };
-  }>;
 }
 
 async function main(): Promise<void> {
@@ -140,100 +104,10 @@ Wrapper flags (before '--'):
     return;
   }
 
-  // Pre-quote big-integer serials before parsing (see quoteBigSerials).
-  const raw = JSON.parse(quoteBigSerials(fs.readFileSync(outFile, 'utf8'))) as SslyzeResult;
-  const rows = raw.server_scan_results ?? [];
-  let findings = 0;
-  const emit = (target: string, category: string, severity: string, title: string, meta: unknown): void => {
-    db.insertFinding({ tool: 'sslyze', target, category, severity, title, matched_at: target, meta }, now, runId);
-    findings++;
-  };
-
-  for (const row of rows) {
-    const target = row.server_location?.hostname;
-    if (!target || row.scan_status !== 'COMPLETED') continue;
-    const s = row.scan_result ?? {};
-
-    // ---- known-CVE vulnerability flags ----------------------------------
-    if (s.heartbleed?.result?.is_vulnerable_to_heartbleed) {
-      emit(target, 'heartbleed', 'critical', 'Heartbleed (CVE-2014-0160) — memory disclosure', {});
-    }
-    if (s.openssl_ccs_injection?.result?.is_vulnerable_to_ccs_injection) {
-      emit(target, 'ccs-injection', 'critical', 'OpenSSL CCS Injection (CVE-2014-0224) — MITM', {});
-    }
-    const robotResult = s.robot?.result?.robot_result;
-    const robot = classifyRobot(robotResult);
-    if (robot) emit(target, 'robot', robot.severity, robot.title, { detail: robotResult });
-    if (s.tls_compression?.result?.supports_compression) {
-      emit(target, 'crime', 'medium', 'TLS compression enabled (CRIME attack path)', {});
-    }
-    const reneg = s.session_renegotiation?.result;
-    if (reneg?.supports_secure_renegotiation === false) {
-      emit(target, 'secure-renegotiation', 'high', 'Server does not support secure TLS renegotiation', {});
-    }
-    if (reneg?.is_vulnerable_to_client_renegotiation_dos) {
-      emit(target, 'client-renegotiation-dos', 'high', 'Vulnerable to client-initiated renegotiation DoS', {});
-    }
-
-    // ---- deprecated protocol support ------------------------------------
-    if (s.ssl_2_0_cipher_suites?.result?.is_tls_version_supported) {
-      emit(target, 'sslv2', 'critical', 'SSLv2 supported (DROWN / broken)', {});
-    }
-    if (s.ssl_3_0_cipher_suites?.result?.is_tls_version_supported) {
-      emit(target, 'sslv3', 'high', 'SSLv3 supported (POODLE / deprecated)', {});
-    }
-    if (s.tls_1_0_cipher_suites?.result?.is_tls_version_supported) {
-      emit(target, 'tls-1.0', 'medium', 'TLS 1.0 supported (deprecated; PCI-DSS non-compliant)', {});
-    }
-    if (s.tls_1_1_cipher_suites?.result?.is_tls_version_supported) {
-      emit(target, 'tls-1.1', 'medium', 'TLS 1.1 supported (deprecated; PCI-DSS non-compliant)', {});
-    }
-    if (s.tls_1_3_cipher_suites?.result?.is_tls_version_supported === false) {
-      emit(target, 'no-tls-1.3', 'low', 'TLS 1.3 NOT supported — modern clients fall back', {});
-    }
-
-    // ---- TLS session hardening ------------------------------------------
-    if (s.tls_extended_master_secret?.result?.supports_ems_extension === false) {
-      emit(target, 'no-ems', 'low', 'Extended Master Secret (RFC 7627) not supported — weakens session binding', {});
-    }
-    if (s.tls_fallback_scsv?.result?.supports_fallback_scsv === false) {
-      emit(target, 'no-fallback-scsv', 'low', 'TLS_FALLBACK_SCSV not supported — downgrade attack risk', {});
-    }
-
-    // ---- Certificate deployment quality ---------------------------------
-    const dep = s.certificate_info?.result?.certificate_deployments?.[0];
-    if (dep) {
-      if (dep.verified_chain_has_sha1_signature) {
-        emit(target, 'chain-sha1', 'medium', 'Certificate chain contains SHA-1 signature (browsers block)', {});
-      }
-      if (dep.verified_chain_has_legacy_symantec_anchor) {
-        emit(target, 'symantec-anchor', 'medium', 'Chain terminates in a distrusted Symantec-era CA', {});
-      }
-      if (dep.received_chain_has_valid_order === false) {
-        emit(target, 'chain-order', 'low', 'Certificate chain sent in wrong order (some clients reject)', {});
-      }
-      const sctCount = dep.leaf_certificate_signed_certificate_timestamps_count ?? 0;
-      if (sctCount < 2) {
-        emit(target, 'sct-count', 'low', `Only ${sctCount} SCT(s) embedded — Chrome/Safari require ≥ 2`, { count: sctCount });
-      }
-      if (dep.leaf_certificate_has_must_staple_extension && !dep.ocsp_response_is_trusted) {
-        emit(target, 'ocsp-must-staple', 'medium', 'must-staple set but no valid OCSP response returned', {});
-      }
-    }
-  }
-
-  // Certificate inventory: sslyze collects the full leaf cert reliably, so it
-  // is the inventory source. Dedup is INSERT OR IGNORE on
-  // UNIQUE(target, port, fingerprint_sha256).
-  let certs = 0;
-  for (const cert of toCertRecords(raw as unknown as SslyzeCertResult)) {
-    db.insertCertificate(cert, now, runId);
-    certs++;
-  }
-
-  db.finishRun(runId, { targetsCount: rows.length, findingsCount: findings, at: new Date().toISOString() });
-  db.close();
-  console.error(`sslyze done: +${findings} finding(s), +${certs} cert(s) across ${rows.length} scanned host(s), run #${runId}`);
+  const ingested = ingestAndFinishRun(db, () => fs.readFileSync(outFile, 'utf8'), now, runId, scanTargets.length);
+  if (!ingested) return;
+  const { rows, findings, certs } = ingested;
+  console.error(`sslyze done: +${findings} finding(s), +${certs} cert(s) across ${rows} scanned host(s), run #${runId}`);
   console.error(`  sqlite: ${path.resolve(opts.sqlite)}`);
 }
 

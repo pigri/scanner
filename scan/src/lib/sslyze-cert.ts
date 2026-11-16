@@ -34,9 +34,16 @@ interface SslyzeServerResult {
 }
 export interface SslyzeCertResult { server_scan_results?: SslyzeServerResult[] }
 
+// The output is JSON from a scanned server: any field can have any type.
+type Obj = Record<string, unknown>;
+const obj = (v: unknown): Obj | null => (typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Obj) : null);
+const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
+const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
+const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
 /** sslyze base64 SHA-256 fingerprint → uppercase hex (stored/testssl format). */
 export function b64FingerprintToHex(b64: string | null | undefined): string | null {
-  if (!b64) return null;
+  if (!b64 || typeof b64 !== 'string') return null;
   const hex = Buffer.from(b64, 'base64').toString('hex');
   // A SHA-256 fingerprint is exactly 32 bytes; reject anything else so a
   // malformed value can never be stored in a shape that fails dedup against
@@ -57,15 +64,18 @@ export function quoteBigSerials(text: string): string {
 }
 
 /** "ECPublicKey" → "EC", "RSAPublicKey" → "RSA", else the name uppercased. */
-function keyAlgo(algorithm: string | undefined): string | null {
-  if (!algorithm) return null;
-  const base = algorithm.replace(/PublicKey$/i, '');
-  return (base || algorithm).toUpperCase();
+function keyAlgo(algorithm: unknown): string | null {
+  const a = str(algorithm);
+  if (!a) return null;
+  const base = a.replace(/PublicKey$/i, '');
+  return (base || a).toUpperCase();
 }
 
-function subjectAttr(subject: SslyzeName | undefined, oidName: string): string | null {
-  for (const a of subject?.attributes ?? []) {
-    if (a.oid?.name === oidName && a.value) return a.value;
+function subjectAttr(subject: Obj | null, oidName: string): string | null {
+  for (const raw of arr(subject?.attributes)) {
+    const a = obj(raw);
+    const value = str(a?.value);
+    if (obj(a?.oid)?.name === oidName && value) return value;
   }
   return null;
 }
@@ -73,38 +83,42 @@ function subjectAttr(subject: SslyzeName | undefined, oidName: string): string |
 /** All leaf certificates across every COMPLETED host, ready for insertCertificate. */
 export function toCertRecords(result: SslyzeCertResult): CertInput[] {
   const out: CertInput[] = [];
-  for (const row of result.server_scan_results ?? []) {
-    const target = row.server_location?.hostname;
-    if (!target || row.scan_status !== 'COMPLETED') continue;
-    const port = row.server_location?.port ?? null;
-    const deployments = row.scan_result?.certificate_info?.result?.certificate_deployments ?? [];
+  for (const rawRow of arr(obj(result)?.server_scan_results)) {
+    const row = obj(rawRow);
+    const loc = obj(row?.server_location);
+    const target = str(loc?.hostname);
+    if (!row || !target || row.scan_status !== 'COMPLETED') continue;
+    const port = num(loc?.port);
+    const deployments = arr(obj(obj(obj(row.scan_result)?.certificate_info)?.result)?.certificate_deployments);
     let certIndex = 0;
-    for (const dep of deployments) {
-      const leaf = dep.received_certificate_chain?.[0];
+    for (const rawDep of deployments) {
+      const leaf = obj(arr(obj(rawDep)?.received_certificate_chain)[0]);
       if (!leaf) continue;
-      const fingerprintSha256 = b64FingerprintToHex(leaf.fingerprint_sha256);
+      const fingerprintSha256 = b64FingerprintToHex(str(leaf.fingerprint_sha256));
       if (!fingerprintSha256) continue;
       certIndex += 1;
-      const san = [...new Set((leaf.subject_alternative_name?.dns_names ?? []).map((s) => s.trim()).filter(Boolean))];
-      const serial = leaf.serial_number == null ? null : String(leaf.serial_number);
-      const subjectDn = leaf.subject?.rfc4514_string ?? null;
-      const issuerDn = leaf.issuer?.rfc4514_string ?? null;
+      const subject = obj(leaf.subject);
+      const san = [...new Set(arr(obj(leaf.subject_alternative_name)?.dns_names).filter((x): x is string => typeof x === 'string').map((x) => x.trim()).filter(Boolean))];
+      const serial = typeof leaf.serial_number === 'string' || typeof leaf.serial_number === 'number' ? String(leaf.serial_number) : null;
+      const subjectDn = str(subject?.rfc4514_string);
+      const issuerDn = str(obj(leaf.issuer)?.rfc4514_string);
+      const pub = obj(leaf.public_key);
       out.push({
         target,
         port,
         certIndex,
-        commonName: subjectAttr(leaf.subject, 'commonName'),
-        organization: subjectAttr(leaf.subject, 'organizationName'),
-        orgUnit: subjectAttr(leaf.subject, 'organizationalUnitName'),
-        locality: subjectAttr(leaf.subject, 'localityName'),
-        country: subjectAttr(leaf.subject, 'countryName'),
+        commonName: subjectAttr(subject, 'commonName'),
+        organization: subjectAttr(subject, 'organizationName'),
+        orgUnit: subjectAttr(subject, 'organizationalUnitName'),
+        locality: subjectAttr(subject, 'localityName'),
+        country: subjectAttr(subject, 'countryName'),
         san,
         issuer: issuerDn,
-        notBefore: leaf.not_valid_before ?? null,
-        notAfter: leaf.not_valid_after ?? null,
-        keyAlgo: keyAlgo(leaf.public_key?.algorithm),
-        keySize: leaf.public_key?.key_size ?? null,
-        sigAlgo: leaf.signature_hash_algorithm?.name ?? null,
+        notBefore: str(leaf.not_valid_before),
+        notAfter: str(leaf.not_valid_after),
+        keyAlgo: keyAlgo(pub?.algorithm),
+        keySize: num(pub?.key_size),
+        sigAlgo: str(obj(leaf.signature_hash_algorithm)?.name),
         serial,
         fingerprintSha256,
         selfSigned: subjectDn != null && subjectDn === issuerDn,
