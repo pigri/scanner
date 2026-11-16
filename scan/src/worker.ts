@@ -11,7 +11,7 @@ import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
 import { createLogger, type Logger } from './lib/log.js';
 import { scanChildEnv, TUNED_SCAN_FLAGS } from './lib/scan-all-runner.js';
 import { preflightFromOpts, postBatchFromOpts, exitCodeFor, normalizeCountryCode, DEFAULT_ECHO_URL } from './lib/egress-check.js';
-import { DEFAULT_MMDB } from './lib/geoip.js';
+import { mmdbPath } from './lib/geoip.js';
 import { spawnGrouped, type SpawnedChild } from './lib/scan-child.js';
 import { runQueueLoop, type BatchOutcome } from './lib/queue-loop.js';
 
@@ -38,14 +38,14 @@ interface Opts {
   help?: boolean;
 }
 
-function parseArgs(argv: string[]): Opts {
+export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env): Opts {
   const opts: Opts = {
     db: resolveDbArg(argv), batchSize: 25, maxBatches: 0, scope: null, strict: false,
     logFile: null, watch: false, pollSec: 10,
     claimSuffixes: [], claimNotSuffixes: [], extraArgs: [],
     workerId: `${os.hostname()}:${process.pid}`,
     netns: null, dnsProbe: 'example.com', dnsTimeoutMs: 5000,
-    egressCountry: null, egressNotCountry: null, egressEchoUrl: DEFAULT_ECHO_URL, mmdb: DEFAULT_MMDB,
+    egressCountry: null, egressNotCountry: null, egressEchoUrl: DEFAULT_ECHO_URL, mmdb: mmdbPath(env),
   };
   let passthrough = false;
   for (let i = 2; i < argv.length; i++) {
@@ -110,7 +110,7 @@ Options:
                          releases the rows and exits 75. Off by default.
   --egress-not-country <CC>  same check, but the country must NOT equal <CC>
   --egress-echo-url <url>    IP-echo service (default: https://api.ipify.org)
-  --mmdb <file>          country database (default: ../discovery/ipinfo_lite.mmdb)
+  --mmdb <file>          country database (default: $GEOIP_MMDB, else ../discovery/ipinfo_lite.mmdb)
   --watch                daemon mode: when the queue drains, poll for new work
                          instead of exiting. Runs until SIGINT/SIGTERM.
   --poll-interval <sec>  seconds to sleep between polls in --watch (default: 10)
@@ -258,7 +258,10 @@ async function main(): Promise<void> {
   process.exitCode = exitCodeFor(result);
 }
 
-main().catch((err: unknown) => {
-  console.error('FATAL:', err instanceof Error ? err.message : String(err));
-  process.exit(1);
-});
+// Only run when invoked directly, so tests can import parseArgs.
+if (process.argv[1] && process.argv[1].endsWith('worker.ts')) {
+  main().catch((err: unknown) => {
+    console.error('FATAL:', err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });
+}

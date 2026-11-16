@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import maxmind from 'maxmind';
-import { openGeo, toGeoRow, wrapReader, DEFAULT_MMDB, MMDB_STALE_DAYS } from '../src/lib/geoip.js';
+import { openGeo, toGeoRow, wrapReader, mmdbPath, DEFAULT_MMDB, MMDB_STALE_DAYS } from '../src/lib/geoip.js';
 
 const dirs: string[] = [];
 function tmpDir(): string {
@@ -104,5 +104,16 @@ describe('wrapReader', () => {
     expect(wrapReader(reader).buildAt).toBe('2026-11-01T00:00:00.000Z');
     expect(wrapReader({ ...reader, metadata: { buildEpoch: new Date(NaN) } }).buildAt).toBeNull();
     expect(wrapReader({ ...reader, metadata: {} as never }).buildAt).toBeNull();
+  });
+});
+
+describe('mmdbPath', () => {
+  it('returns GEOIP_MMDB when set', () => {
+    expect(mmdbPath({ GEOIP_MMDB: '/data/geo/example.mmdb' })).toBe('/data/geo/example.mmdb');
+  });
+
+  it('falls back to the default when unset or empty', () => {
+    expect(mmdbPath({})).toBe(DEFAULT_MMDB);
+    expect(mmdbPath({ GEOIP_MMDB: '' })).toBe(DEFAULT_MMDB);
   });
 });

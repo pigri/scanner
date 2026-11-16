@@ -6,7 +6,7 @@
 import fs from 'node:fs';
 import { parseCommonCli, commonUsage, prepareTargets } from './lib/runner.js';
 import { openDb, type Db } from './lib/db.js';
-import { openGeo, DEFAULT_MMDB, MMDB_STALE_DAYS } from './lib/geoip.js';
+import { openGeo, mmdbPath, DEFAULT_MMDB, MMDB_STALE_DAYS } from './lib/geoip.js';
 import { runNetinfo, runNetinfoPtr } from './lib/netinfo.js';
 import { rebuildHistory } from './lib/netinfo-rebuild.js';
 
@@ -31,7 +31,7 @@ Writes one target_network row per (target, IP) found in ports / dns_records / ht
 /** Pull this tool's own flags out of argv, before or after `--`, so parseCommonCli does not mistake their values for targets. */
 export function splitOwnFlags(argv: string[], env: NodeJS.ProcessEnv = process.env): { rest: string[]; all: boolean; rebuild: boolean; mmdb: string; ptr: boolean; ptrBudgetSec: number } {
   const rest = argv.slice(0, 2);
-  let all = false, rebuild = false, mmdb = env.GEOIP_MMDB || DEFAULT_MMDB, ptr = false, ptrBudgetSec = DEFAULT_PTR_BUDGET_SEC;
+  let all = false, rebuild = false, mmdb = mmdbPath(env), ptr = false, ptrBudgetSec = DEFAULT_PTR_BUDGET_SEC;
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === '--all') all = true;

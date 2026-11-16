@@ -4,6 +4,10 @@ import maxmind from 'maxmind';
 export const DEFAULT_MMDB = '../discovery/ipinfo_lite.mmdb';
 export const MMDB_STALE_DAYS = 7;
 
+export function mmdbPath(env: NodeJS.ProcessEnv = process.env): string {
+  return env.GEOIP_MMDB || DEFAULT_MMDB;
+}
+
 const MAX_FIELD = 200;
 const FIELDS = ['asn', 'as_name', 'as_domain', 'country_code', 'country'] as const;
 
