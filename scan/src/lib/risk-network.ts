@@ -45,7 +45,9 @@ export function pickCountry(codes: readonly string[]): { code: string; counts: R
  * - an ip_added whose ASN is not among the ASNs of the target's strictly earlier
  *   events.
  * The target's first batch of ip_added events never counts: every event within
- * WINDOW_GAP_MS of its earliest event, or sharing that event's non-null run_id.
+ * WINDOW_GAP_MS of its earliest event, or, when both are scan events, sharing
+ * that event's non-null run_id. A history rebuild stamps every event it infers
+ * with its own run, so that run says nothing about batches.
  * Its ASNs seed the known set, so the first IPs of a new target are not a change.
  * A geo_changed is not exempt, because it always implies an earlier state.
  */
@@ -57,9 +59,9 @@ export function recentNetworkChange(events: readonly NetworkEvent[], now: string
     .filter((x) => Number.isFinite(x.at));
   if (timed.length === 0) return { count: 0 };
   const first = timed.reduce((m, x) => (x.at < m.at ? x : m));
-  const firstRun = first.e.run_id ?? null;
+  const firstRun = first.e.source === 'scan' ? first.e.run_id ?? null : null;
   const inFirst = (x: { e: NetworkEvent; at: number }): boolean =>
-    x.at - first.at <= WINDOW_GAP_MS || (firstRun !== null && x.e.run_id === firstRun);
+    x.at - first.at <= WINDOW_GAP_MS || (firstRun !== null && x.e.source === 'scan' && x.e.run_id === firstRun);
   let count = 0;
   for (const x of timed) {
     const { e, at } = x;

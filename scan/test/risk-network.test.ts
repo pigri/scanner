@@ -97,6 +97,25 @@ describe('recentNetworkChange', () => {
         add(10, '192.0.2.2', 'AS64497', { run_id: 7 }),
       ], NOW).count).toBe(0);
     });
+    it('does not treat the run of a history rebuild as one batch', () => {
+      const rec = { run_id: 9, source: 'reconstructed' };
+      expect(recentNetworkChange([
+        add(20 * 24, '192.0.2.1', 'AS64496', rec),
+        add(10 * 24, '192.0.2.2', 'AS64497', rec),
+      ], NOW).count).toBe(1);
+    });
+    it('does not join a reconstructed event to a scan batch by run id', () => {
+      expect(recentNetworkChange([
+        add(20, '192.0.2.1', 'AS64496', { run_id: 7 }),
+        add(10, '192.0.2.2', 'AS64497', { run_id: 7, source: 'reconstructed' }),
+      ], NOW).count).toBe(1);
+    });
+    it('does not join a scan event to a reconstructed first event by run id', () => {
+      expect(recentNetworkChange([
+        add(20, '192.0.2.1', 'AS64496', { run_id: 7, source: 'reconstructed' }),
+        add(10, '192.0.2.2', 'AS64497', { run_id: 7 }),
+      ], NOW).count).toBe(1);
+    });
     it('counts an IP 4 h after the first batch with a new ASN', () => {
       expect(recentNetworkChange([add(10, '192.0.2.1', 'AS64496'), add(6, '192.0.2.2', 'AS64497')], NOW).count).toBe(1);
     });
