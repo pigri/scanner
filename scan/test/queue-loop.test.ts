@@ -343,3 +343,64 @@ describe('runQueueLoop post-batch check', () => {
     expect(r.restart).toBe('netns replaced');
   });
 });
+
+describe('runQueueLoop stop during a batch', () => {
+  it('stops the batch, releases its rows owner-guarded, marks nothing and returns without restart', async () => {
+    const f = fakeQueue([[row(1), row(2)], [row(3)]]);
+    const stops: string[] = [];
+    let finish!: () => void;
+    const res = await runQueueLoop(base(f, {
+      watch: true,
+      stopBatch: async (sig) => { stops.push(sig); finish(); },
+      processBatch: () => new Promise((resolve) => {
+        finish = () => resolve({ ok: false, error: 'scan-all exit 143' });
+        process.emit('SIGTERM');
+      }),
+    }));
+    expect(stops).toEqual(['SIGTERM']);
+    expect(f.released).toEqual([{ ids: [1, 2], workerId: 'hu-1' }]);
+    expect(f.failed).toEqual([]);
+    expect(f.done).toEqual([]);
+    expect(f.claims).toHaveLength(1);
+    expect(res.restart).toBeUndefined();
+    expect(res.batches).toBe(1);
+  });
+
+  it('releases on SIGINT too', async () => {
+    const f = fakeQueue([[row(7)]]);
+    let finish!: () => void;
+    await runQueueLoop(base(f, {
+      stopBatch: async () => { finish(); },
+      processBatch: () => new Promise((resolve) => { finish = () => resolve({ ok: true }); process.emit('SIGINT'); }),
+    }));
+    expect(f.released).toEqual([{ ids: [7], workerId: 'hu-1' }]);
+    expect(f.done).toEqual([]);
+  });
+
+  it('waits for stopBatch before releasing', async () => {
+    const f = fakeQueue([[row(1)]]);
+    let stopDone = false;
+    await runQueueLoop(base(f, {
+      stopBatch: async () => { await new Promise((r) => setTimeout(r, 20)); stopDone = true; },
+      processBatch: async () => { process.emit('SIGTERM'); return { ok: false, error: 'x' }; },
+    }));
+    expect(stopDone).toBe(true);
+    expect(f.released).toHaveLength(1);
+  });
+
+  it('keeps the prompt shutdown between batches: no stopBatch call, no release', async () => {
+    const f = fakeQueue([]);
+    const stopBatch = vi.fn(async () => {});
+    let n = 0;
+    await runQueueLoop(base(f, { watch: true, stopBatch, sleepFn: async () => { if (++n >= 2) process.emit('SIGTERM'); } }));
+    expect(stopBatch).not.toHaveBeenCalled();
+    expect(f.released).toEqual([]);
+  });
+
+  it('a batch that finishes normally is still marked done', async () => {
+    const f = fakeQueue([[row(1)]]);
+    await runQueueLoop(base(f, { maxBatches: 1, stopBatch: async () => {} }));
+    expect(f.done).toEqual([1]);
+    expect(f.released).toEqual([]);
+  });
+});

@@ -288,7 +288,7 @@ systemctl --user status scan-worker      # health + last logs
 journalctl --user -u scan-worker -f      # live journal
 tail -f ~/gen0sec/redteam/scan/logs/worker.service.log   # tee'd audit log
 systemctl --user restart scan-worker
-systemctl --user stop scan-worker        # SIGTERM: finishes the in-flight batch first
+systemctl --user stop scan-worker        # SIGTERM to the worker, which forwards it to scan-all and returns the batch to pending (60 s grace, then SIGKILL)
 ```
 
 Enqueue work at any time; the running daemon picks it up within one poll interval:

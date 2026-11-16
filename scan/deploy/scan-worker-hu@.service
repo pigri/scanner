@@ -17,6 +17,9 @@ ExecStart=/usr/bin/sudo /usr/sbin/ip netns exec scanvpn-hu /usr/sbin/runuser -u 
 Restart=on-failure
 RestartSec=10
 KillSignal=SIGTERM
+# mixed: SIGTERM goes to the worker only; it forwards it to scan-all and
+# releases the batch. SIGKILL after the timeout still reaches the whole cgroup.
+KillMode=mixed
 TimeoutStopSec=120
 
 [Install]

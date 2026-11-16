@@ -1,18 +1,18 @@
 #!/usr/bin/env -S node --loader tsx
 // Loop: claim next batch from scan_queue → write temp targets file →
 // invoke scan-all with it → mark done. Repeats until queue is empty or
-// --max-batches reached. Ctrl-C at any time is safe; unfinished claims stay
-// as in_progress; the queue loop returns them to pending (see queue-loop.ts).
+// --max-batches reached. A stop (SIGTERM/SIGINT) during a batch is forwarded to the
+// scan-all process group; the batch's rows go back to pending (see queue-loop.ts).
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 import { openDb } from './lib/db.js';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
 import { createLogger, type Logger } from './lib/log.js';
 import { scanChildEnv, TUNED_SCAN_FLAGS } from './lib/scan-all-runner.js';
 import { preflightFromOpts, postBatchFromOpts, exitCodeFor, normalizeCountryCode, DEFAULT_ECHO_URL } from './lib/egress-check.js';
 import { DEFAULT_MMDB } from './lib/geoip.js';
+import { spawnGrouped, type SpawnedChild } from './lib/scan-child.js';
 import { runQueueLoop, type BatchOutcome } from './lib/queue-loop.js';
 
 interface Opts {
@@ -80,7 +80,8 @@ function usage(): void {
   console.error(`Usage: worker [options]
 
 Loops the scan_queue: claim → scan → mark. Stops when the queue is empty
-(or --max-batches reached). Ctrl-C exits cleanly between batches.
+(or --max-batches reached). A stop signal during a batch is forwarded to
+scan-all (SIGKILL after 60 s) and the batch's rows return to pending.
 
 Options:
   --batch-size <N>       hosts per scan-all invocation (default: 25)
@@ -135,7 +136,17 @@ Env vars are inherited by scan-all:
 `);
 }
 
-function runScanAll(targetsFile: string, opts: Opts, log: Logger): Promise<number> {
+const STOP_GRACE_MS = 60_000;
+
+// The running scan-all, so a stop signal can be forwarded to its process group.
+const stopState: { child: SpawnedChild | null; sig: NodeJS.Signals | null } = { child: null, sig: null };
+
+function stopBatch(sig: NodeJS.Signals): Promise<void> {
+  stopState.sig = sig;
+  return stopState.child ? stopState.child.stop(sig) : Promise.resolve();
+}
+
+async function runScanAll(targetsFile: string, opts: Opts, log: Logger): Promise<number> {
   const scopeArg = opts.scope ? ['--scope', opts.scope] : [];
   const strictArg = opts.strict ? ['--strict'] : [];
   const args = [
@@ -151,10 +162,12 @@ function runScanAll(targetsFile: string, opts: Opts, log: Logger): Promise<numbe
   // these can still be overridden by exporting the var before launching.
   const env = scanChildEnv({ ...TUNED_SCAN_FLAGS });
   log.step(`spawn: npx ${args.join(' ')}`);
-  return new Promise((resolve) => {
-    const child = spawn('npx', args, { stdio: 'inherit', env });
-    child.on('close', (code) => resolve(code ?? -1));
-  });
+  if (stopState.sig) return -1; // a stop arrived before the spawn: do not start the scan
+  const child = spawnGrouped('npx', args, { env, graceMs: STOP_GRACE_MS });
+  stopState.child = child;
+  if (stopState.sig) void child.stop(stopState.sig);
+  try { return await child.done; }
+  finally { stopState.child = null; }
 }
 
 async function main(): Promise<void> {
@@ -209,6 +222,7 @@ async function main(): Promise<void> {
     pollSec: opts.pollSec,
     log,
     workerId: opts.workerId,
+    stopBatch,
     onIdleTick: checkpointIfDue,
     ...(preflight ? { preflight } : {}),
     ...(postBatchCheck ? { postBatchCheck } : {}),
