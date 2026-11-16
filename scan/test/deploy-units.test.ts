@@ -26,6 +26,12 @@ describe.each(UNITS)('%s stop path', (unit) => {
     expect(l).not.toMatch(/(^|[\s/])su\s/);
   });
 
+  it('execs node directly: npx dies on SIGTERM without relaying it to the worker', () => {
+    const l = execStart(unit);
+    expect(l).not.toMatch(/\bnpx\b/);
+    expect(l).toContain('exec node --import tsx src/worker.ts');
+  });
+
   it('uses KillMode=mixed and a stop timeout longer than the worker grace', () => {
     const t = read(unit);
     expect(t).toMatch(/^KillMode=mixed$/m);

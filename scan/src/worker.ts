@@ -150,7 +150,7 @@ async function runScanAll(targetsFile: string, opts: Opts, log: Logger): Promise
   const scopeArg = opts.scope ? ['--scope', opts.scope] : [];
   const strictArg = opts.strict ? ['--strict'] : [];
   const args = [
-    'tsx', 'src/scan-all.ts',
+    '--import', 'tsx', 'src/scan-all.ts',
     '--targets', targetsFile,
     ...scopeArg,
     ...strictArg,
@@ -161,9 +161,9 @@ async function runScanAll(targetsFile: string, opts: Opts, log: Logger): Promise
   // worker needs no external `export PATH=... NUCLEI_FLAGS=...` wrapper. Any of
   // these can still be overridden by exporting the var before launching.
   const env = scanChildEnv({ ...TUNED_SCAN_FLAGS });
-  log.step(`spawn: npx ${args.join(' ')}`);
+  log.step(`spawn: node ${args.join(' ')}`);
   if (stopState.sig) return -1; // a stop arrived before the spawn: do not start the scan
-  const child = spawnGrouped('npx', args, { env, graceMs: STOP_GRACE_MS });
+  const child = spawnGrouped(process.execPath, args, { env, graceMs: STOP_GRACE_MS });
   stopState.child = child;
   if (stopState.sig) void child.stop(stopState.sig);
   try { return await child.done; }

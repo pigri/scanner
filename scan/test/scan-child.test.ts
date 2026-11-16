@@ -8,17 +8,23 @@ class FakeChild extends EventEmitter { constructor(public pid: number | undefine
 function harness(...a: [] | [number | undefined]) {
   const pid = a.length ? a[0] : 4242;
   const kills: { pid: number; sig: string }[] = [];
+  const probes: number[] = [];
+  const state = { alive: false };
   const spawnCalls: { cmd: string; opts: Record<string, unknown> }[] = [];
   const timers: { ms: number; cb: () => void; live: boolean }[] = [];
   const child = new FakeChild(pid);
   const opts = {
     spawnFn: ((cmd: string, _a: string[], o: Record<string, unknown>) => { spawnCalls.push({ cmd, opts: o }); return child; }) as unknown as typeof realSpawn,
-    killFn: (p: number, sig: NodeJS.Signals) => { kills.push({ pid: p, sig }); },
+    killFn: (p: number, sig: NodeJS.Signals | 0) => {
+      if (sig === 0) { probes.push(p); if (!state.alive) throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' }); return; }
+      kills.push({ pid: p, sig });
+    },
     setTimeoutFn: ((cb: () => void, ms: number) => { const t = { ms, cb, live: true }; timers.push(t); return t; }) as unknown as typeof setTimeout,
     clearTimeoutFn: ((t: { live: boolean }) => { t.live = false; }) as unknown as typeof clearTimeout,
     graceMs: 60_000,
+    pollMs: 100,
   };
-  return { kills, spawnCalls, timers, child, opts };
+  return { kills, probes, state, spawnCalls, timers, child, opts };
 }
 
 describe('spawnGrouped', () => {
@@ -90,6 +96,48 @@ describe('spawnGrouped', () => {
 const SCRIPT = (ignore: boolean): string =>
   `${ignore ? "process.on('SIGTERM',()=>{});" : ''}console.log('ready');setInterval(()=>{},1000);`;
 
+const flush = (): Promise<void> => new Promise((r) => setImmediate(r));
+
+describe('spawnGrouped waits for the whole group', () => {
+  it('keeps waiting while the group is alive after the leader closed, escalates to SIGKILL, resolves on ESRCH', async () => {
+    const h = harness(4242);
+    h.state.alive = true;
+    const c = spawnGrouped('node', [], { env: {}, ...h.opts });
+    let resolved = false;
+    const stopped = c.stop('SIGTERM').then(() => { resolved = true; });
+    h.child.emit('close', 0);
+    await flush();
+    expect(resolved).toBe(false);
+    expect(h.timers[0]!.live).toBe(true);
+    h.timers[0]!.cb();
+    expect(h.kills).toEqual([{ pid: -4242, sig: 'SIGTERM' }, { pid: -4242, sig: 'SIGKILL' }]);
+    h.state.alive = false;
+    for (const t of h.timers.filter((x) => x.ms === 100 && x.live)) t.cb();
+    await stopped;
+    expect(await c.done).toBe(0);
+    expect(h.probes.every((p) => p === -4242)).toBe(true);
+    expect(h.timers[0]!.live).toBe(false);
+  });
+
+  it('resolves at once when the group is already empty after the leader closed', async () => {
+    const h = harness(4242);
+    const c = spawnGrouped('node', [], { env: {}, ...h.opts });
+    const stopped = c.stop('SIGTERM');
+    h.child.emit('close', 143);
+    await stopped;
+    expect(await c.done).toBe(143);
+    expect(h.kills).toEqual([{ pid: -4242, sig: 'SIGTERM' }]);
+  });
+
+  it('does not probe the group on a normal exit', async () => {
+    const h = harness(4242);
+    const c = spawnGrouped('node', [], { env: {}, ...h.opts });
+    h.child.emit('close', 0);
+    expect(await c.done).toBe(0);
+    expect(h.probes).toEqual([]);
+  });
+});
+
 describe('spawnGrouped with a real child', () => {
   const run = (ignore: boolean, graceMs: number): SpawnedChild =>
     spawnGrouped(process.execPath, ['-e', SCRIPT(ignore)], { env: process.env, stdio: 'ignore', graceMs });
@@ -110,5 +158,17 @@ describe('spawnGrouped with a real child', () => {
     await c.stop('SIGTERM');
     expect(Date.now() - t0).toBeGreaterThanOrEqual(350);
     expect(await c.done).toBe(-1);
+  }, 15_000);
+
+  it('SIGKILLs a grandchild in the group that ignores SIGTERM after the leader exited', async () => {
+    const leader = `const {spawn}=require('node:child_process');`
+      + `spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});setInterval(()=>{},1000);setTimeout(()=>process.exit(0),30000)"],{stdio:'ignore'});`
+      + `process.on('SIGTERM',()=>process.exit(0));setInterval(()=>{},1000);`;
+    const c = spawnGrouped(process.execPath, ['-e', leader], { env: process.env, stdio: 'ignore', graceMs: 500, pollMs: 50 });
+    await sleep(600);
+    const t0 = Date.now();
+    await c.stop('SIGTERM');
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(400);
+    expect(() => process.kill(-c.pgid!, 0)).toThrow(/ESRCH/);
   }, 15_000);
 });

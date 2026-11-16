@@ -25,7 +25,7 @@ ExecStartPre=/usr/bin/sudo /usr/bin/bash -c 'for i in $(seq 30); do /usr/sbin/ip
 # --claim-not-suffix .gov.hu / .hu: the foreign-egress fleet skips Hungarian
 # targets so the HU-egress fleet (scan-worker-hu@) claims them exclusively.
 # nebih.gov.hu and peers geo-block non-HU IPs — foreign attempts get WAF-eaten.
-ExecStart=/usr/bin/sudo /usr/sbin/ip netns exec scanvpn /usr/bin/setpriv --reuid=%u --regid=%g --init-groups -- /usr/bin/env HOME=%h USER=%u LOGNAME=%u /usr/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; ENVFILE="$PWD/.env.scan"; [ -r "$ENVFILE" ] && set -a && . "$ENVFILE" && set +a; exec npx tsx src/worker.ts --sqlite scan.db --scope scope.txt --watch --netns scanvpn --egress-not-country HU --worker-id foreign --claim-not-suffix .gov.hu --claim-not-suffix .hu --log logs/worker.service.log'
+ExecStart=/usr/bin/sudo /usr/sbin/ip netns exec scanvpn /usr/bin/setpriv --reuid=%u --regid=%g --init-groups -- /usr/bin/env HOME=%h USER=%u LOGNAME=%u /usr/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; ENVFILE="$PWD/.env.scan"; [ -r "$ENVFILE" ] && set -a && . "$ENVFILE" && set +a; exec node --import tsx src/worker.ts --sqlite scan.db --scope scope.txt --watch --netns scanvpn --egress-not-country HU --worker-id foreign --claim-not-suffix .gov.hu --claim-not-suffix .hu --log logs/worker.service.log'
 Restart=on-failure
 RestartSec=10
 # On stop the worker forwards SIGTERM to scan-all (60 s grace), then releases the batch.
