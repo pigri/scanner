@@ -17,6 +17,8 @@ function row(o: Partial<TargetRowLike> & { target: string }): TargetRowLike {
     updated_at: o.updated_at ?? null,
     organization: o.organization ?? null,
     active: o.active ?? 1,
+    countries: o.countries ?? [],
+    asns: o.asns ?? [],
   };
 }
 
@@ -169,6 +171,54 @@ describe('filterAndFacet', () => {
         'b.example.com',
       ]);
       expect(filterAndFacet(withArchived, { search: 'example' }).archivedCount).toBe(1);
+    });
+  });
+
+  describe('country and asn', () => {
+    const net: TargetRowLike[] = [
+      row({ target: 'a.example', score: 90, countries: ['DE', 'HU'], asns: ['AS64496', 'AS64511'] }),
+      row({ target: 'b.example', score: 50, countries: ['HU'], asns: ['AS64496'] }),
+      row({ target: 'c.example', score: 10, countries: ['US'], asns: ['AS64500'] }),
+      row({ target: 'd.example', score: 5 }),
+    ];
+
+    it('country keeps targets with any matching value', () => {
+      expect(filterAndFacet(net, { country: 'HU' }).rows.map((x) => x.target)).toEqual(['a.example', 'b.example']);
+      expect(filterAndFacet(net, { country: 'DE' }).rows.map((x) => x.target)).toEqual(['a.example']);
+      expect(filterAndFacet(net, { country: 'XX' }).rows).toEqual([]);
+    });
+
+    it('asn keeps targets with any matching value', () => {
+      expect(filterAndFacet(net, { asn: 'AS64496' }).rows.map((x) => x.target)).toEqual(['a.example', 'b.example']);
+      expect(filterAndFacet(net, { asn: 'AS64500' }).rows.map((x) => x.target)).toEqual(['c.example']);
+    });
+
+    it('facets count targets, sorted by count then value', () => {
+      const r = filterAndFacet(net, {});
+      expect(r.countries).toEqual([{ value: 'HU', c: 2 }, { value: 'DE', c: 1 }, { value: 'US', c: 1 }]);
+      expect(r.asns).toEqual([{ value: 'AS64496', c: 2 }, { value: 'AS64500', c: 1 }, { value: 'AS64511', c: 1 }]);
+    });
+
+    it('a facet ignores the selections but respects search, cve and score', () => {
+      const r = filterAndFacet(net, { country: 'US', asn: 'AS64496', minScore: 40 });
+      expect(r.rows).toEqual([]);
+      expect(r.countries).toEqual([{ value: 'HU', c: 2 }, { value: 'DE', c: 1 }]);
+      expect(r.asns).toEqual([{ value: 'AS64496', c: 2 }, { value: 'AS64511', c: 1 }]);
+    });
+
+    it('country and asn compose with the other filters', () => {
+      const r = filterAndFacet(net, { country: 'HU', minScore: 60 });
+      expect(r.rows.map((x) => x.target)).toEqual(['a.example']);
+      expect(r.countries).toEqual([{ value: 'DE', c: 1 }, { value: 'HU', c: 1 }]);
+    });
+
+    it('caps the asn facet at 300', () => {
+      const many = Array.from({ length: 350 }, (_, i) =>
+        row({ target: `t${i}.example`, asns: [`AS${100000 + i}`] }),
+      );
+      const r = filterAndFacet(many, {});
+      expect(r.asns).toHaveLength(300);
+      expect(r.countries).toEqual([]);
     });
   });
 });

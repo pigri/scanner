@@ -2,6 +2,9 @@ export const TARGET_NETWORK_SQL = `SELECT ip, ip_version, ip_class, asn, as_name
   geo_checked_at, ptr_json, from_ports, from_dns, first_seen, last_seen
   FROM target_network WHERE target = ? ORDER BY ip LIMIT 500`;
 
+export const TARGET_NETWORK_LIST_SQL = `SELECT target, ip, asn, as_name, country_code, country,
+  last_seen, geo_checked_at, ip_class FROM target_network ORDER BY target, ip`;
+
 export interface NetworkDbRow {
   ip: string;
   ip_version: number;
@@ -78,4 +81,46 @@ export function shapeNetworkRows(rows: readonly NetworkDbRow[]): NetworkRow[] {
     last_seen: r.last_seen,
     current: current[i]!,
   }));
+}
+
+export interface ListNetworkRow {
+  target: string;
+  ip: string;
+  asn: string | null;
+  country_code: string | null;
+  country: string | null;
+  last_seen: string;
+  ip_class: string;
+}
+
+export interface NetworkSummary {
+  countries: string[];
+  asns: string[];
+}
+
+/** Distinct countries and ASNs of each target's current public IPs. Rows must be grouped by target. */
+export function summarizeNetworks(rows: readonly ListNetworkRow[]): Map<string, NetworkSummary> {
+  const out = new Map<string, NetworkSummary>();
+  const flush = (target: string, group: ListNetworkRow[]): void => {
+    const current = markCurrent(group);
+    const countries = new Set<string>();
+    const asns = new Set<string>();
+    group.forEach((r, i) => {
+      if (!current[i] || r.ip_class !== 'public') return;
+      const c = r.country_code || r.country;
+      if (c) countries.add(c);
+      if (r.asn) asns.add(r.asn);
+    });
+    out.set(target, { countries: [...countries].sort(), asns: [...asns].sort() });
+  };
+  let group: ListNetworkRow[] = [];
+  for (const r of rows) {
+    if (group.length && group[0]!.target !== r.target) {
+      flush(group[0]!.target, group);
+      group = [];
+    }
+    group.push(r);
+  }
+  if (group.length) flush(group[0]!.target, group);
+  return out;
 }

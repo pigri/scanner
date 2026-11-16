@@ -17,6 +17,8 @@ export interface TargetRowLike {
   updated_at: string | null;
   organization: string | null;
   active: number; // 0 = archived (host_state), 1 = active
+  countries: string[]; // distinct countries of the current IPs
+  asns: string[]; // distinct ASNs of the current IPs
 }
 
 export const SEVERITIES: readonly string[] = ['critical', 'high', 'medium', 'low', 'info'];
@@ -40,6 +42,8 @@ export interface TargetFilterParams {
   minScore?: number | null;
   maxScore?: number | null;
   org?: string; // exact-match on the cert Organization; '' = any
+  country?: string; // any current IP in this country; '' = any
+  asn?: string; // any current IP in this ASN; '' = any
   archived?: string; // '' = active only (default), '1' = archived only, 'all' = both
   sort?: string;
   offset?: number;
@@ -51,6 +55,21 @@ export interface OrgCount {
   c: number;
 }
 
+export interface ValueCount {
+  value: string;
+  c: number;
+}
+
+const ASN_FACET_CAP = 300;
+
+function facet(rows: readonly { countries: string[]; asns: string[] }[], key: 'countries' | 'asns'): ValueCount[] {
+  const tally = new Map<string, number>();
+  for (const r of rows) for (const v of new Set(r[key])) tally.set(v, (tally.get(v) ?? 0) + 1);
+  return [...tally.entries()]
+    .map(([value, c]) => ({ value, c }))
+    .sort((a, b) => b.c - a.c || a.value.localeCompare(b.value));
+}
+
 export interface TargetFacetResult<T> {
   rows: T[];
   total: number;
@@ -58,6 +77,8 @@ export interface TargetFacetResult<T> {
   offset: number;
   sevCounts: Record<string, number>;
   orgs: OrgCount[];
+  countries: ValueCount[];
+  asns: ValueCount[];
   archivedCount: number;
 }
 
@@ -73,6 +94,8 @@ export function filterAndFacet<T extends TargetRowLike>(
   const maxScore = p.maxScore as number;
   const sevList = (p.sevList ?? []).map((s) => s.trim()).filter((s) => SEVERITIES.includes(s));
   const org = (p.org ?? '').trim();
+  const country = (p.country ?? '').trim();
+  const asn = (p.asn ?? '').trim();
   const archived = (p.archived ?? '').trim();
   const sort = p.sort || 'score';
   const offset = p.offset ?? 0;
@@ -92,8 +115,8 @@ export function filterAndFacet<T extends TargetRowLike>(
   // how many hosts the other set holds.
   const archivedCount = matched.reduce((n, r) => n + (r.active === 0 ? 1 : 0), 0);
 
-  // Base predicate: the chosen archived set too, but not the severity and org
-  // selections, so each facet's counts stay independent of its own selection.
+  // Base predicate: the chosen archived set too, but not the severity, org,
+  // country and asn selections, so each facet's counts stay independent of its own selection.
   const base = matched.filter((r) =>
     archived === 'all' ? true : archived === '1' ? r.active === 0 : r.active !== 0,
   );
@@ -113,9 +136,14 @@ export function filterAndFacet<T extends TargetRowLike>(
     .map(([o, c]) => ({ org: o, c }))
     .sort((a, b) => b.c - a.c || a.org.localeCompare(b.org));
 
+  const countries = facet(base, 'countries');
+  const asns = facet(base, 'asns').slice(0, ASN_FACET_CAP);
+
   const filtered = base.filter((r) => {
     if (sevList.length && !sevList.some((s) => sevOf(r, s) > 0)) return false;
     if (org && r.organization !== org) return false;
+    if (country && !r.countries.includes(country)) return false;
+    if (asn && !r.asns.includes(asn)) return false;
     return true;
   });
 
@@ -152,6 +180,8 @@ export function filterAndFacet<T extends TargetRowLike>(
     offset,
     sevCounts,
     orgs,
+    countries,
+    asns,
     archivedCount,
   };
 }

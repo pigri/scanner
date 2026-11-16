@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { openDb } from '../src/lib/db.js';
-import { TARGET_NETWORK_SQL, markCurrent, shapeNetworkRows, type NetworkDbRow } from '../src/lib/target-network.js';
+import { TARGET_NETWORK_SQL, TARGET_NETWORK_LIST_SQL, markCurrent, shapeNetworkRows, summarizeNetworks, type NetworkDbRow } from '../src/lib/target-network.js';
 
 const T0 = '2026-11-10T12:00:00.000Z';
 const hoursBefore = (h: number) => new Date(Date.parse(T0) - h * 3600_000).toISOString();
@@ -92,5 +92,63 @@ describe('shapeNetworkRows', () => {
     expect(out[0]).toMatchObject({ ip: '192.0.2.1', seenVia: ['ports', 'dns'], current: true, ipVersion: 4 });
     expect(out[1]).toMatchObject({ ip: '2001:db8::1', seenVia: ['dns'], current: false, ipVersion: 6 });
     expect(out[2]).toMatchObject({ seenVia: ['ports'], ipClass: 'private' });
+  });
+});
+
+type ListRow = NetworkDbRow & { target: string };
+const lrow = (target: string, over: Partial<NetworkDbRow> = {}): ListRow => ({ target, ...row(over) });
+
+describe('TARGET_NETWORK_LIST_SQL', () => {
+  it('reads every target in primary-key order', () => {
+    const { raw } = openDb(':memory:');
+    const ins = raw.prepare(
+      `INSERT INTO target_network (target, ip, ip_version, ip_class, first_seen, last_seen)
+       VALUES (?, ?, 4, 'public', ?, ?)`,
+    );
+    ins.run('b.example', '192.0.2.1', T0, T0);
+    ins.run('a.example', '198.51.100.9', T0, T0);
+    ins.run('a.example', '192.0.2.5', T0, T0);
+    const rows = raw.prepare(TARGET_NETWORK_LIST_SQL).all() as ListRow[];
+    expect(rows.map((r) => `${r.target} ${r.ip}`)).toEqual([
+      'a.example 192.0.2.5',
+      'a.example 198.51.100.9',
+      'b.example 192.0.2.1',
+    ]);
+  });
+});
+
+describe('summarizeNetworks', () => {
+  it('uses current rows only', () => {
+    const m = summarizeNetworks([
+      lrow('a.example', { ip: '192.0.2.1', country_code: 'HU', asn: 'AS64496' }),
+      lrow('a.example', { ip: '192.0.2.2', country_code: 'DE', asn: 'AS64511', last_seen: hoursBefore(25) }),
+    ]);
+    expect(m.get('a.example')).toEqual({ countries: ['HU'], asns: ['AS64496'] });
+  });
+
+  it('computes currency per target, with distinct sorted values', () => {
+    const m = summarizeNetworks([
+      lrow('a.example', { ip: '192.0.2.1', country_code: 'HU', asn: 'AS64511' }),
+      lrow('a.example', { ip: '192.0.2.2', country_code: 'DE', asn: 'AS64496' }),
+      lrow('a.example', { ip: '192.0.2.3', country_code: 'HU', asn: 'AS64496' }),
+      lrow('b.example', { ip: '198.51.100.1', country_code: 'US', asn: 'AS64500', last_seen: hoursBefore(100) }),
+    ]);
+    expect(m.get('a.example')).toEqual({ countries: ['DE', 'HU'], asns: ['AS64496', 'AS64511'] });
+    expect(m.get('b.example')).toEqual({ countries: ['US'], asns: ['AS64500'] });
+  });
+
+  it('skips null and empty values', () => {
+    const m = summarizeNetworks([
+      lrow('a.example', { ip: '192.0.2.1', country_code: null, asn: '' }),
+      lrow('a.example', { ip: '192.0.2.2', country_code: 'HU', asn: null }),
+    ]);
+    expect(m.get('a.example')).toEqual({ countries: ['HU'], asns: [] });
+  });
+
+  it('ignores non-public rows', () => {
+    const m = summarizeNetworks([
+      lrow('a.example', { ip: '198.51.100.1', ip_class: 'private', country_code: 'HU', asn: 'AS64496' }),
+    ]);
+    expect(m.get('a.example') ?? { countries: [], asns: [] }).toEqual({ countries: [], asns: [] });
   });
 });
