@@ -210,23 +210,21 @@ sqlite3 scan.db "UPDATE scan_queue SET status='pending', error=NULL, abandoned=0
 
 ### retention
 
-Prune old run dirs + orphan DB rows.
+Prune superseded rows. A target's latest evidence per tool is never deleted, however old.
 
 ```
-npm run retention -- --older-than 30 --keep-min 3          # dry-run
-npm run retention -- --older-than 30 --keep-min 3 --apply  # delete
+npm run retention -- --older-than 90           # dry-run: counts per table, runs to remove
+npm run retention -- --older-than 90 --apply   # delete
 ```
 
-- `--older-than N` — prune runs older than N days (default: 30)
-- `--keep-min N` — always keep the N newest runs *per tool* even if old (default: 3)
+- `--older-than N` — only rows of runs older than N days are candidates (default: 90)
 - `--apply` — actually delete (default is dry-run)
 
-Deletes cascade across `findings`, `ports`, `http_probes`, `screenshots`, `risk_scores`, `runs` in one transaction, and `risk_latest` is re-derived for the affected targets (a target with no scores left is dropped), then removes the `runs/<id>/` directory. Runs without a directory (e.g. legacy) still get their DB rows pruned.
+A row of `findings`, `ports`, `http_probes` or `screenshots` is pruned only when its run is older than N days **and** the same target has a newer run of the same tool (later `started_at`, ties by run id). A target that was not rescanned keeps all its rows. Deletes run in transactions of 1000 rows with a 60 s busy timeout, so live workers are not blocked for long.
 
-Add to cron for automatic housekeeping:
-```
-0 4 * * 0 cd /path/to/scan && /home/pigri/.nvm/versions/node/v26.1.0/bin/npm run retention -- --older-than 60 --keep-min 5 --apply >> retention.log 2>&1
-```
+A run row and its `runs/<id>/` directory are removed only when no row in any table that references `runs` is left (so `risk_scores`, `scan_queue`, `dns_records` and the others keep their runs alive). Those tables are never modified. `--keep-min` is gone: the per-target rule replaces it.
+
+The weekly `retention.timer` in `deploy/` runs this with `--apply`; dry-run first (see `deploy/README.md`).
 
 ## SQLite backing store
 
@@ -563,7 +561,7 @@ npm run query -- findings --db scan.db --since 2026-08-19 --until 2026-08-20
 ## Gotchas
 
 - **Per-run output is default when `--sqlite` is set.** Files land in `runs/<run_id>/`. Add `--no-run-dir` for legacy cwd behavior. Explicit `--out <path>` always wins.
-- **`runs/` grows unbounded** — schedule `npm run retention -- --older-than 60 --keep-min 5 --apply` weekly.
+- **`runs/` grows unbounded** — schedule `npm run retention -- --older-than 90 --apply` weekly (`deploy/retention.timer`).
 - **Scope gate is warning-only by default.** Not a legal safeguard. Get written authorization; use `--strict` in shared CI to enforce mechanically.
 - **Rate limits.** nuclei/httpx `-rate-limit`/`-threads` are per-instance. Scanning hundreds of hosts too fast trips WAFs and gets you banned. Defaults are conservative; bump only for infra you own.
 - **Nuclei templates go stale.** Run `nuclei -update-templates` before every engagement.

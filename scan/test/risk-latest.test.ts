@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { openDb } from '../src/lib/db.js';
-import { applyRetention } from '../src/retention.js';
+import { runRetention } from '../src/retention.js';
 import {
   NO_URL,
   backfillRiskLatest,
@@ -269,20 +269,24 @@ describe('backfill under concurrency', () => {
   });
 });
 
-describe('deleteRiskScoresForRuns in WAL with a competing writer', () => {
+describe('runRetention in WAL with a competing writer', () => {
   it('waits out busy_timeout instead of failing at once', () => {
     const file = tmpDb();
     const db = openDb(file);
-    const r1 = db.startRun('risk', {}, '2026-01-01T00:00:00Z');
-    recordRiskScores(db.raw, [{ target: 'a.example.com', score: 1, breakdownJson: '{}' }], '2026-01-01T00:00:00Z', r1);
+    const r1 = db.startRun('nmap', {}, '2026-01-01T00:00:00Z');
+    const r2 = db.startRun('nmap', {}, '2026-01-02T00:00:00Z');
+    const port = { target: 'a.example.com', ip: null, port: 80, protocol: 'tcp', service: null, product: null, version: null, tunnel: null, extrainfo: null };
+    db.insertPort(port, '2026-01-01T00:00:00Z', r1);
+    db.insertPort(port, '2026-01-02T00:00:00Z', r2);
     const other = new Database(file);
     other.exec('BEGIN IMMEDIATE');
     db.raw.pragma('busy_timeout = 400');
+    const opts = { olderThanDays: 90, now: '2026-09-01T00:00:00Z', apply: true };
     const t0 = Date.now();
-    expect(() => applyRetention(db.raw, [r1])).toThrow(/SQLITE_BUSY|database is locked/);
+    expect(() => runRetention(db.raw, opts)).toThrow(/SQLITE_BUSY|database is locked/);
     expect(Date.now() - t0).toBeGreaterThanOrEqual(350);
     other.exec('ROLLBACK');
-    expect(() => applyRetention(db.raw, [r1])).not.toThrow();
+    expect(() => runRetention(db.raw, opts)).not.toThrow();
     other.close(); db.close();
   });
 });
