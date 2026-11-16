@@ -1,0 +1,12 @@
+[Unit]
+Description=Weekly scan retention (retention.service)
+
+[Timer]
+# Sun 05:00, after scan-rescan (04:00) has queued its work. Persistent=true
+# reruns a missed job.
+OnCalendar=Sun *-*-* 05:00:00
+Persistent=true
+RandomizedDelaySec=900
+
+[Install]
+WantedBy=timers.target
