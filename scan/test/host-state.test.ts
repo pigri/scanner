@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { decideHostStates, parseDnsxResolved, shouldApplyResolution, DNS_ARCHIVE_THRESHOLD, type HostStateRow } from '../src/lib/host-state.js';
+import { decideHostStates, parseDnsxResolved, dnsxRecords, shouldApplyResolution, DNS_ARCHIVE_THRESHOLD, type HostStateRow } from '../src/lib/host-state.js';
 
 const T1 = '2026-11-01T00:00:00Z';
 const T2 = '2026-11-02T00:00:00Z';
@@ -157,5 +157,36 @@ describe('shouldApplyResolution', () => {
   });
   it('accepts a clean exit with output rows', () => {
     expect(shouldApplyResolution(0, 1)).toBe(true);
+  });
+});
+
+describe('dnsxRecords', () => {
+  const vals = (line: unknown) => dnsxRecords(JSON.stringify(line)).map((r) => `${r.type}:${r.value}`);
+
+  it('stores no A records for a string a', () => {
+    expect(vals({ host: 'x.example', a: 'abc' })).toEqual([]);
+  });
+  it('stores only the string entries of a list', () => {
+    expect(vals({ host: 'x.example', a: [42, '192.0.2.1', ''] })).toEqual(['A:192.0.2.1']);
+  });
+  it('stores nothing for a non-string or empty host', () => {
+    expect(vals({ host: 5, a: ['192.0.2.1'] })).toEqual([]);
+    expect(vals({ host: '', a: ['192.0.2.1'] })).toEqual([]);
+    expect(dnsxRecords('null')).toEqual([]);
+    expect(dnsxRecords('not json')).toEqual([]);
+  });
+  it('stores a well-formed row as before', () => {
+    const rows = dnsxRecords(JSON.stringify({
+      host: 'x.example', ttl: 300, a: ['192.0.2.1'], aaaa: ['2001:db8::1'], cname: ['y.example'],
+      mx: ['mx.example'], soa: [{ ns: 'ns.example', mailbox: 'h.example' }, 'ns2.example'],
+    }));
+    expect(rows).toEqual([
+      { target: 'x.example', name: 'x.example', type: 'A', value: '192.0.2.1', ttl: 300 },
+      { target: 'x.example', name: 'x.example', type: 'AAAA', value: '2001:db8::1', ttl: 300 },
+      { target: 'x.example', name: 'x.example', type: 'CNAME', value: 'y.example', ttl: 300 },
+      { target: 'x.example', name: 'x.example', type: 'MX', value: 'mx.example', ttl: 300 },
+      { target: 'x.example', name: 'x.example', type: 'SOA', value: 'ns.example', ttl: 300 },
+      { target: 'x.example', name: 'x.example', type: 'SOA', value: 'ns2.example', ttl: 300 },
+    ]);
   });
 });

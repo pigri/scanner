@@ -7,24 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, writeLines, resolveOutputPath } from './lib/runner.js';
 import { openDb, type DnsRecordRow } from './lib/db.js';
-import { parseDnsxResolved, shouldApplyResolution, DNS_ARCHIVE_THRESHOLD } from './lib/host-state.js';
-
-// Fields dnsx emits per JSON row when queried with -all.
-interface DnsxRow {
-  host?: string;
-  ttl?: number;
-  a?: string[];
-  aaaa?: string[];
-  cname?: string[];
-  mx?: string[];
-  ns?: string[];
-  txt?: string[];
-  ptr?: string[];
-  srv?: string[];
-  caa?: string[];
-  soa?: Array<{ ns?: string; mailbox?: string; serial?: number } | string>;
-  status_code?: string;
-}
+import { dnsxRecords, parseDnsxResolved, shouldApplyResolution, DNS_ARCHIVE_THRESHOLD } from './lib/host-state.js';
 
 async function main(): Promise<void> {
   const opts = parseCommonCli(process.argv);
@@ -94,24 +77,7 @@ Everything after '--' passes to dnsx verbatim.`));
     for (const line of outText.split('\n')) {
       const t = line.trim();
       if (!t) continue;
-      try {
-        const row = JSON.parse(t) as DnsxRow;
-        if (!row.host) continue;
-        const target = row.host;
-        for (const v of row.a ?? [])     push(target, target, 'A', v, row.ttl);
-        for (const v of row.aaaa ?? [])  push(target, target, 'AAAA', v, row.ttl);
-        for (const v of row.cname ?? []) push(target, target, 'CNAME', v, row.ttl);
-        for (const v of row.mx ?? [])    push(target, target, 'MX', v, row.ttl);
-        for (const v of row.ns ?? [])    push(target, target, 'NS', v, row.ttl);
-        for (const v of row.txt ?? [])   push(target, target, 'TXT', v, row.ttl);
-        for (const v of row.ptr ?? [])   push(target, target, 'PTR', v, row.ttl);
-        for (const v of row.srv ?? [])   push(target, target, 'SRV', v, row.ttl);
-        for (const v of row.caa ?? [])   push(target, target, 'CAA', v, row.ttl);
-        for (const s of row.soa ?? []) {
-          const val = typeof s === 'string' ? s : (s.ns ?? '');
-          if (val) push(target, target, 'SOA', val, row.ttl);
-        }
-      } catch { /* ignore */ }
+      for (const rec of dnsxRecords(t)) push(rec.target, rec.name, rec.type, rec.value, rec.ttl);
     }
     // Archive state comes from this run's answers only: dns_records keeps stale
     // A rows for dead hosts. A failed or empty run proves nothing, so it must

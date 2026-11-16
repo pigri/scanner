@@ -51,8 +51,40 @@ export function decideHostStates(
   return out;
 }
 
-const hasAddress = (v: unknown): boolean =>
-  Array.isArray(v) && v.some((x) => typeof x === 'string' && x !== '');
+// The non-empty string entries of a dnsx record field; anything else is ignored.
+export const stringList = (v: unknown): string[] =>
+  Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x !== '') : [];
+
+const hasAddress = (v: unknown): boolean => stringList(v).length > 0;
+
+const DNSX_RECORD_FIELDS = [
+  ['a', 'A'], ['aaaa', 'AAAA'], ['cname', 'CNAME'], ['mx', 'MX'], ['ns', 'NS'],
+  ['txt', 'TXT'], ['ptr', 'PTR'], ['srv', 'SRV'], ['caa', 'CAA'],
+] as const;
+
+export interface DnsxRecord { target: string; name: string; type: string; value: string; ttl?: number }
+
+// One dnsx -j line to the dns_records rows it holds. Untrusted input: a row
+// without a string host, or a field that is not a list, yields nothing.
+export function dnsxRecords(line: string): DnsxRecord[] {
+  let row: Record<string, unknown> | null;
+  try { row = JSON.parse(line) as Record<string, unknown> | null; } catch { return []; }
+  if (!row || typeof row !== 'object' || typeof row.host !== 'string' || !row.host) return [];
+  const target = row.host;
+  const ttl = typeof row.ttl === 'number' ? row.ttl : undefined;
+  const out: DnsxRecord[] = [];
+  const add = (type: string, value: string): void => {
+    out.push(ttl === undefined ? { target, name: target, type, value } : { target, name: target, type, value, ttl });
+  };
+  for (const [field, type] of DNSX_RECORD_FIELDS) for (const v of stringList(row[field])) add(type, v);
+  if (Array.isArray(row.soa)) {
+    for (const s of row.soa) {
+      const val = typeof s === 'string' ? s : (s && typeof s === 'object' && typeof (s as { ns?: unknown }).ns === 'string' ? (s as { ns: string }).ns : '');
+      if (val) add('SOA', val);
+    }
+  }
+  return out;
+}
 
 // Reads dnsx -j output. `rows` counts parsed rows with a host, so a caller can
 // tell an empty output (crash, timeout) from a run that answered.
