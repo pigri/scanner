@@ -101,7 +101,13 @@ export async function runNetinfoPtr(opts: NetinfoOpts & { ptr: PtrOpts }): Promi
   const { out, result } = derive(opts);
   const publicIps = [...new Set(out.filter((r) => r.ip_class === 'public').map((r) => r.ip))];
   const stats = { skippedByBudget: 0 };
-  const found = await (opts.ptr.lookup ?? lookupPtrs)(publicIps, { budgetMs: opts.ptr.budgetMs, stats });
+  let found = new Map<string, string[] | null>();
+  try {
+    found = await (opts.ptr.lookup ?? lookupPtrs)(publicIps, { budgetMs: opts.ptr.budgetMs, stats });
+  } catch (e) {
+    console.error(`netinfo: ptr lookup failed, writing rows without names: ${e instanceof Error ? e.message : String(e)}`);
+    stats.skippedByBudget = 0;
+  }
   result.ptr.looked_up = publicIps.length;
   result.ptr.skipped_budget = stats.skippedByBudget;
   for (const ip of publicIps) {

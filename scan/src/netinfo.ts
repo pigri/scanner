@@ -1,7 +1,7 @@
 #!/usr/bin/env -S node --loader tsx
 // netinfo: derive per-target network info (IP, version, class, ASN, country)
 // from ports and dns_records evidence into target_network. Local reads and one
-// MMDB file: no network I/O except reverse DNS with --ptr. A missing MMDB still
+// MMDB file: no network I/O except PTR lookups with --ptr. A missing MMDB still
 // writes the IP rows.
 import fs from 'node:fs';
 import { parseCommonCli, commonUsage, prepareTargets } from './lib/runner.js';

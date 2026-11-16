@@ -342,6 +342,23 @@ describe('runNetinfoPtr', () => {
     expect(r.ptr).toEqual({ looked_up: 2, found: 1, empty: 0, failed: 0, skipped_budget: 1 });
   });
 
+  it('still writes every row, with NULL ptr_json, when the lookup throws or rejects', async () => {
+    const throwers: Lookup[] = [
+      (() => { throw new Error('sync'); }) as Lookup,
+      async () => { throw new Error('async'); },
+    ];
+    for (const lookup of throwers) {
+      const db = openDb(':memory:');
+      port(db, 'a.example', '192.0.2.10', T0);
+      port(db, 'a.example', '192.0.2.11', T0);
+      const r = await runNetinfoPtr({ db, targets: ['a.example'], geo: null, now: NOW, ptr: { budgetMs: 1000, lookup } });
+      expect(r.rowsWritten).toBe(2);
+      expect(ptrOf(db, '192.0.2.10')).toBeNull();
+      expect(ptrOf(db, '192.0.2.11')).toBeNull();
+      expect(r.ptr).toEqual({ looked_up: 2, found: 0, empty: 0, failed: 2, skipped_budget: 0 });
+    }
+  });
+
   it('runNetinfo (ptr off) never calls a lookup and leaves ptr_json NULL', () => {
     const db = openDb(':memory:');
     port(db, 'a.example', '192.0.2.10', T0);

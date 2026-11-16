@@ -20,7 +20,7 @@ export function sanitizePtrNames(names: unknown): string[] {
 }
 
 export interface PtrResolver {
-  reverse(ip: string): Promise<string[]>;
+  resolvePtr(name: string): Promise<string[]>;
   cancel?(): void;
 }
 
@@ -34,21 +34,32 @@ export interface LookupPtrsOpts {
   stats?: { skippedByBudget: number };
 }
 
-/**
- * The c-ares timeout sits well above the race timeout: a silent resolver makes
- * c-ares reject with ENOTFOUND after its own timeout, which would read as "no PTR".
- * Our timer must always fire first, so the answer is null.
- */
-export function defaultResolverOptions(timeoutMs: number): { timeout: number; tries: number } {
-  return { timeout: timeoutMs * 3, tries: 1 };
+/** The in-addr.arpa / ip6.arpa name for a normalised IP (lower-case, `::` compressed, no embedded IPv4). */
+export function arpaName(ip: string): string {
+  if (!ip.includes(':')) return `${ip.split('.').reverse().join('.')}.in-addr.arpa`;
+  const halves = ip.split('::');
+  const part = (x: string | undefined): string[] => (x ? x.split(':') : []);
+  const head = part(halves[0]);
+  const tail = part(halves[1]);
+  const fill = new Array<string>(Math.max(0, 8 - head.length - tail.length)).fill('0');
+  const nibbles = [...head, ...fill, ...tail].map((g) => g.padStart(4, '0')).join('');
+  return `${nibbles.split('').reverse().join('.')}.ip6.arpa`;
 }
 
-const errCode = (e: unknown): string | undefined => (e as { code?: string } | null)?.code;
+/**
+ * [] only when the server says the name does not exist or has no PTR record.
+ * Every other failure is unknown (null), so a transient error never wipes stored names.
+ */
+export function ptrOutcome(err: unknown): [] | null {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === 'ENOTFOUND' || code === 'ENODATA' ? [] : null;
+}
 
 /**
- * Reverse-resolves each distinct IP. [] = the resolver says there is no PTR,
+ * Resolves the PTR record of each distinct IP. [] = the resolver says there is no PTR,
  * null = unknown (error, timeout, or budget spent), to be retried next run.
- * Only Resolver.reverse is used: c-ares reads the namespace resolv.conf.
+ * Only Resolver#resolvePtr on the arpa name is used (Resolver#reverse reports every
+ * failure as ENOTFOUND and reads /etc/hosts); c-ares reads the namespace resolv.conf.
  */
 export async function lookupPtrs(ips: readonly string[], opts: LookupPtrsOpts): Promise<Map<string, string[] | null>> {
   const timeoutMs = opts.timeoutMs ?? 3000;
@@ -59,16 +70,16 @@ export async function lookupPtrs(ips: readonly string[], opts: LookupPtrsOpts): 
   if (opts.stats) opts.stats.skippedByBudget = 0;
   if (queue.length === 0) return result;
 
-  const resolver: PtrResolver = opts.resolver ?? new dns.promises.Resolver(defaultResolverOptions(timeoutMs));
+  const resolver: PtrResolver = opts.resolver ?? new dns.promises.Resolver({ timeout: timeoutMs, tries: 1 });
   const start = now();
   let next = 0;
 
   const one = async (ip: string): Promise<string[] | null> => {
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<null>((res) => { timer = setTimeout(() => res(null), timeoutMs); });
-    const lookup = resolver.reverse(ip).then(
+    const lookup = Promise.resolve().then(() => resolver.resolvePtr(arpaName(ip))).then(
       (names) => sanitizePtrNames(names),
-      (e: unknown) => (errCode(e) === 'ENOTFOUND' || errCode(e) === 'ENODATA' ? [] : null),
+      (e: unknown) => ptrOutcome(e),
     );
     try { return await Promise.race([lookup, timeout]); }
     finally { clearTimeout(timer); }

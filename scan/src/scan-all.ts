@@ -64,7 +64,7 @@ Each stage inherits --scope / --strict / --targets / --sqlite.
 Env vars:
   SKIP=wpscan,gowitness,smb skip these stages ("smb" skips all three SMB tools)
   NETINFO_FLAGS="--mmdb F"  extra flags for the netinfo stage (like <TOOL>_FLAGS);
-                            "--no-ptr" turns its reverse-DNS lookups off
+                            "--no-ptr" turns its PTR lookups off
   RUN_TESTSSL=1            run the testssl stage (off by default — sslyze covers
                            TLS/certs; testssl hangs on many hosts)
   SEQUENTIAL=1              fall back to strict sequential (legacy behaviour)
