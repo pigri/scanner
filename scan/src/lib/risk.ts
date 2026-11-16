@@ -31,7 +31,30 @@ export interface TargetSignals {
   hostSuffix?: string;             // expected suffix, e.g. 'gov.hu' — used with hostCountryCode
   firstSeen: string | null;        // ISO
   now: string;                     // ISO
+  hostCountryDetail?: HostCountryDetail;  // how hostCountryCode was chosen, copied into the breakdown
+  networkChange?: { count: number };      // recent network-change events (see lib/risk-network.ts)
 }
+
+export interface HostCountryDetail {
+  code: string | null;
+  /** network = current public IPs in target_network; discovery = the discovery db; none = neither had a country. */
+  source: 'network' | 'discovery' | 'none';
+  /** Current public IPs per country. A tie is broken by the lowest code. */
+  counts: Record<string, number>;
+  tie: boolean;
+}
+
+export interface ScoreOptions {
+  /** Points added when the target had a recent network change. Defaults to NETWORK_CHANGED_BUMP. */
+  networkChangedBump?: number;
+}
+
+/**
+ * Points for a recent network change (new country or ASN, or an IP in an ASN the
+ * target did not use before). The size is the owner's call; 0 keeps scores as
+ * they were until it is set.
+ */
+export const NETWORK_CHANGED_BUMP = 0;
 
 export interface Breakdown {
   critical: number;
@@ -57,6 +80,9 @@ export interface Breakdown {
   sharedIp: number;
   foreign: number;
   fresh: number;
+  networkChanged: number;                 // points; 0 when no recent change or the bump is 0
+  networkChangedEvents: number;           // qualifying events in the last 30 days
+  hostCountry?: HostCountryDetail;
   total: number;
 }
 
@@ -95,7 +121,7 @@ function tieredPoints(n: number, perUnit: number, linearN: number, tailRate: num
   return Math.min(cap, linear + tail);
 }
 
-export function computeScore(s: TargetSignals): ScoreResult {
+export function computeScore(s: TargetSignals, o: ScoreOptions = {}): ScoreResult {
   let critical = 0, high = 0, medium = 0, low = 0, info = 0, cves = 0;
   let takeover = 0, tlsWeak = 0, wordpress = 0;
   let reviewSkipped = 0;
@@ -186,10 +212,13 @@ export function computeScore(s: TargetSignals): ScoreResult {
     if (d >= 0 && d < 7) fresh = 3;
   }
 
+  const networkChangedEvents = s.networkChange?.count ?? 0;
+  const networkChanged = networkChangedEvents > 0 ? (o.networkChangedBump ?? NETWORK_CHANGED_BUMP) : 0;
+
   const total =
     criticalPoints + highPoints + mediumPoints + lowPoints + infoPoints + cvePoints + versionMatchPoints +
     takeover + tlsWeak + wordpress +
-    portPoints + keywordPoints + sharedIp + foreign + fresh;
+    portPoints + keywordPoints + sharedIp + foreign + fresh + networkChanged;
 
   // Hard-capped 0-100. A bounded scale is easier to reason about at a
   // glance ("this host is at 87 of 100") than an unbounded severity total
@@ -207,7 +236,9 @@ export function computeScore(s: TargetSignals): ScoreResult {
       versionMatch: versionMatchCves.size, versionMatchPoints,
       takeover, tlsWeak, wordpress,
       portPoints, keywordPoints, keywords,
-      sharedIp, foreign, fresh, total,
+      sharedIp, foreign, fresh, networkChanged, networkChangedEvents,
+      ...(s.hostCountryDetail ? { hostCountry: s.hostCountryDetail } : {}),
+      total,
     },
   };
 }

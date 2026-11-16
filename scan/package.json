@@ -52,6 +52,7 @@
     "db-init": "tsx src/db-init.ts",
     "query": "tsx src/query.ts",
     "risk": "tsx src/risk.ts",
+    "risk-dry-run": "tsx src/risk-dry-run.ts",
     "retention": "tsx src/retention.ts",
     "synthesize-eol": "tsx src/synthesize-eol.ts",
     "export-cert-sans": "tsx src/export-cert-sans.ts",

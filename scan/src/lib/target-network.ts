@@ -1,3 +1,4 @@
+import type Database from 'better-sqlite3';
 /** The UI never migrates: pass hasFromHttp=false for a DB whose target_network predates from_http. */
 export const targetNetworkSql = (hasFromHttp: boolean): string => `SELECT ip, ip_version, ip_class, asn, as_name, as_domain, country_code, country,
   geo_checked_at, ptr_json, from_ports, from_dns, ${hasFromHttp ? 'from_http' : '0 AS from_http'}, first_seen, last_seen
@@ -226,6 +227,21 @@ export interface NetworkSummary {
   unreachableSince: string | null;
 }
 
+/** Scan status and currency of one target's rows: the rule the list uses. */
+export function listCurrent(
+  target: string,
+  group: readonly ListNetworkRow[],
+  ctx?: ListScanContext,
+): { statuses: ScanStatus[]; current: boolean[] } {
+  const old = markCurrent(group);
+  const untracked = ctx?.untracked.has(target) ?? false;
+  const statuses = group.map((r) =>
+    ctx ? scanStatus(r.last_seen, r.started_at ?? null, untracked, ctx.trackingStart) : ('none' as const),
+  );
+  const current = group.map((_, i) => (statuses[i] === 'none' ? old[i]! : statuses[i] !== 'no'));
+  return { statuses, current };
+}
+
 /**
  * Distinct countries and ASNs of each target's current public IPs. Rows must be
  * grouped by target. With a context, currency follows the latest scan (see
@@ -237,12 +253,7 @@ export function summarizeNetworks(
 ): Map<string, NetworkSummary> {
   const out = new Map<string, NetworkSummary>();
   const flush = (target: string, group: ListNetworkRow[]): void => {
-    const old = markCurrent(group);
-    const untracked = ctx?.untracked.has(target) ?? false;
-    const statuses = group.map((r) =>
-      ctx ? scanStatus(r.last_seen, r.started_at ?? null, untracked, ctx.trackingStart) : ('none' as const),
-    );
-    const current = group.map((_, i) => (statuses[i] === 'none' ? old[i]! : statuses[i] !== 'no'));
+    const { statuses, current } = listCurrent(target, group, ctx);
     const countries = new Set<string>();
     const asns = new Set<string>();
     group.forEach((r, i) => {
@@ -294,4 +305,23 @@ export function historyText(e: HistoryDbRow): string {
   }
   const label = e.kind === 'ip_added' ? 'added' : e.kind === 'ip_gone' ? 'gone' : e.kind === 'ip_back' ? 'back' : e.kind;
   return `${label}${inferred}`;
+}
+
+/**
+ * The dns_records side of the list's current rule. SELECT-only: the read-only UI
+ * never runs the migration that adds dns_records.last_seen, so its absence is
+ * handled here.
+ */
+export function loadListScanContext(db: Database.Database): ListScanContext {
+  const has = (name: string): boolean =>
+    db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
+  if (!has('dns_records')) return { untracked: new Set(), trackingStart: null };
+  const hasLastSeen = (db.prepare('PRAGMA table_info(dns_records)').all() as { name: string }[]).some((c) => c.name === 'last_seen');
+  if (!hasLastSeen) {
+    const all = db.prepare('SELECT DISTINCT target FROM dns_records').all() as { target: string }[];
+    return { untracked: new Set(all.map((r) => r.target)), trackingStart: null };
+  }
+  const untracked = new Set((db.prepare(DNS_UNTRACKED_TARGETS_SQL).all() as { target: string }[]).map((r) => r.target));
+  const t = db.prepare(DNS_TRACKING_START_SQL).get() as { tracking_start: string | null };
+  return { untracked, trackingStart: t.tracking_start };
 }
