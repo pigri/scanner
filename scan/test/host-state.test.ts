@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { decideHostStates, parseDnsxResolved, shouldApplyResolution, DNS_ARCHIVE_THRESHOLD, type HostStateRow } from '../src/lib/host-state.js';
+import { decideHostStates, parseDnsxResolved, dnsxRecords, shouldApplyResolution, DNS_ARCHIVE_THRESHOLD, type HostStateRow } from '../src/lib/host-state.js';
 
 const T1 = '2026-11-01T00:00:00Z';
 const T2 = '2026-11-02T00:00:00Z';
@@ -107,6 +107,41 @@ describe('parseDnsxResolved', () => {
     expect(r.rows).toBe(1);
   });
 
+  it('does not count a row whose host is not a non-empty string', () => {
+    const text = [JSON.stringify({ host: 5, a: ['192.0.2.1'] }), JSON.stringify({ host: '', a: ['192.0.2.1'] }), JSON.stringify({ host: ['a.example'], a: ['192.0.2.1'] })].join('\n');
+    const r = parseDnsxResolved(text);
+    expect(r.rows).toBe(0);
+    expect(r.resolved.size).toBe(0);
+  });
+
+  it('does not resolve a host whose a is a string rather than a list', () => {
+    const r = parseDnsxResolved(JSON.stringify({ host: 'x.example', a: 'nonempty' }));
+    expect(r.rows).toBe(1);
+    expect(r.resolved.size).toBe(0);
+  });
+
+  it('does not resolve a host whose list holds no non-empty string', () => {
+    const text = [
+      JSON.stringify({ host: 'a.example', a: [42] }),
+      JSON.stringify({ host: 'b.example', a: [''], aaaa: [null] }),
+    ].join('\n');
+    const r = parseDnsxResolved(text);
+    expect(r.rows).toBe(2);
+    expect(r.resolved.size).toBe(0);
+  });
+
+  it('resolves on aaaa when a is an empty list', () => {
+    const r = parseDnsxResolved(JSON.stringify({ host: 'x.example', a: [], aaaa: ['2001:db8::1'] }));
+    expect([...r.resolved]).toEqual(['x.example']);
+  });
+
+  it('skips null, array and scalar lines', () => {
+    const text = ['null', '[]', '5', '"x"', JSON.stringify({ host: 'a.example', a: ['192.0.2.1'] })].join('\n');
+    const r = parseDnsxResolved(text);
+    expect([...r.resolved]).toEqual(['a.example']);
+    expect(r.rows).toBe(1);
+  });
+
   it('reports zero rows for empty output', () => {
     expect(parseDnsxResolved('')).toEqual({ rows: 0, resolved: new Set() });
   });
@@ -122,5 +157,51 @@ describe('shouldApplyResolution', () => {
   });
   it('accepts a clean exit with output rows', () => {
     expect(shouldApplyResolution(0, 1)).toBe(true);
+  });
+});
+
+describe('dnsxRecords', () => {
+  const vals = (line: unknown) => dnsxRecords(JSON.stringify(line)).map((r) => `${r.type}:${r.value}`);
+
+  it('stores no A records for a string a', () => {
+    expect(vals({ host: 'x.example', a: 'abc' })).toEqual([]);
+  });
+  it('stores only the string entries of a list', () => {
+    expect(vals({ host: 'x.example', a: [42, '192.0.2.1', ''] })).toEqual(['A:192.0.2.1']);
+  });
+  it('stores nothing for a non-string or empty host', () => {
+    expect(vals({ host: 5, a: ['192.0.2.1'] })).toEqual([]);
+    expect(vals({ host: '', a: ['192.0.2.1'] })).toEqual([]);
+    expect(dnsxRecords('null')).toEqual([]);
+    expect(dnsxRecords('not json')).toEqual([]);
+  });
+  const ALL = {
+    host: 'x.example', a: ['192.0.2.1'], aaaa: ['2001:db8::1'], cname: ['y.example'],
+    mx: ['mx.example'], ns: ['ns1.example'], txt: ['v=spf1 -all'], ptr: ['p.example'],
+    srv: ['0 5 5060 sip.example'], caa: ['0 issue "ca.example"'],
+    soa: [{ ns: 'ns.example', mailbox: 'h.example' }, 'ns2.example'],
+  };
+  const withTtl = (ttl?: number) => [
+    ['A', '192.0.2.1'], ['AAAA', '2001:db8::1'], ['CNAME', 'y.example'], ['MX', 'mx.example'],
+    ['NS', 'ns1.example'], ['TXT', 'v=spf1 -all'], ['PTR', 'p.example'],
+    ['SRV', '0 5 5060 sip.example'], ['CAA', '0 issue "ca.example"'],
+    ['SOA', 'ns.example'], ['SOA', 'ns2.example'],
+  ].map(([type, value]) => ({ target: 'x.example', name: 'x.example', type, value, ...(ttl === undefined ? {} : { ttl }) }));
+
+  it('stores a well-formed row as before, every field in order', () => {
+    expect(dnsxRecords(JSON.stringify({ ...ALL, ttl: 300 }))).toEqual(withTtl(300));
+  });
+  it('stores records with no ttl key and sets no ttl', () => {
+    const rows = dnsxRecords(JSON.stringify(ALL));
+    expect(rows).toEqual(withTtl());
+    expect(rows.every((r) => !('ttl' in r))).toBe(true);
+  });
+  it('keeps the records but drops a string ttl', () => {
+    const rows = dnsxRecords(JSON.stringify({ ...ALL, ttl: '300' }));
+    expect(rows).toEqual(withTtl());
+    expect(rows.every((r) => !('ttl' in r))).toBe(true);
+  });
+  it('stores a ttl of 0 as 0', () => {
+    expect(dnsxRecords(JSON.stringify({ ...ALL, ttl: 0 }))).toEqual(withTtl(0));
   });
 });
