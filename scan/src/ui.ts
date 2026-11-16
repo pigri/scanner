@@ -20,6 +20,10 @@ import {
   TARGET_NETWORK_SQL,
   TARGET_NETWORK_LIST_SQL,
   shapeNetworkRows,
+  TARGET_SCAN_SQL,
+  TARGET_ANSWERED_SQL,
+  TARGET_ANSWERED_DNS_SQL,
+  DNS_TRACKING_SQL,
   summarizeNetworks,
   type ListNetworkRow,
   type NetworkDbRow,
@@ -99,6 +103,24 @@ const recon =
   opts.reconDb && fs.existsSync(opts.reconDb) ? openReadonly(opts.reconDb) : null;
 
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
+
+interface AnsweredRow {
+  source: 'port' | 'http' | 'dns';
+  at: string | null;
+  n: number;
+}
+
+/** The newest sighting across sources; ties and unparsable times keep the earlier source. */
+function newestAnswer(rows: readonly AnsweredRow[]): { at: string; source: string } | null {
+  let best: { at: string; source: string; t: number } | null = null;
+  for (const r of rows) {
+    if (!r.at) continue;
+    const t = Date.parse(r.at);
+    const key = Number.isFinite(t) ? t : -Infinity;
+    if (!best || key > best.t) best = { at: r.at, source: r.source, t: key };
+  }
+  return best ? { at: best.at, source: best.source } : null;
+}
 
 function tableExists(db: Database.Database, name: string): boolean {
   return !!db
@@ -477,8 +499,39 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
           .prepare(`SELECT type, value, ttl FROM dns_records WHERE target=? ORDER BY type`)
           .all(t)
       : [];
+    const queueRow = tableExists(scan, 'scan_queue')
+      ? (scan.prepare(TARGET_SCAN_SQL).get(t) as
+          | { status: string; started_at: string | null; finished_at: string | null }
+          | undefined)
+      : undefined;
+    const doneStart = queueRow?.status === 'done' ? queueRow.started_at : null;
+    const hasDns = tableExists(scan, 'dns_records');
+    const tracking = hasDns
+      ? (scan.prepare(DNS_TRACKING_SQL).get({ t }) as { tracking_start: string | null; untracked: number })
+      : { tracking_start: null, untracked: 0 };
+    const answered = [
+      ...(scan.prepare(TARGET_ANSWERED_SQL).all({ t, s: doneStart }) as AnsweredRow[]),
+      ...(hasDns ? (scan.prepare(TARGET_ANSWERED_DNS_SQL).all({ t, s: doneStart }) as AnsweredRow[]) : []),
+    ];
+    const count = (src: string): number => answered.find((a) => a.source === src)?.n ?? 0;
+    const latestScan = !queueRow
+      ? null
+      : doneStart && queueRow
+        ? {
+            started_at: doneStart,
+            finished_at: queueRow.finished_at,
+            ports: count('port'),
+            http: count('http'),
+            dns: count('dns'),
+          }
+        : { state: queueRow.status === 'failed' ? 'failed' : queueRow.status === 'in_progress' ? 'scanning' : 'queued' };
+    const lastAnswered = newestAnswer(answered);
     const network = tableExists(scan, 'target_network')
-      ? shapeNetworkRows(scan.prepare(TARGET_NETWORK_SQL).all(t) as NetworkDbRow[])
+      ? shapeNetworkRows(scan.prepare(TARGET_NETWORK_SQL).all(t) as NetworkDbRow[], {
+          startedAt: doneStart,
+          dnsUntracked: tracking.untracked === 1,
+          trackingStart: tracking.tracking_start,
+        })
       : [];
     return {
       target: t,
@@ -495,6 +548,9 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
       certs,
       dns,
       network,
+      latestScan,
+      lastAnswered,
+      dnsTrackedSince: tracking.tracking_start,
     };
   },
 
@@ -1437,13 +1493,19 @@ async function renderTarget(t){
       d.updated_at?el('div',{class:'muted'},'updated ',el('span',{class:'mono'},isoSec(d.updated_at))):'',
       d.risk&&d.risk.breakdown&&d.risk.breakdown.keywords&&d.risk.breakdown.keywords.length?el('div',{class:'muted'},'keywords: '+d.risk.breakdown.keywords.join(', ')):''));
   const panels=[head];
-  if(d.network&&d.network.length)panels.push(el('div',{class:'panel'},el('h2',{},'Network ('+d.network.length+')'),
-    table(['IP','v','ASN','AS name','AS domain','IP country','PTR','Seen via','First seen','Last seen'],d.network.map(n=>{
+  const ls=d.latestScan;
+  const scanLine=!ls?null:ls.state?el('div',{class:'muted',style:'margin-bottom:8px'},'Latest scan: '+(ls.state==='scanning'?'in progress':ls.state==='failed'?'failed':'queued, not scanned yet')):
+    el('div',{class:'muted',style:'margin-bottom:8px'},'Latest scan ',el('span',{class:'mono'},isoSec(ls.started_at)),': ',
+      (ls.ports?num(ls.ports)+' ports':'no ports')+' · '+(ls.http?num(ls.http)+' HTTP':'no HTTP')+' · '+(ls.dns?num(ls.dns)+' DNS':'no DNS'),
+      d.lastAnswered?el('span',{},' · Last answered ',el('span',{class:'mono'},isoSec(d.lastAnswered.at)),' ('+(d.lastAnswered.source==='http'?'HTTP':d.lastAnswered.source==='dns'?'DNS':'port')+')'):el('span',{},' · never answered'));
+  const hasNet=d.network&&d.network.length;
+  if(hasNet||scanLine)panels.push(el('div',{class:'panel'},el('h2',{},'Network'+(hasNet?' ('+d.network.length+')':'')),scanLine||'',
+    hasNet?table(['IP','v','ASN','AS name','AS domain','IP country','PTR','Seen via','In latest scan','First seen','Last seen'],d.network.map(n=>{
       const pub=n.ipClass==='public';
       const geoNote=n.geo==='none'?'pending':n.geo==='miss'?'no data':'';
       const geoCell=f=>pub?(n.geo==='hit'?esc(f):el('span',{class:'muted'},geoNote)):'';
       return [
-        el('span',{class:'mono'},n.ip,n.current?'':el('span',{class:'pill muted',style:'margin-left:6px',title:'not seen in the latest scan'},'previous')),
+        el('span',{class:'mono'},n.ip,n.current?'':el('span',{class:'pill muted',style:'margin-left:6px',title:'not seen in the latest scan ('+(ls&&ls.started_at?isoSec(ls.started_at):'')+')'},'previous')),
         String(n.ipVersion),
         pub?geoCell(n.asn):el('span',{class:'pill muted'},n.ipClass),
         geoCell(n.as_name),
@@ -1451,9 +1513,10 @@ async function renderTarget(t){
         pub?(n.geo==='hit'?el('span',{title:esc(n.country)},esc(n.country_code)):el('span',{class:'muted'},geoNote)):'',
         n.ptr===null?el('span',{class:'muted',title:'not looked up'},'–'):n.ptr.length?el('span',{class:'mono'},n.ptr.join(', ')):el('span',{class:'muted'},'none'),
         esc(n.seenVia.join(' + ')),
+        n.scanStatus==='yes'?'yes':n.scanStatus==='no'?el('span',{class:'muted'},'no'):n.scanStatus==='unknown'?el('span',{class:'muted',title:'DNS was not tracked per scan before '+(d.dnsTrackedSince?isoSec(d.dnsTrackedSince):'then')},'unknown'):el('span',{class:'muted'},'–'),
         el('span',{class:'mono muted'},isoSec(n.first_seen)),
         el('span',{class:'mono muted'},isoSec(n.last_seen))];
-    }))));
+    })):''));
   if(d.ports.length)panels.push(el('div',{class:'panel'},el('h2',{},'Ports ('+d.ports.length+')'),
     table(['Port','Proto','Service','Product','Version','TLS','Found by'],d.ports.map(p=>[String(p.port),esc(p.protocol),esc(p.service),esc(p.product),esc(p.version),esc(p.tunnel),el('span',{class:'mono muted'},esc(p.tools||''))]))));
   if(d.http.length)panels.push(el('div',{class:'panel'},el('h2',{},'HTTP ('+d.http.length+')'),
