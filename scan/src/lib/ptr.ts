@@ -34,6 +34,15 @@ export interface LookupPtrsOpts {
   stats?: { skippedByBudget: number };
 }
 
+/**
+ * The c-ares timeout sits well above the race timeout: a silent resolver makes
+ * c-ares reject with ENOTFOUND after its own timeout, which would read as "no PTR".
+ * Our timer must always fire first, so the answer is null.
+ */
+export function defaultResolverOptions(timeoutMs: number): { timeout: number; tries: number } {
+  return { timeout: timeoutMs * 3, tries: 1 };
+}
+
 const errCode = (e: unknown): string | undefined => (e as { code?: string } | null)?.code;
 
 /**
@@ -50,7 +59,7 @@ export async function lookupPtrs(ips: readonly string[], opts: LookupPtrsOpts): 
   if (opts.stats) opts.stats.skippedByBudget = 0;
   if (queue.length === 0) return result;
 
-  const resolver: PtrResolver = opts.resolver ?? new dns.promises.Resolver({ timeout: timeoutMs, tries: 1 });
+  const resolver: PtrResolver = opts.resolver ?? new dns.promises.Resolver(defaultResolverOptions(timeoutMs));
   const start = now();
   let next = 0;
 

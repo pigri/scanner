@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sanitizePtrNames, lookupPtrs } from '../src/lib/ptr.js';
+import { sanitizePtrNames, lookupPtrs, defaultResolverOptions } from '../src/lib/ptr.js';
 
 const err = (code: string): Error => Object.assign(new Error(code), { code });
 
@@ -76,6 +76,14 @@ describe('lookupPtrs', () => {
     expect(cancelled).toBe(1);
   });
 
+  it('maps an ENOTFOUND that arrives after the race timeout to null, not []', async () => {
+    const out = await lookupPtrs(['192.0.2.1'], {
+      timeoutMs: 20, budgetMs: 10_000,
+      resolver: { reverse: () => new Promise<string[]>((_, rej) => setTimeout(() => rej(err('ENOTFOUND')), 80)) },
+    });
+    expect(out.get('192.0.2.1')).toBeNull();
+  });
+
   it('never exceeds the concurrency cap', async () => {
     let inflight = 0, peak = 0;
     const ips = Array.from({ length: 12 }, (_, i) => `192.0.2.${i + 1}`);
@@ -117,5 +125,13 @@ describe('lookupPtrs', () => {
 
   it('handles an empty list without building a resolver', async () => {
     expect((await lookupPtrs([], { budgetMs: 1 })).size).toBe(0);
+  });
+});
+
+describe('defaultResolverOptions', () => {
+  it('keeps the c-ares timeout well above the race timeout, with one try', () => {
+    const o = defaultResolverOptions(4000);
+    expect(o.tries).toBe(1);
+    expect(o.timeout).toBeGreaterThanOrEqual(4000 * 2);
   });
 });
