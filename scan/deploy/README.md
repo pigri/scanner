@@ -291,6 +291,8 @@ systemctl --user restart scan-worker
 systemctl --user stop scan-worker        # SIGTERM to the worker, which forwards it to scan-all and returns the batch to pending (60 s grace, then SIGKILL)
 ```
 
+The worker units enter the namespace with `sudo ip netns exec` and drop back to the unit user with `setpriv`, which execs in place. They do not use `runuser`: it keeps a watching parent that SIGKILLs its child 2 s after SIGTERM, so the worker would never get its 60 s grace to forward the stop and release the batch.
+
 Enqueue work at any time; the running daemon picks it up within one poll interval:
 
 ```bash
