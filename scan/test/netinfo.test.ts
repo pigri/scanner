@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { openDb, type Db } from '../src/lib/db.js';
 import { runNetinfo, runNetinfoPtr } from '../src/lib/netinfo.js';
+import { scanStatus } from '../src/lib/target-network.js';
 import type { GeoLookup, GeoRow } from '../src/lib/geoip.js';
 
 const T0 = '2026-11-01T00:00:00.000Z';
@@ -13,7 +14,7 @@ type Row = {
   target: string; ip: string; ip_version: number; ip_class: string;
   asn: string | null; as_name: string | null; as_domain: string | null;
   country_code: string | null; country: string | null; geo_checked_at: string | null;
-  ptr_json: string | null; from_ports: number; from_dns: number; first_seen: string; last_seen: string;
+  ptr_json: string | null; from_ports: number; from_dns: number; from_http: number; first_seen: string; last_seen: string;
 };
 
 const rows = (db: Db, where = '1=1'): Row[] =>
@@ -365,5 +366,46 @@ describe('runNetinfoPtr', () => {
     const r = runNetinfo({ db, targets: ['a.example'], geo: null, now: NOW });
     expect(ptrOf(db, '192.0.2.10')).toBeNull();
     expect(r.ptr).toEqual({ looked_up: 0, found: 0, empty: 0, failed: 0, skipped_budget: 0 });
+  });
+});
+
+describe('runNetinfo http evidence', () => {
+  const http = (db: Db, target: string, ip: string | null, at: string) =>
+    db.insertHttpProbe({ target, url: `https://${target}`, ip }, at, null);
+
+  it('gives an http-only IP a row with from_http=1 and the probe time', () => {
+    const db = openDb(':memory:');
+    http(db, 'a.example', '192.0.2.30', T1);
+    http(db, 'a.example', '192.0.2.30', T2);
+    runNetinfo({ db, targets: ['a.example'], geo: null, now: NOW });
+    expect(rows(db).map((x) => [x.ip, x.from_ports, x.from_dns, x.from_http, x.first_seen, x.last_seen]))
+      .toEqual([['192.0.2.30', 0, 0, 1, T1, T2]]);
+  });
+
+  it('merges http with ports and dns evidence for one IP', () => {
+    const db = openDb(':memory:');
+    port(db, 'a.example', '192.0.2.30', T0);
+    dns(db, 'a.example', 'A', '192.0.2.30', T1);
+    http(db, 'a.example', '192.0.2.30', T2);
+    runNetinfo({ db, targets: ['a.example'], geo: null, now: NOW });
+    expect(rows(db).map((x) => [x.from_ports, x.from_dns, x.from_http, x.first_seen, x.last_seen])).toEqual([[1, 1, 1, T0, T2]]);
+  });
+
+  it('ignores probes with a NULL ip and counts none as invalid', () => {
+    const db = openDb(':memory:');
+    http(db, 'a.example', null, T1);
+    const r = runNetinfo({ db, targets: ['a.example'], geo: null, now: NOW });
+    expect(rows(db)).toHaveLength(0);
+    expect(r.skippedInvalid).toBe(0);
+  });
+
+  it('is scanStatus yes when only http saw the IP in the latest scan', () => {
+    const db = openDb(':memory:');
+    port(db, 'a.example', '192.0.2.10', T0);
+    http(db, 'a.example', '192.0.2.30', T2);
+    runNetinfo({ db, targets: ['a.example'], geo: null, now: NOW });
+    const by = Object.fromEntries(rows(db).map((x) => [x.ip, x.last_seen]));
+    expect(scanStatus(by['192.0.2.30']!, T1, false, null)).toBe('yes');
+    expect(scanStatus(by['192.0.2.10']!, T1, false, null)).toBe('no');
   });
 });

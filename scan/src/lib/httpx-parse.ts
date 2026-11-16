@@ -1,12 +1,24 @@
 import type { Db, HttpProbeRow } from './db.js';
+import { normalizeIp } from './ip.js';
 
 interface HttpxRow {
-  input?: string; url?: string; host?: string;
+  input?: string; url?: string; host?: string; host_ip?: unknown; a?: unknown;
   status_code?: number; status?: number;
   title?: string; webserver?: string; 'web-server'?: string;
   tech?: string[]; technologies?: string[];
   header?: { server?: string; Server?: string };
   content_length?: number; body_hash?: string; hash?: { body_sha256?: string };
+}
+
+// The address that answered: host_ip is the one httpx connected to, host is an
+// IP only for IP-literal inputs, and a[0] is the first resolved A record.
+function answeringIp(row: HttpxRow): string | null {
+  const candidates: unknown[] = [row.host_ip, row.host, Array.isArray(row.a) ? row.a[0] : undefined];
+  for (const c of candidates) {
+    const n = typeof c === 'string' ? normalizeIp(c) : null;
+    if (n) return n.ip;
+  }
+  return null;
 }
 
 // Parses one httpx JSONL line into a probe row; null for a blank or malformed line.
@@ -32,6 +44,7 @@ export function parseHttpxRow(line: string): HttpProbeRow | null {
   if (!target) return null;
   return {
     target,
+    ip: answeringIp(row),
     url: str(row.url),
     status_code: row.status_code ?? row.status ?? null,
     title: row.title ?? null,

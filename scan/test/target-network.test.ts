@@ -9,7 +9,7 @@ function row(over: Partial<NetworkDbRow> = {}): NetworkDbRow {
   return {
     ip: '192.0.2.1', ip_version: 4, ip_class: 'public',
     asn: null, as_name: null, as_domain: null, country_code: null, country: null,
-    geo_checked_at: null, ptr_json: null, from_ports: 1, from_dns: 0,
+    geo_checked_at: null, ptr_json: null, from_ports: 1, from_dns: 0, from_http: 0,
     first_seen: T0, last_seen: T0, ...over,
   };
 }
@@ -88,10 +88,12 @@ describe('shapeNetworkRows', () => {
       row({ ip: '192.0.2.1', from_ports: 1, from_dns: 1 }),
       row({ ip: '2001:db8::1', ip_version: 6, from_ports: 0, from_dns: 1, ip_class: 'public', last_seen: hoursBefore(30) }),
       row({ ip: '198.51.100.1', from_ports: 1, from_dns: 0, ip_class: 'private' }),
+      row({ ip: '203.0.113.1', from_ports: 0, from_http: 1 }),
     ]);
     expect(out[0]).toMatchObject({ ip: '192.0.2.1', seenVia: ['ports', 'dns'], current: true, ipVersion: 4 });
     expect(out[1]).toMatchObject({ ip: '2001:db8::1', seenVia: ['dns'], current: false, ipVersion: 6 });
     expect(out[2]).toMatchObject({ seenVia: ['ports'], ipClass: 'private' });
+    expect(out[3]).toMatchObject({ seenVia: ['http'] });
   });
 });
 

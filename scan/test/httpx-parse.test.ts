@@ -33,6 +33,31 @@ describe('parseHttpxRow', () => {
   it('falls back to header.Server', () => {
     expect(parseHttpxRow(row({ header: { Server: 'MinIO' } }))?.web_server).toBe('MinIO');
   });
+
+  describe('ip', () => {
+    it('takes host_ip, the address httpx connected to', () => {
+      expect(parseHttpxRow(row({ host_ip: '192.0.2.7', a: ['192.0.2.8'] }))?.ip).toBe('192.0.2.7');
+    });
+    it('takes host when it is an IP literal', () => {
+      expect(parseHttpxRow(JSON.stringify({ host: '192.0.2.5', url: 'u' }))?.ip).toBe('192.0.2.5');
+    });
+    it('falls back to the first entry of a', () => {
+      expect(parseHttpxRow(row({ a: ['192.0.2.9', '192.0.2.10'] }))?.ip).toBe('192.0.2.9');
+    });
+    it('normalizes the address', () => {
+      expect(parseHttpxRow(row({ host_ip: '2001:DB8:0:0:0:0:0:1' }))?.ip).toBe('2001:db8::1');
+    });
+    it('is null when no source is present', () => {
+      expect(parseHttpxRow(row({}))?.ip).toBeNull();
+      expect(parseHttpxRow(row({ a: [] }))?.ip).toBeNull();
+    });
+    it('is null for junk values and does not fall through to a wrong source', () => {
+      expect(parseHttpxRow(row({ host_ip: 'not-an-ip' }))?.ip).toBeNull();
+      expect(parseHttpxRow(row({ a: ['junk'] }))?.ip).toBeNull();
+      expect(parseHttpxRow(row({ a: [42] }))?.ip).toBeNull();
+      expect(parseHttpxRow(row({ a: 'x' }))?.ip).toBeNull();
+    });
+  });
   it.each(['null', '[]', '5', '"x"', 'true'])('returns null for the non-object JSON line %s', (line) => {
     expect(parseHttpxRow(line)).toBeNull();
   });

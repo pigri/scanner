@@ -244,3 +244,69 @@ describe('host_state', () => {
     expect(db.hostStates()).toEqual([]);
   });
 });
+
+describe('http_probes.ip', () => {
+  const probe = { target: 'a.example', url: 'https://a.example' };
+
+  it('stores the ip given and NULL when none', () => {
+    db.insertHttpProbe({ ...probe, ip: '192.0.2.1' }, 'T1', null);
+    db.insertHttpProbe(probe, 'T2', null);
+    expect(db.raw.prepare('SELECT ip FROM http_probes ORDER BY id').all()).toEqual([{ ip: '192.0.2.1' }, { ip: null }]);
+  });
+
+  it('adds the column to a legacy table, keeps old rows NULL, and reopens cleanly', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-migrate-'));
+    try {
+      const f = path.join(dir, 'legacy.db');
+      const raw = new Database(f);
+      raw.exec(`CREATE TABLE http_probes (
+        id INTEGER PRIMARY KEY, target TEXT NOT NULL, url TEXT NOT NULL, status_code INTEGER,
+        title TEXT, web_server TEXT, tech_json TEXT, content_length INTEGER, hash_body TEXT,
+        seen_at TEXT NOT NULL, run_id INTEGER)`);
+      raw.prepare('INSERT INTO http_probes(target, url, seen_at) VALUES(?,?,?)').run('old.example', 'https://old.example', 'T0');
+      raw.close();
+
+      const first = openDb(f);
+      const count = (d: Db, t: string) =>
+        (d.raw.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).filter((r) => r.name === (t === 'http_probes' ? 'ip' : 'from_http')).length;
+      expect(count(first, 'http_probes')).toBe(1);
+      expect(first.raw.prepare('SELECT ip FROM http_probes').get()).toEqual({ ip: null });
+      first.close();
+
+      let second: Db | undefined;
+      expect(() => { second = openDb(f); }).not.toThrow();
+      expect(count(second!, 'http_probes')).toBe(1);
+      second?.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('target_network.from_http', () => {
+  it('adds the column to a legacy table, keeps old rows 0, and reopens cleanly', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-migrate-'));
+    try {
+      const f = path.join(dir, 'legacy.db');
+      const raw = new Database(f);
+      raw.exec(`CREATE TABLE target_network (
+        target TEXT NOT NULL, ip TEXT NOT NULL, ip_version INTEGER NOT NULL, ip_class TEXT NOT NULL,
+        asn TEXT, as_name TEXT, as_domain TEXT, country_code TEXT, country TEXT,
+        geo_checked_at TEXT, ptr_json TEXT, from_ports INTEGER NOT NULL DEFAULT 0,
+        from_dns INTEGER NOT NULL DEFAULT 0, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+        PRIMARY KEY (target, ip)) WITHOUT ROWID`);
+      raw.prepare("INSERT INTO target_network(target, ip, ip_version, ip_class, first_seen, last_seen) VALUES('o.example','192.0.2.1',4,'public','T0','T0')").run();
+      raw.close();
+
+      for (let i = 0; i < 2; i++) {
+        const d = openDb(f);
+        const cols = (d.raw.prepare('PRAGMA table_info(target_network)').all() as { name: string }[]).filter((r) => r.name === 'from_http');
+        expect(cols).toHaveLength(1);
+        expect(d.raw.prepare('SELECT from_http FROM target_network').get()).toEqual({ from_http: 0 });
+        d.close();
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
