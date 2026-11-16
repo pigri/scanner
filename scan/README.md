@@ -418,6 +418,7 @@ npm run risk -- --db scan.db --suffix gov.hu --discovery-db ../discovery/recon.d
 | Foreign-country host (vs `--suffix`'s expected country) | +15 | flat |
 | Shared IP with >5 domains | +4 | flat |
 | First-seen < 7 days ago | +3 | flat |
+| Recent network change (in the last 30 days: a new country or ASN, or an IP in an ASN the target did not use before; never its first IPs) | +5 | flat, once per target |
 
 All logic is in `src/lib/risk.ts` (16 tests). Model is a starting point — bump/rebalance weights for your engagement style.
 
