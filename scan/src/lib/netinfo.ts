@@ -1,6 +1,7 @@
 import type { Db } from './db.js';
 import type { GeoLookup, GeoRow } from './geoip.js';
 import { classifyIp, normalizeIp, type IpClass } from './ip.js';
+import { lookupPtrs, type LookupPtrsOpts } from './ptr.js';
 
 export const WRITE_CHUNK = 500;
 
@@ -20,6 +21,21 @@ export interface NetinfoResult {
   skippedInvalid: number;
   geoHits: number;
   geoMisses: number;
+  ptr: PtrCounts;
+}
+
+export interface PtrCounts {
+  looked_up: number;
+  found: number;
+  empty: number;
+  failed: number;
+  skipped_budget: number;
+}
+
+export interface PtrOpts {
+  budgetMs: number;
+  /** Injectable for tests; defaults to the c-ares lookup in ./ptr.ts. */
+  lookup?: (ips: readonly string[], opts: LookupPtrsOpts) => Promise<Map<string, string[] | null>>;
 }
 
 interface NetRow {
@@ -71,10 +87,46 @@ const DNS_SQL = `SELECT value ip, MIN(seen_at) f, MAX(COALESCE(last_seen, seen_a
 
 type EvidenceRow = { ip: string; f: string; l: string };
 
+const noPtr = (): PtrCounts => ({ looked_up: 0, found: 0, empty: 0, failed: 0, skipped_budget: 0 });
+
+/** Derives and writes rows without any network I/O. */
 export function runNetinfo(opts: NetinfoOpts): NetinfoResult {
+  const { out, result } = derive(opts);
+  write(opts, out, result);
+  return result;
+}
+
+/** As runNetinfo, but resolves PTR names for the distinct public IPs first. All lookups end before the first write. */
+export async function runNetinfoPtr(opts: NetinfoOpts & { ptr: PtrOpts }): Promise<NetinfoResult> {
+  const { out, result } = derive(opts);
+  const publicIps = [...new Set(out.filter((r) => r.ip_class === 'public').map((r) => r.ip))];
+  const stats = { skippedByBudget: 0 };
+  let found = new Map<string, string[] | null>();
+  try {
+    found = await (opts.ptr.lookup ?? lookupPtrs)(publicIps, { budgetMs: opts.ptr.budgetMs, stats });
+  } catch (e) {
+    console.error(`netinfo: ptr lookup failed, writing rows without names: ${e instanceof Error ? e.message : String(e)}`);
+    stats.skippedByBudget = 0;
+  }
+  result.ptr.looked_up = publicIps.length;
+  result.ptr.skipped_budget = stats.skippedByBudget;
+  for (const ip of publicIps) {
+    const names = found.get(ip) ?? null;
+    if (names === null) continue;
+    if (names.length > 0) result.ptr.found++; else result.ptr.empty++;
+  }
+  result.ptr.failed = publicIps.length - result.ptr.found - result.ptr.empty - result.ptr.skipped_budget;
+  for (const r of out) {
+    const names = r.ip_class === 'public' ? found.get(r.ip) ?? null : null;
+    r.ptr_json = names === null ? null : JSON.stringify(names);
+  }
+  write(opts, out, result);
+  return result;
+}
+
+function derive(opts: NetinfoOpts): { out: NetRow[]; result: NetinfoResult } {
   const { db, geo } = opts;
   const nowIso = (opts.now ?? new Date()).toISOString();
-  const chunk = Math.max(1, opts.chunkSize ?? WRITE_CHUNK);
   // Scan workers hold write locks for whole batches (same reasoning as risk.ts).
   db.raw.pragma('busy_timeout = 60000');
 
@@ -89,7 +141,7 @@ export function runNetinfo(opts: NetinfoOpts): NetinfoResult {
 
   const portsStmt = db.raw.prepare(PORTS_SQL);
   const dnsStmt = db.raw.prepare(DNS_SQL);
-  const result: NetinfoResult = { targets: targets.size, rowsWritten: 0, skippedInvalid: 0, geoHits: 0, geoMisses: 0 };
+  const result: NetinfoResult = { targets: targets.size, rowsWritten: 0, skippedInvalid: 0, geoHits: 0, geoMisses: 0, ptr: noPtr() };
   const out: NetRow[] = [];
 
   for (const [target, identityAt] of targets) {
@@ -137,11 +189,16 @@ export function runNetinfo(opts: NetinfoOpts): NetinfoResult {
     }
   }
 
+  return { out, result };
+}
+
+function write(opts: NetinfoOpts, out: NetRow[], result: NetinfoResult): void {
+  const { db } = opts;
+  const chunk = Math.max(1, opts.chunkSize ?? WRITE_CHUNK);
   const upsert = db.raw.prepare(UPSERT);
   for (let i = 0; i < out.length; i += chunk) {
     const slice = out.slice(i, i + chunk);
     db.raw.transaction(() => { for (const r of slice) upsert.run(r); }).immediate();
     result.rowsWritten += slice.length;
   }
-  return result;
 }
