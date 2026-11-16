@@ -186,6 +186,14 @@ With the workers running as daemons, these **systemd timers** feed them:
   exits 0 without writing. A missing `nvd.db` warns and exits 0. The marker is a
   `runs` row (`tool='version-match-sweep'`, `args_json.snapshotAt`). If the
   rollup fails the unit fails, and the next firing retries only the rollup.
+- **`retention.timer`** (weekly, Sun 05:00): `npm run retention -- --older-than 90
+  --apply` prunes rows of `findings`, `ports`, `http_probes` and `screenshots`
+  whose run is older than 90 days AND whose target has a newer run of the same
+  tool, so a target not rescanned in 90 days keeps its latest evidence. A run
+  and its `runs/<id>/` dir go only when no table references it any more.
+  **Dry-run first** and read the counts before enabling the timer:
+  `cd ~/gen0sec/redteam/scan && npm run retention -- --older-than 90`
+  (no `--apply` = dry-run). Enable it only after that looks right.
 - **`nuclei-update-templates.timer`** (daily 02:30): `nuclei -update-templates`
   so any subsequent scan uses the day's fresh template set. Safe mid-scan —
   nuclei loads templates at process start.
@@ -203,12 +211,15 @@ for u in scan-feed.service scan-feed.timer scan-rescan.service scan-rescan.timer
          nuclei-update-templates.service nuclei-update-templates.timer \
          nvd-sync.service nvd-sync.timer \
          version-match-sweep.service version-match-sweep.timer \
-         geoip-sync.service geoip-sync.timer; do
+         geoip-sync.service geoip-sync.timer \
+         retention.service retention.timer; do
   ln -sf ~/gen0sec/redteam/scan/deploy/$u ~/.config/systemd/user/$u
 done
 systemctl --user daemon-reload
 systemctl --user enable --now scan-feed.timer scan-rescan.timer nuclei-update-templates.timer nvd-sync.timer \
   version-match-sweep.timer geoip-sync.timer
+# retention.timer: enable only after a dry-run (see above)
+# systemctl --user enable --now retention.timer
 
 # inspect
 systemctl --user list-timers                 # next fire times
