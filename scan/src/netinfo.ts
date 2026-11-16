@@ -16,7 +16,7 @@ function usage(): void {
 Writes one target_network row per (target, IP) found in ports / dns_records.
 
   --all             derive rows for every scan_queue target (backfill; ignores --targets)
-  --mmdb <path>     ip database (default: ${DEFAULT_MMDB})
+  --mmdb <path>     ip database (default: $GEOIP_MMDB, else ${DEFAULT_MMDB})
                     a missing or unreadable file is a warning: rows are written without geo
   --ptr             also resolve PTR names of public IPs (c-ares, the process's resolv.conf)
   --no-ptr          turn it off (default); the later of --ptr / --no-ptr wins
@@ -25,9 +25,9 @@ Writes one target_network row per (target, IP) found in ports / dns_records.
 }
 
 /** Pull this tool's own flags out of argv, before or after `--`, so parseCommonCli does not mistake their values for targets. */
-export function splitOwnFlags(argv: string[]): { rest: string[]; all: boolean; mmdb: string; ptr: boolean; ptrBudgetSec: number } {
+export function splitOwnFlags(argv: string[], env: NodeJS.ProcessEnv = process.env): { rest: string[]; all: boolean; mmdb: string; ptr: boolean; ptrBudgetSec: number } {
   const rest = argv.slice(0, 2);
-  let all = false, mmdb = DEFAULT_MMDB, ptr = false, ptrBudgetSec = DEFAULT_PTR_BUDGET_SEC;
+  let all = false, mmdb = env.GEOIP_MMDB || DEFAULT_MMDB, ptr = false, ptrBudgetSec = DEFAULT_PTR_BUDGET_SEC;
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === '--all') all = true;
