@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { openDb } from '../src/lib/db.js';
-import { ingestSslyzeOutput } from '../src/lib/sslyze-ingest.js';
+import { ingestSslyzeOutput, ingestAndFinishRun } from '../src/lib/sslyze-ingest.js';
 
 const NOW = '2026-01-01T00:00:00.000Z';
 
@@ -91,5 +91,104 @@ describe('ingestSslyzeOutput', () => {
     expect(r?.findings).toBe(3);
     expect(r?.certs).toBe(1);
     expect(new Set(findings(db).map((f) => f.target))).toEqual(new Set(['ok.example.com']));
+  });
+});
+
+describe('ingestSslyzeOutput: wrong-typed nested fields', () => {
+  const row = (scan_result: unknown) => ({
+    server_location: { hostname: 'h.example.com', port: 443 }, scan_status: 'COMPLETED', scan_result,
+  });
+  const run = (scan_result: unknown) => {
+    const { db, runId } = setup();
+    const r = ingestSslyzeOutput(db, toText({ server_scan_results: [row(scan_result)] }), NOW, runId);
+    return { db, r };
+  };
+  const certInfo = (certificate_deployments: unknown) => ({ certificate_info: { result: { certificate_deployments } } });
+
+  it.each([['string', 'abc'], ['object', { a: 1 }], ['number', 5], ['null', null]])(
+    'stores nothing for %s certificate_deployments', (_n, v) => {
+      const { db, r } = run(certInfo(v));
+      expect(r).toMatchObject({ findings: 0, certs: 0 });
+      expect(findings(db)).toEqual([]);
+    });
+
+  it.each([['null', null], ['string', 'abc'], ['number', 5], ['array', []]])(
+    'skips a %s first deployment without a finding', (_n, v) => {
+      const { db, r } = run(certInfo([v]));
+      expect(r).toMatchObject({ findings: 0, certs: 0 });
+      expect(findings(db)).toEqual([]);
+    });
+
+  it('does not throw and stores nothing when every nested field has the wrong type', () => {
+    const wrong = 'yes';
+    const { db, r } = run({
+      heartbleed: { result: { is_vulnerable_to_heartbleed: wrong } },
+      openssl_ccs_injection: { result: { is_vulnerable_to_ccs_injection: wrong } },
+      robot: { result: { robot_result: 5 } },
+      tls_compression: { result: { supports_compression: wrong } },
+      session_renegotiation: { result: { supports_secure_renegotiation: wrong, is_vulnerable_to_client_renegotiation_dos: wrong } },
+      tls_extended_master_secret: { result: { supports_ems_extension: wrong } },
+      tls_fallback_scsv: { result: { supports_fallback_scsv: wrong } },
+      ssl_2_0_cipher_suites: { result: { is_tls_version_supported: wrong } },
+      ssl_3_0_cipher_suites: { result: { is_tls_version_supported: wrong } },
+      tls_1_0_cipher_suites: { result: { is_tls_version_supported: wrong } },
+      tls_1_1_cipher_suites: { result: { is_tls_version_supported: wrong } },
+      tls_1_3_cipher_suites: { result: { is_tls_version_supported: wrong } },
+      ...certInfo([{
+        leaf_certificate_has_must_staple_extension: wrong,
+        leaf_certificate_signed_certificate_timestamps_count: 5,
+        verified_chain_has_sha1_signature: wrong,
+        verified_chain_has_legacy_symantec_anchor: wrong,
+        received_chain_has_valid_order: wrong,
+        ocsp_response_is_trusted: wrong,
+        received_certificate_chain: [{ fingerprint_sha256: 5, subject: 5, serial_number: {} }],
+      }]),
+    });
+    expect(r).toMatchObject({ certs: 0 });
+    expect(findings(db)).toEqual([]);
+  });
+
+  it.each([['string', 'abc'], ['number', 5], ['array', [1]], ['true', true]])(
+    'does not throw for a %s scan_result', (_n, v) => {
+      expect(run(v).r).toMatchObject({ findings: 0, certs: 0 });
+    });
+
+  it('treats a non-numeric SCT count as missing', () => {
+    const { db } = run(certInfo([{ leaf_certificate_signed_certificate_timestamps_count: 'many' }]));
+    expect(findings(db).map((f) => f.category)).toEqual(['sct-count']);
+  });
+});
+
+describe('ingestAndFinishRun', () => {
+  const text = (): string => toText({ server_scan_results: [good()] });
+
+  it('finishes the run and closes the db after a normal ingest', () => {
+    const { db, runId } = setup();
+    const finish = vi.spyOn(db, 'finishRun');
+    const close = vi.spyOn(db, 'close');
+    const r = ingestAndFinishRun(db, text(), NOW, runId, 9);
+    expect(r).toEqual({ rows: 1, findings: 3, certs: 1 });
+    expect(finish).toHaveBeenCalledWith(runId, expect.objectContaining({ targetsCount: 1, findingsCount: 3 }));
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it('finishes the run with the scanned count when the output is unusable', () => {
+    const { db, runId } = setup();
+    const finish = vi.spyOn(db, 'finishRun');
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(ingestAndFinishRun(db, 'null', NOW, runId, 9)).toBeNull();
+    expect(finish).toHaveBeenCalledWith(runId, expect.objectContaining({ targetsCount: 9, findingsCount: 0 }));
+  });
+
+  it('still finishes the run and closes the db when ingest throws, and rethrows', () => {
+    const { db, runId } = setup();
+    vi.spyOn(db, 'insertFinding').mockImplementation(() => { throw new Error('boom'); });
+    const finish = vi.spyOn(db, 'finishRun');
+    const close = vi.spyOn(db, 'close');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(() => ingestAndFinishRun(db, text(), NOW, runId, 9)).toThrow('boom');
+    expect(finish).toHaveBeenCalledWith(runId, expect.objectContaining({ targetsCount: 9, findingsCount: 0 }));
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls.map((c) => String(c[0])).join('\n')).toContain('boom');
   });
 });

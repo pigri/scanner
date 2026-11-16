@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, resolveOutputPath } from './lib/runner.js';
 import { openDb, type Db } from './lib/db.js';
-import { ingestSslyzeOutput } from './lib/sslyze-ingest.js';
+import { ingestAndFinishRun } from './lib/sslyze-ingest.js';
 
 // Live-HTTPS targets from either http_probes (https://) or a 443/tcp port.
 function loadHttpsTargets(db: Db, targets: readonly string[]): string[] {
@@ -104,15 +104,9 @@ Wrapper flags (before '--'):
     return;
   }
 
-  const ingested = ingestSslyzeOutput(db, fs.readFileSync(outFile, 'utf8'), now, runId);
-  if (!ingested) {
-    db.finishRun(runId, { targetsCount: scanTargets.length, findingsCount: 0, at: new Date().toISOString() });
-    db.close();
-    return;
-  }
+  const ingested = ingestAndFinishRun(db, fs.readFileSync(outFile, 'utf8'), now, runId, scanTargets.length);
+  if (!ingested) return;
   const { rows, findings, certs } = ingested;
-  db.finishRun(runId, { targetsCount: rows, findingsCount: findings, at: new Date().toISOString() });
-  db.close();
   console.error(`sslyze done: +${findings} finding(s), +${certs} cert(s) across ${rows} scanned host(s), run #${runId}`);
   console.error(`  sqlite: ${path.resolve(opts.sqlite)}`);
 }

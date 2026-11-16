@@ -252,3 +252,78 @@ describe('toCertRecords subject fields', () => {
     expect(recs[0]).toMatchObject({ organization: null, orgUnit: null, locality: null, country: null });
   });
 });
+
+describe('toCertRecords: wrong-typed JSON', () => {
+  const leaf = {
+    fingerprint_sha256: 'uTDvCVyiwPnM5M+7A6dM3WS6KZQGb8e8OFfrWcnlLHk=',
+    subject: { rfc4514_string: 'CN=a.example.com', attributes: [{ oid: { name: 'commonName' }, value: 'a.example.com' }] },
+    issuer: { rfc4514_string: 'CN=ca.example.com' },
+    subject_alternative_name: { dns_names: ['a.example.com'] },
+    public_key: { algorithm: 'RSAPublicKey', key_size: 2048 },
+    signature_hash_algorithm: { name: 'sha256' },
+    serial_number: '5',
+  };
+  const wrap = (deployments: unknown, loc: unknown = { hostname: 'h.example.com', port: 443 }) => ({
+    server_scan_results: [{
+      server_location: loc,
+      scan_status: 'COMPLETED',
+      scan_result: { certificate_info: { result: { certificate_deployments: deployments } } },
+    }],
+  }) as any;
+  const dep = (l: unknown) => ({ received_certificate_chain: [l] });
+
+  it('stores a well-formed leaf', () => {
+    const r = toCertRecords(wrap([dep(leaf)]));
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({ target: 'h.example.com', port: 443, commonName: 'a.example.com', keyAlgo: 'RSA', keySize: 2048, sigAlgo: 'sha256', serial: '5', san: ['a.example.com'] });
+  });
+
+  it.each([['object', { a: 1 }], ['string', 'abc'], ['number', 5], ['null', null]])(
+    'treats %s certificate_deployments as empty', (_n, v) => {
+      expect(toCertRecords(wrap(v))).toEqual([]);
+    });
+
+  it('skips null and non-object deployments', () => {
+    expect(toCertRecords(wrap([null, 'x', 5, [], dep(leaf)]))).toHaveLength(1);
+  });
+
+  it.each([
+    ['null', null], ['string', 'abc'], ['object', { 0: leaf }],
+  ])('skips a %s received_certificate_chain', (_n, v) => {
+    expect(toCertRecords(wrap([{ received_certificate_chain: v }]))).toEqual([]);
+  });
+
+  it('drops non-string dns_names entries', () => {
+    const r = toCertRecords(wrap([dep({ ...leaf, subject_alternative_name: { dns_names: ['a.example.com', 5, null, { x: 1 }, ' b.example.com '] } })]));
+    expect(r[0]?.san).toEqual(['a.example.com', 'b.example.com']);
+  });
+
+  it('treats a non-array dns_names as empty', () => {
+    const r = toCertRecords(wrap([dep({ ...leaf, subject_alternative_name: { dns_names: 'a.example.com' } })]));
+    expect(r[0]?.san).toEqual([]);
+  });
+
+  it('does not throw and stores nothing bogus when every field has the wrong type', () => {
+    const bad = {
+      fingerprint_sha256: 5, not_valid_before: 1, not_valid_after: {}, serial_number: { a: 1 },
+      signature_hash_algorithm: { name: 5 },
+      subject: { rfc4514_string: 5, attributes: { a: 1 } },
+      issuer: { rfc4514_string: [] },
+      subject_alternative_name: 'x',
+      public_key: { algorithm: 5, key_size: 'big' },
+    };
+    expect(toCertRecords(wrap([dep(bad)]))).toEqual([]);
+    const ok = { ...bad, fingerprint_sha256: leaf.fingerprint_sha256 };
+    const r = toCertRecords(wrap([dep(ok)], { hostname: 'h.example.com', port: '443' }));
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({
+      port: null, commonName: null, organization: null, san: [], issuer: null, notBefore: null,
+      notAfter: null, keyAlgo: null, keySize: null, sigAlgo: null, serial: null, selfSigned: false,
+    });
+  });
+
+  it('ignores a null attribute and a non-string attribute value', () => {
+    const r = toCertRecords(wrap([dep({ ...leaf, subject: { attributes: [null, 'x', { oid: null }, { oid: { name: 'commonName' }, value: 7 }, { oid: { name: 'organizationName' }, value: 'Org' }] } })]));
+    expect(r[0]).toMatchObject({ commonName: null, organization: 'Org' });
+  });
+});

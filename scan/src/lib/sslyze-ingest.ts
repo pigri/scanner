@@ -40,6 +40,8 @@ export interface SslyzeResult {
 export interface SslyzeIngest { rows: number; findings: number; certs: number }
 
 type ServerRow = NonNullable<SslyzeResult['server_scan_results']>[number];
+type ScanResult = NonNullable<ServerRow['scan_result']>;
+type DeploymentRow = NonNullable<NonNullable<NonNullable<ScanResult['certificate_info']>['result']>['certificate_deployments']>[number];
 
 // Parses sslyze's JSON output; null when it is unparsable or not an object.
 // Logs one line and never the content, which comes from scanned servers.
@@ -84,40 +86,40 @@ export function ingestSslyzeOutput(db: Db, text: string, now: string, runId: num
   for (const row of rows) {
     const target = row.server_location?.hostname;
     if (!target || row.scan_status !== 'COMPLETED') continue;
-    const s = row.scan_result ?? {};
+    const s = (typeof row.scan_result === 'object' && row.scan_result !== null ? row.scan_result : {}) as ScanResult;
 
     // ---- known-CVE vulnerability flags ----------------------------------
-    if (s.heartbleed?.result?.is_vulnerable_to_heartbleed) {
+    if (s.heartbleed?.result?.is_vulnerable_to_heartbleed === true) {
       emit(target, 'heartbleed', 'critical', 'Heartbleed (CVE-2014-0160) — memory disclosure', {});
     }
-    if (s.openssl_ccs_injection?.result?.is_vulnerable_to_ccs_injection) {
+    if (s.openssl_ccs_injection?.result?.is_vulnerable_to_ccs_injection === true) {
       emit(target, 'ccs-injection', 'critical', 'OpenSSL CCS Injection (CVE-2014-0224) — MITM', {});
     }
-    const robotResult = s.robot?.result?.robot_result;
+    const robotResult = typeof s.robot?.result?.robot_result === 'string' ? s.robot.result.robot_result : undefined;
     const robot = classifyRobot(robotResult);
     if (robot) emit(target, 'robot', robot.severity, robot.title, { detail: robotResult });
-    if (s.tls_compression?.result?.supports_compression) {
+    if (s.tls_compression?.result?.supports_compression === true) {
       emit(target, 'crime', 'medium', 'TLS compression enabled (CRIME attack path)', {});
     }
     const reneg = s.session_renegotiation?.result;
     if (reneg?.supports_secure_renegotiation === false) {
       emit(target, 'secure-renegotiation', 'high', 'Server does not support secure TLS renegotiation', {});
     }
-    if (reneg?.is_vulnerable_to_client_renegotiation_dos) {
+    if (reneg?.is_vulnerable_to_client_renegotiation_dos === true) {
       emit(target, 'client-renegotiation-dos', 'high', 'Vulnerable to client-initiated renegotiation DoS', {});
     }
 
     // ---- deprecated protocol support ------------------------------------
-    if (s.ssl_2_0_cipher_suites?.result?.is_tls_version_supported) {
+    if (s.ssl_2_0_cipher_suites?.result?.is_tls_version_supported === true) {
       emit(target, 'sslv2', 'critical', 'SSLv2 supported (DROWN / broken)', {});
     }
-    if (s.ssl_3_0_cipher_suites?.result?.is_tls_version_supported) {
+    if (s.ssl_3_0_cipher_suites?.result?.is_tls_version_supported === true) {
       emit(target, 'sslv3', 'high', 'SSLv3 supported (POODLE / deprecated)', {});
     }
-    if (s.tls_1_0_cipher_suites?.result?.is_tls_version_supported) {
+    if (s.tls_1_0_cipher_suites?.result?.is_tls_version_supported === true) {
       emit(target, 'tls-1.0', 'medium', 'TLS 1.0 supported (deprecated; PCI-DSS non-compliant)', {});
     }
-    if (s.tls_1_1_cipher_suites?.result?.is_tls_version_supported) {
+    if (s.tls_1_1_cipher_suites?.result?.is_tls_version_supported === true) {
       emit(target, 'tls-1.1', 'medium', 'TLS 1.1 supported (deprecated; PCI-DSS non-compliant)', {});
     }
     if (s.tls_1_3_cipher_suites?.result?.is_tls_version_supported === false) {
@@ -133,22 +135,24 @@ export function ingestSslyzeOutput(db: Db, text: string, now: string, runId: num
     }
 
     // ---- Certificate deployment quality ---------------------------------
-    const dep = s.certificate_info?.result?.certificate_deployments?.[0];
+    const deps: unknown = s.certificate_info?.result?.certificate_deployments;
+    const dep = Array.isArray(deps) && typeof deps[0] === 'object' && deps[0] !== null && !Array.isArray(deps[0]) ? (deps[0] as DeploymentRow) : undefined;
     if (dep) {
-      if (dep.verified_chain_has_sha1_signature) {
+      if (dep.verified_chain_has_sha1_signature === true) {
         emit(target, 'chain-sha1', 'medium', 'Certificate chain contains SHA-1 signature (browsers block)', {});
       }
-      if (dep.verified_chain_has_legacy_symantec_anchor) {
+      if (dep.verified_chain_has_legacy_symantec_anchor === true) {
         emit(target, 'symantec-anchor', 'medium', 'Chain terminates in a distrusted Symantec-era CA', {});
       }
       if (dep.received_chain_has_valid_order === false) {
         emit(target, 'chain-order', 'low', 'Certificate chain sent in wrong order (some clients reject)', {});
       }
-      const sctCount = dep.leaf_certificate_signed_certificate_timestamps_count ?? 0;
+      const sctRaw = dep.leaf_certificate_signed_certificate_timestamps_count;
+      const sctCount = typeof sctRaw === 'number' ? sctRaw : 0;
       if (sctCount < 2) {
         emit(target, 'sct-count', 'low', `Only ${sctCount} SCT(s) embedded — Chrome/Safari require ≥ 2`, { count: sctCount });
       }
-      if (dep.leaf_certificate_has_must_staple_extension && !dep.ocsp_response_is_trusted) {
+      if (dep.leaf_certificate_has_must_staple_extension === true && dep.ocsp_response_is_trusted !== true) {
         emit(target, 'ocsp-must-staple', 'medium', 'must-staple set but no valid OCSP response returned', {});
       }
     }
@@ -164,4 +168,24 @@ export function ingestSslyzeOutput(db: Db, text: string, now: string, runId: num
   }
 
   return { rows: rows.length, findings, certs };
+}
+
+// Ingests one sslyze output and always finishes the run and closes the db, even when
+// ingest throws; the error is logged and rethrown, not swallowed.
+export function ingestAndFinishRun(db: Db, text: string, now: string, runId: number, scanned: number): SslyzeIngest | null {
+  let result: SslyzeIngest | null = null;
+  try {
+    result = ingestSslyzeOutput(db, text, now, runId);
+    return result;
+  } catch (err) {
+    console.error(`sslyze: ingest failed: ${err instanceof Error ? err.message : String(err)}`);
+    throw err;
+  } finally {
+    db.finishRun(runId, {
+      targetsCount: result ? result.rows : scanned,
+      findingsCount: result ? result.findings : 0,
+      at: new Date().toISOString(),
+    });
+    db.close();
+  }
 }
