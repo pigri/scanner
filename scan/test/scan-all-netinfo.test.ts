@@ -44,11 +44,12 @@ describe('scan-all netinfo stage', () => {
     const skip = otherStages();
     expect(skip).toEqual(expect.arrayContaining(['httpx', 'nmap', 'dnsx', 'version-match', 'smb', 'data-integrity']));
     const r = await runScanAll(
-      { SKIP: skip.join(','), NETINFO_FLAGS: `--mmdb ${path.join(dir, 'missing.mmdb')}` },
+      { SKIP: skip.join(','), NETINFO_FLAGS: `--mmdb ${path.join(dir, 'missing.mmdb')} --no-ptr` },
       ['--targets', targets, '--sqlite', db],
     );
 
     expect(r.stderr).toContain('>>> START netinfo');
+    expect(r.stderr).toContain('netinfo: ptr: off');
     expect(r.code).toBe(0);
     const { raw } = openDb(db);
     try {
