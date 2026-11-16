@@ -19,6 +19,7 @@ import { NO_URL, latestRiskRow } from './lib/risk-latest.js';
 import {
   TARGET_NETWORK_SQL,
   TARGET_NETWORK_LIST_SQL,
+  TARGET_NETWORK_LIST_NO_QUEUE_SQL,
   shapeNetworkRows,
   TARGET_SCAN_SQL,
   TARGET_ANSWERED_SQL,
@@ -192,6 +193,14 @@ interface TargetRow {
 }
 function listScanContext(): ListScanContext {
   if (!tableExists(scan, 'dns_records')) return { untracked: new Set(), trackingStart: null };
+  // The read-only UI never runs the migration that adds dns_records.last_seen.
+  const hasLastSeen = (scan.prepare('PRAGMA table_info(dns_records)').all() as { name: string }[]).some(
+    (c) => c.name === 'last_seen',
+  );
+  if (!hasLastSeen) {
+    const all = scan.prepare('SELECT DISTINCT target FROM dns_records').all() as { target: string }[];
+    return { untracked: new Set(all.map((r) => r.target)), trackingStart: null };
+  }
   const untracked = new Set(
     (scan.prepare(DNS_UNTRACKED_TARGETS_SQL).all() as { target: string }[]).map((r) => r.target),
   );
@@ -206,7 +215,9 @@ function targetRows(): TargetRow[] {
     .prepare(TARGET_ROWS_SQL)
     .all() as TargetRow[];
   const nets = tableExists(scan, 'target_network')
-    ? summarizeNetworks(scan.prepare(TARGET_NETWORK_LIST_SQL).all() as ListNetworkRow[], listScanContext())
+    ? tableExists(scan, 'scan_queue')
+      ? summarizeNetworks(scan.prepare(TARGET_NETWORK_LIST_SQL).all() as ListNetworkRow[], listScanContext())
+      : summarizeNetworks(scan.prepare(TARGET_NETWORK_LIST_NO_QUEUE_SQL).all() as ListNetworkRow[])
     : new Map();
   for (const r of rows) {
     const n = nets.get(r.target);

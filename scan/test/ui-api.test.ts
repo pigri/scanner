@@ -18,7 +18,7 @@ afterAll(() => {
 const NOW = Date.parse('2026-11-10T12:00:00.000Z');
 const iso = (hoursAgo: number) => new Date(NOW - hoursAgo * 3600_000).toISOString();
 
-function seed(dropTable: boolean): string {
+function seed(dropTable: boolean, mutate?: (raw: ReturnType<typeof openDb>['raw']) => void): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ui-api-'));
   dirs.push(dir);
   const file = path.join(dir, 'scan.db');
@@ -39,6 +39,7 @@ function seed(dropTable: boolean): string {
   const risk = raw.prepare('INSERT INTO risk_latest (target, score, created_at, updated_at) VALUES (?, ?, ?, ?)');
   for (const t of ['host.example', 'other.example', 'de.example']) risk.run(t, 10, iso(0), iso(0));
   if (dropTable) raw.exec('DROP TABLE target_network');
+  mutate?.(raw);
   raw.close();
   return file;
 }
@@ -118,7 +119,7 @@ describe('GET /api/targets country and asn', () => {
   }, 40_000);
 });
 
-function seedLatestScan(): string {
+function seedLatestScan(mutate?: (raw: ReturnType<typeof openDb>['raw']) => void): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ui-api-'));
   dirs.push(dir);
   const file = path.join(dir, 'scan.db');
@@ -141,6 +142,7 @@ function seedLatestScan(): string {
   q.run('dnsonly.example', '2026-11-04T08:00:00.000Z', scanStart, scanEnd);
   dns.run('dnsonly.example', 'dnsonly.example', '192.0.2.60', '2026-08-31T08:00:00.000Z', null);
   for (const t of ['fileshare.example', 'dnsonly.example']) risk.run(t, 10, scanEnd, scanEnd);
+  mutate?.(raw);
   raw.close();
   return file;
 }
@@ -160,6 +162,36 @@ describe('GET /api/targets uses the latest scan', () => {
     expect(asn.rows).toEqual([]);
     const de = (await (await fetch(`${base}/api/targets?limit=100&country=DE`)).json()) as any;
     expect(de.rows.map((x: any) => x.target)).toEqual(['dnsonly.example']);
+  }, 40_000);
+});
+
+describe('GET /api/targets on older databases', () => {
+  it('answers with the 24 h rule when scan_queue is missing', async () => {
+    const base = await startUi(seed(false, (raw) => raw.exec('DROP TABLE scan_queue')));
+    const r = await fetch(`${base}/api/targets?limit=100`);
+    expect(r.status).toBe(200);
+    const d = (await r.json()) as any;
+    const byT = Object.fromEntries(d.rows.map((x: any) => [x.target, x]));
+    expect(byT['host.example']).toMatchObject({ countries: ['HU'], asns: ['AS64496'] });
+    expect(d.countries).toEqual([{ value: 'DE', c: 1 }, { value: 'HU', c: 1 }]);
+  }, 40_000);
+
+  it('treats every dns target as untracked when dns_records has no last_seen', async () => {
+    const file = seedLatestScan((raw) => {
+      raw.exec('DROP TABLE dns_records');
+      raw.exec(`CREATE TABLE dns_records (id INTEGER PRIMARY KEY, target TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL,
+        value TEXT NOT NULL, ttl INTEGER, seen_at TEXT NOT NULL, run_id INTEGER)`);
+      const ins = raw.prepare(`INSERT INTO dns_records (target, name, type, value, seen_at) VALUES (?, ?, 'A', ?, ?)`);
+      ins.run('fileshare.example', 'fileshare.example', '192.0.2.50', '2026-08-31T08:00:00.000Z');
+      ins.run('dnsonly.example', 'dnsonly.example', '192.0.2.60', '2026-08-31T08:00:00.000Z');
+    });
+    const base = await startUi(file);
+    const r = await fetch(`${base}/api/targets?limit=100`);
+    expect(r.status).toBe(200);
+    const d = (await r.json()) as any;
+    const byT = Object.fromEntries(d.rows.map((x: any) => [x.target, x]));
+    expect(byT['dnsonly.example']).toMatchObject({ countries: ['DE'], asns: ['AS64511'] });
+    expect(byT['fileshare.example']).toMatchObject({ countries: ['HU'], asns: ['AS64496'] });
   }, 40_000);
 });
 

@@ -35,6 +35,10 @@ export const DNS_TRACKING_SQL = `SELECT MIN(last_seen) AS tracking_start,
     EXISTS(SELECT 1 FROM dns_records WHERE target = @t AND last_seen IS NULL) AS untracked
   FROM dns_records`;
 
+/** The list without the scan join, for a database that has no scan_queue. */
+export const TARGET_NETWORK_LIST_NO_QUEUE_SQL = `SELECT target, ip, asn, country_code, country,
+  last_seen, ip_class FROM target_network ORDER BY target, ip`;
+
 /** Targets that have a dns_records row written before last_seen existed. One read per list build. */
 export const DNS_UNTRACKED_TARGETS_SQL = `SELECT DISTINCT target FROM dns_records WHERE last_seen IS NULL`;
 
