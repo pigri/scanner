@@ -181,7 +181,8 @@ With the workers running as daemons, these **systemd timers** feed them:
   The units default `SCAN_DATA_DIR` to `/storage/gen0sec-scan`. To use another
   directory, add a drop-in without editing the tracked unit:
   `systemctl --user edit nvd-sync.service` (likewise `version-match-sweep.service`)
-  and set `[Service]` / `Environment=SCAN_DATA_DIR=/path/to/dir`.
+  and set `[Service]` / `Environment=SCAN_DATA_DIR=/path/to/dir`, or set
+  `SCAN_DATA_DIR` in `.env.scan` (the shell expands it after sourcing that file).
 - **`version-match-sweep.timer`** (daily 02:00, after `nvd-sync`): `version-match
   --all` re-matches the version evidence already in `scan.db` (http_probes /
   ports seen in the last 30 days) against the fresh mirror, so CVEs published
