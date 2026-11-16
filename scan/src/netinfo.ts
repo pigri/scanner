@@ -8,6 +8,7 @@ import { parseCommonCli, commonUsage, prepareTargets } from './lib/runner.js';
 import { openDb, type Db } from './lib/db.js';
 import { openGeo, DEFAULT_MMDB, MMDB_STALE_DAYS } from './lib/geoip.js';
 import { runNetinfo, runNetinfoPtr } from './lib/netinfo.js';
+import { rebuildHistory } from './lib/netinfo-rebuild.js';
 
 const DEFAULT_PTR_BUDGET_SEC = 60;
 
@@ -16,6 +17,9 @@ function usage(): void {
 Writes one target_network row per (target, IP) found in ports / dns_records / http_probes.
 
   --all             derive rows for every scan_queue target (backfill; ignores --targets)
+  --rebuild-history reconstruct ip_added / ip_gone / ip_back events from past evidence in 3 h scan
+                    windows (source 'reconstructed'; idempotent; never touches scan events or
+                    target_network). All scan_queue targets, or those of --targets. No geo, no PTR.
   --mmdb <path>     ip database (default: $GEOIP_MMDB, else ${DEFAULT_MMDB})
                     a missing or unreadable file is a warning: rows are written without geo
   --ptr             also resolve PTR names of public IPs (c-ares, the process's resolv.conf)
@@ -25,12 +29,13 @@ Writes one target_network row per (target, IP) found in ports / dns_records / ht
 }
 
 /** Pull this tool's own flags out of argv, before or after `--`, so parseCommonCli does not mistake their values for targets. */
-export function splitOwnFlags(argv: string[], env: NodeJS.ProcessEnv = process.env): { rest: string[]; all: boolean; mmdb: string; ptr: boolean; ptrBudgetSec: number } {
+export function splitOwnFlags(argv: string[], env: NodeJS.ProcessEnv = process.env): { rest: string[]; all: boolean; rebuild: boolean; mmdb: string; ptr: boolean; ptrBudgetSec: number } {
   const rest = argv.slice(0, 2);
-  let all = false, mmdb = env.GEOIP_MMDB || DEFAULT_MMDB, ptr = false, ptrBudgetSec = DEFAULT_PTR_BUDGET_SEC;
+  let all = false, rebuild = false, mmdb = env.GEOIP_MMDB || DEFAULT_MMDB, ptr = false, ptrBudgetSec = DEFAULT_PTR_BUDGET_SEC;
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === '--all') all = true;
+    else if (a === '--rebuild-history') rebuild = true;
     else if (a === '--mmdb') mmdb = argv[++i] ?? '';
     else if (a === '--ptr') ptr = true;
     else if (a === '--no-ptr') ptr = false;
@@ -40,7 +45,7 @@ export function splitOwnFlags(argv: string[], env: NodeJS.ProcessEnv = process.e
     }
     else rest.push(a);
   }
-  return { rest, all, mmdb, ptr, ptrBudgetSec };
+  return { rest, all, rebuild, mmdb, ptr, ptrBudgetSec };
 }
 
 export function mmdbAgeWarning(buildAt: string | null, now: Date): string | null {
@@ -61,9 +66,31 @@ async function main(): Promise<void> {
   const own = splitOwnFlags(process.argv);
   const opts = parseCommonCli(own.rest);
   if (opts.help) { usage(); process.exit(0); }
-  if ((!own.all && !opts.targetsFile) || !own.mmdb || Number.isNaN(own.ptrBudgetSec)) { usage(); process.exit(2); }
+  if ((!own.all && !own.rebuild && !opts.targetsFile) || !own.mmdb || Number.isNaN(own.ptrBudgetSec)) { usage(); process.exit(2); }
 
   let targets: string[] | 'all' = 'all';
+  if (own.rebuild) {
+    if (opts.targetsFile) {
+      if (!fs.existsSync(opts.targetsFile)) { console.error(`FATAL: targets file not found: ${opts.targetsFile}`); process.exit(2); }
+      targets = prepareTargets(opts).targets;
+    }
+    const db = openDb(opts.sqlite ?? 'scan.db');
+    try {
+      const now = new Date().toISOString();
+      const runId = startNetinfoRun(db, { mode: 'rebuild-history' }, now);
+      const r = rebuildHistory({ db, targets, runId });
+      db.finishRun(runId, {
+        targetsCount: r.targets,
+        findingsCount: r.inserted,
+        notes: `windows=${r.windows} proposed=${r.proposed} inserted=${r.inserted}`,
+        at: new Date().toISOString(),
+      });
+      console.error(`netinfo: rebuild-history: ${r.targets} targets, ${r.windows} windows, ${r.proposed} events proposed, ${r.inserted} inserted (run #${runId})`);
+    } finally {
+      db.close();
+    }
+    return;
+  }
   if (!own.all) {
     if (!fs.existsSync(opts.targetsFile)) { console.error(`FATAL: targets file not found: ${opts.targetsFile}`); process.exit(2); }
     targets = prepareTargets(opts).targets;

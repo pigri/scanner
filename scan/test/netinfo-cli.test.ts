@@ -129,10 +129,63 @@ describe('netinfo cli ptr flags', () => {
   });
 });
 
+describe('netinfo cli --rebuild-history', () => {
+  function seed(db: string): void {
+    const d = openDb(db);
+    try {
+      const r1 = d.startRun('nmap', {}, '2026-08-31T10:00:00.000Z');
+      const r2 = d.startRun('nmap', {}, '2026-09-04T10:00:00.000Z');
+      d.insertPort({ target: 'a.example', ip: '192.0.2.10', port: 443, protocol: 'tcp' }, '2026-08-31T10:01:00.000Z', r1);
+      d.insertPort({ target: 'a.example', ip: '198.51.100.7', port: 443, protocol: 'tcp' }, '2026-09-04T10:01:00.000Z', r2);
+      d.raw.prepare("INSERT INTO scan_queue (target, queued_at) VALUES ('a.example', '2026-08-30T00:00:00.000Z')").run();
+    } finally { d.close(); }
+  }
+  const read = (db: string) => {
+    const d = openDb(db);
+    try {
+      return {
+        ev: d.raw.prepare('SELECT ip, kind, at, source, run_id FROM target_network_events ORDER BY ip, at').all() as Array<{ ip: string; kind: string; at: string; source: string; run_id: number }>,
+        net: (d.raw.prepare('SELECT count(*) n FROM target_network').get() as { n: number }).n,
+        runs: d.raw.prepare('SELECT id, tool, args_json FROM runs WHERE tool = ?').all('netinfo') as Array<{ id: number; tool: string; args_json: string }>,
+      };
+    } finally { d.close(); }
+  };
+
+  it('writes reconstructed events under a netinfo run, touches no target_network row, and a second run adds none', async () => {
+    const s = setup();
+    seed(s.db);
+    const first = await runCli(['--rebuild-history', '--sqlite', s.db]);
+    expect(first.code).toBe(0);
+    const a = read(s.db);
+    expect(a.ev.map((e) => `${e.ip} ${e.kind} ${e.source}`)).toEqual([
+      '192.0.2.10 ip_added reconstructed', '192.0.2.10 ip_gone reconstructed', '198.51.100.7 ip_added reconstructed',
+    ]);
+    expect(a.net).toBe(0);
+    expect(a.runs).toHaveLength(1);
+    expect(a.ev.every((e) => e.run_id === a.runs[0]!.id)).toBe(true);
+    expect(JSON.parse(a.runs[0]!.args_json)).toMatchObject({ mode: 'rebuild-history' });
+    const second = await runCli(['--rebuild-history', '--sqlite', s.db]);
+    expect(second.code).toBe(0);
+    expect(read(s.db).ev).toEqual(a.ev);
+  });
+
+  it('limits the rebuild to --targets', async () => {
+    const s = setup();
+    seed(s.db);
+    const r = await runCli(['--rebuild-history', '--targets', s.targets, '--sqlite', s.db]);
+    expect(r.code).toBe(0);
+    expect(read(s.db).ev).toEqual([]);
+  });
+});
+
 describe('splitOwnFlags', () => {
   const base = ['node', 'netinfo.ts'];
   it('defaults', () => {
-    expect(splitOwnFlags(base)).toMatchObject({ ptr: false, ptrBudgetSec: 60 });
+    expect(splitOwnFlags(base)).toMatchObject({ ptr: false, ptrBudgetSec: 60, rebuild: false });
+  });
+  it('takes --rebuild-history before or after --', () => {
+    expect(splitOwnFlags([...base, '--rebuild-history']).rebuild).toBe(true);
+    expect(splitOwnFlags([...base, '--', '--rebuild-history']).rebuild).toBe(true);
   });
   it('takes the mmdb path from GEOIP_MMDB when set', () => {
     expect(splitOwnFlags(base, { GEOIP_MMDB: '/data/geo/x.mmdb' }).mmdb).toBe('/data/geo/x.mmdb');
