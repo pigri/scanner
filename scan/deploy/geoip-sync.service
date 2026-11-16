@@ -1,0 +1,14 @@
+[Unit]
+Description=gen0sec ipinfo MMDB refresh (discovery/ipinfo_lite.mmdb)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Runs in the MAIN namespace: it only contacts the fixed GitHub release URL.
+# The new file is downloaded to ipinfo_lite.mmdb.tmp, checked (size and opens as
+# an MMDB) and renamed over the old one, so readers never see a partial file. A
+# failed run exits 1 and leaves the old file in place.
+WorkingDirectory=%h/gen0sec/redteam/discovery
+ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; mkdir -p logs && exec npx tsx src/geoip-sync.ts >> logs/geoip-sync.log 2>&1'
+TimeoutStartSec=600

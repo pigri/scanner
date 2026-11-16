@@ -133,6 +133,14 @@ npm run enrich -- domains.txt --concurrency 40
 
 Key flags: `--concurrency`, `--timeout-ms`, `--resolvers`, `--no-ipv6`, `--no-ptr`, `--refresh-mmdb`, `--out-jsonl`, `--out-csv`.
 
+### geoip-sync
+
+Refreshes the ipinfo MMDB (default `ipinfo_lite.mmdb`) from the fixed release URL. The download goes to `<file>.tmp` and replaces the file atomically only if it is at least 1 MiB and opens as an MMDB; otherwise the old file stays and the exit code is 1. On success it logs the MMDB build date. Run daily by `scan/deploy/geoip-sync.timer`.
+
+```
+npm run geoip-sync -- --mmdb ipinfo_lite.mmdb
+```
+
 **Gotcha:** don't pass `--resolvers 1.1.1.1,...` unless outbound :53 to public IPs works from this host. Default (system resolver via systemd-resolved) is more reliable.
 
 ### visualize
