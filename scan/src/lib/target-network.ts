@@ -226,6 +226,21 @@ export interface NetworkSummary {
   unreachableSince: string | null;
 }
 
+/** Scan status and currency of one target's rows: the rule the list uses. */
+export function listCurrent(
+  target: string,
+  group: readonly ListNetworkRow[],
+  ctx?: ListScanContext,
+): { statuses: ScanStatus[]; current: boolean[] } {
+  const old = markCurrent(group);
+  const untracked = ctx?.untracked.has(target) ?? false;
+  const statuses = group.map((r) =>
+    ctx ? scanStatus(r.last_seen, r.started_at ?? null, untracked, ctx.trackingStart) : ('none' as const),
+  );
+  const current = group.map((_, i) => (statuses[i] === 'none' ? old[i]! : statuses[i] !== 'no'));
+  return { statuses, current };
+}
+
 /**
  * Distinct countries and ASNs of each target's current public IPs. Rows must be
  * grouped by target. With a context, currency follows the latest scan (see
@@ -237,12 +252,7 @@ export function summarizeNetworks(
 ): Map<string, NetworkSummary> {
   const out = new Map<string, NetworkSummary>();
   const flush = (target: string, group: ListNetworkRow[]): void => {
-    const old = markCurrent(group);
-    const untracked = ctx?.untracked.has(target) ?? false;
-    const statuses = group.map((r) =>
-      ctx ? scanStatus(r.last_seen, r.started_at ?? null, untracked, ctx.trackingStart) : ('none' as const),
-    );
-    const current = group.map((_, i) => (statuses[i] === 'none' ? old[i]! : statuses[i] !== 'no'));
+    const { statuses, current } = listCurrent(target, group, ctx);
     const countries = new Set<string>();
     const asns = new Set<string>();
     group.forEach((r, i) => {

@@ -6,6 +6,7 @@ import { computeScore, type TargetSignals, type Finding, type Port, type HttpPro
 import { recordRiskScores } from './lib/risk-latest.js';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
 import { buildTargetResolver } from './lib/identity.js';
+import { loadNetworkSignals, type NetworkSignal } from './lib/risk-network.js';
 
 export interface Opts {
   db: string;
@@ -92,34 +93,37 @@ function loadHostFactsFromDiscovery(discoveryDbPath: string): Map<string, HostFa
   return map;
 }
 
-/** Score every target, write risk_scores + risk_latest, and finish the run. */
-export function runRisk(db: Db, opts: Opts): { runId: number; results: { target: string; score: number; breakdown: unknown }[]; targetsCount: number } {
-  // The scan workers hold write locks for whole batches; the 5s default on this
-  // connection was losing races with them mid-loop (SQLITE_BUSY). 60s is well
-  // over the longest observed worker write and still fails loudly if something
-  // is genuinely stuck.
-  db.raw.pragma('busy_timeout = 60000');
+export interface SignalOpts {
+  discoveryDb: string | null;
+  hostSuffix: string | null;
+  /**
+   * network: hostCountryCode from the current public IPs in target_network, falling back to
+   * the discovery db when there are none. discovery: the discovery db only (the old source).
+   */
+  countrySource: 'network' | 'discovery';
+}
+
+/** Read every target's scoring inputs. Read-only, so a dry run can use it on a read-only handle. */
+export function loadRiskSignals(raw: Database.Database, opts: SignalOpts, now: string): Map<string, TargetSignals> {
   const facts = opts.discoveryDb ? loadHostFactsFromDiscovery(opts.discoveryDb) : new Map<string, HostFacts>();
-  const now = new Date().toISOString();
-  const runId = db.startRun('risk', { db: opts.db, discoveryDb: opts.discoveryDb, suffix: opts.hostSuffix }, now);
 
   // Resolver folds each raw target onto its canonical identity: reverse-DNS
   // pseudo-names collapse to their IP, and an IP the scan unambiguously ties to
   // a single hostname folds onto that hostname (prefer-hostname policy). The
   // ports table is the mapping source since it carries both target and ip.
-  const ipPairs = db.raw.prepare('SELECT DISTINCT target, ip FROM ports').all() as { target: string; ip: string | null }[];
+  const ipPairs = raw.prepare('SELECT DISTINCT target, ip FROM ports').all() as { target: string; ip: string | null }[];
   const resolve = buildTargetResolver(ipPairs);
 
   // union of every target that appears in findings, ports, or http_probes
   const targets = new Set<string>();
-  for (const r of db.raw.prepare('SELECT DISTINCT target FROM findings').all() as { target: string }[]) targets.add(resolve(r.target));
-  for (const r of db.raw.prepare('SELECT DISTINCT target FROM ports').all() as { target: string }[]) targets.add(resolve(r.target));
-  for (const r of db.raw.prepare('SELECT DISTINCT target FROM http_probes').all() as { target: string }[]) targets.add(resolve(r.target));
+  for (const r of raw.prepare('SELECT DISTINCT target FROM findings').all() as { target: string }[]) targets.add(resolve(r.target));
+  for (const r of raw.prepare('SELECT DISTINCT target FROM ports').all() as { target: string }[]) targets.add(resolve(r.target));
+  for (const r of raw.prepare('SELECT DISTINCT target FROM http_probes').all() as { target: string }[]) targets.add(resolve(r.target));
 
   if (opts.discoveryDb) for (const domain of facts.keys()) targets.add(resolve(domain));
 
   const findingsByTarget = new Map<string, Finding[]>();
-  const findingRows = db.raw.prepare('SELECT target, tool, severity, title, cve, needs_review FROM findings')
+  const findingRows = raw.prepare('SELECT target, tool, severity, title, cve, needs_review FROM findings')
     .all() as { target: string; tool: string; severity: string | null; title: string; cve: string | null; needs_review: number }[];
   for (const r of findingRows) {
     const key = resolve(r.target);
@@ -130,35 +134,63 @@ export function runRisk(db: Db, opts: Opts): { runId: number; results: { target:
     });
   }
   const portsByTarget = new Map<string, Port[]>();
-  for (const r of db.raw.prepare('SELECT target, port, protocol, service FROM ports').all() as { target: string; port: number; protocol: string | null; service: string | null }[]) {
+  for (const r of raw.prepare('SELECT target, port, protocol, service FROM ports').all() as { target: string; port: number; protocol: string | null; service: string | null }[]) {
     const key = resolve(r.target);
     if (!portsByTarget.has(key)) portsByTarget.set(key, []);
     portsByTarget.get(key)!.push({ port: r.port, service: r.service, protocol: r.protocol });
   }
   const httpByTarget = new Map<string, HttpProbe[]>();
-  for (const r of db.raw.prepare('SELECT target, url, status_code, tech_json FROM http_probes').all() as { target: string; url: string; status_code: number | null; tech_json: string | null }[]) {
+  for (const r of raw.prepare('SELECT target, url, status_code, tech_json FROM http_probes').all() as { target: string; url: string; status_code: number | null; tech_json: string | null }[]) {
     const tech = r.tech_json ? JSON.parse(r.tech_json) as string[] : null;
     const key = resolve(r.target);
     if (!httpByTarget.has(key)) httpByTarget.set(key, []);
     httpByTarget.get(key)!.push({ url: r.url, status_code: r.status_code, tech });
   }
 
-  const results: { target: string; score: number; breakdown: unknown }[] = [];
-  const rows: { target: string; score: number; breakdownJson: string }[] = [];
+  const useNetwork = opts.countrySource === 'network';
+  const net = useNetwork ? loadNetworkSignals(raw, now, resolve) : new Map<string, NetworkSignal>();
+
+  const out = new Map<string, TargetSignals>();
   for (const t of targets) {
     const f = facts.get(t) ?? { countryCode: null, shared: 0, firstSeen: null };
+    const n = net.get(t);
     const signals: TargetSignals = {
       target: t,
       findings: findingsByTarget.get(t) ?? [],
       ports: portsByTarget.get(t) ?? [],
       http: httpByTarget.get(t) ?? [],
       hostShared: f.shared,
-      hostCountryCode: f.countryCode,
+      hostCountryCode: n?.country ? n.country.code : f.countryCode,
       firstSeen: f.firstSeen,
       now,
       ...(opts.hostSuffix ? { hostSuffix: opts.hostSuffix } : {}),
     };
-    const r = computeScore(signals);
+    if (useNetwork) {
+      signals.hostCountryDetail = n?.country ?? { code: f.countryCode, source: f.countryCode ? 'discovery' : 'none', counts: {}, tie: false };
+      signals.networkChange = n?.networkChange ?? { count: 0 };
+    }
+    out.set(t, signals);
+  }
+  return out;
+}
+
+/** Score every target, write risk_scores + risk_latest, and finish the run. */
+export function runRisk(db: Db, opts: Opts): { runId: number; results: { target: string; score: number; breakdown: unknown }[]; targetsCount: number } {
+  // The scan workers hold write locks for whole batches; the 5s default on this
+  // connection was losing races with them mid-loop (SQLITE_BUSY). 60s is well
+  // over the longest observed worker write and still fails loudly if something
+  // is genuinely stuck.
+  db.raw.pragma('busy_timeout = 60000');
+  const now = new Date().toISOString();
+  const runId = db.startRun('risk', { db: opts.db, discoveryDb: opts.discoveryDb, suffix: opts.hostSuffix }, now);
+
+  const signals = loadRiskSignals(db.raw, { ...opts, countrySource: 'network' }, now);
+  const targets = [...signals.keys()];
+
+  const results: { target: string; score: number; breakdown: unknown }[] = [];
+  const rows: { target: string; score: number; breakdownJson: string }[] = [];
+  for (const [t, s] of signals) {
+    const r = computeScore(s);
     rows.push({ target: t, score: r.score, breakdownJson: JSON.stringify(r.breakdown) });
     if (r.score >= opts.minScore) results.push({ target: t, score: r.score, breakdown: r.breakdown });
   }
@@ -166,9 +198,9 @@ export function runRisk(db: Db, opts: Opts): { runId: number; results: { target:
   // bumped busy_timeout for it) instead of racing the workers on each row.
   recordRiskScores(db.raw, rows, now, runId);
 
-  db.finishRun(runId, { targetsCount: targets.size, findingsCount: results.length, at: new Date().toISOString() });
+  db.finishRun(runId, { targetsCount: targets.length, findingsCount: results.length, at: new Date().toISOString() });
 
-  return { runId, results, targetsCount: targets.size };
+  return { runId, results, targetsCount: targets.length };
 }
 
 function main(): void {

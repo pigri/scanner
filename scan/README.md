@@ -208,6 +208,12 @@ npm run worker  -- --batch-size 5 --max-batches 1 --scope scope.txt
 sqlite3 scan.db "UPDATE scan_queue SET status='pending', error=NULL, abandoned=0 WHERE status='failed'"
 ```
 
+Before changing the `networkChanged` bump in `src/lib/risk.ts`, measure it on a copy of the DB. The dry run opens the DB read-only and prints to stdout only:
+
+```bash
+npm run risk-dry-run -- --sqlite scan-copy.db --bumps 1,2,3,5 --suffix gov.hu [--discovery-db ../discovery/recon.db]
+```
+
 ### retention
 
 Prune superseded rows. A target's latest evidence per tool is never deleted, however old.
