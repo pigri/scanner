@@ -1,6 +1,9 @@
-export const TARGET_NETWORK_SQL = `SELECT ip, ip_version, ip_class, asn, as_name, as_domain, country_code, country,
-  geo_checked_at, ptr_json, from_ports, from_dns, from_http, first_seen, last_seen
+/** The UI never migrates: pass hasFromHttp=false for a DB whose target_network predates from_http. */
+export const targetNetworkSql = (hasFromHttp: boolean): string => `SELECT ip, ip_version, ip_class, asn, as_name, as_domain, country_code, country,
+  geo_checked_at, ptr_json, from_ports, from_dns, ${hasFromHttp ? 'from_http' : '0 AS from_http'}, first_seen, last_seen
   FROM target_network WHERE target = ? ORDER BY ip LIMIT 500`;
+
+export const TARGET_NETWORK_SQL = targetNetworkSql(true);
 
 /** `started_at` is the target's latest done scan, NULL when it has none. */
 export const TARGET_NETWORK_LIST_SQL = `SELECT tn.target, tn.ip, tn.asn, tn.country_code, tn.country,
