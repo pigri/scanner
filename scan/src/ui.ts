@@ -16,6 +16,7 @@ import { filterAndFacet } from './lib/target-filter.js';
 import { buildNewsSql } from './lib/news-sql.js';
 import { TARGET_ROWS_SQL, riskLatestMissingMessage } from './lib/target-rows-sql.js';
 import { NO_URL, latestRiskRow } from './lib/risk-latest.js';
+import { TARGET_NETWORK_SQL, shapeNetworkRows, type NetworkDbRow } from './lib/target-network.js';
 
 interface Opts {
   scanDb: string;
@@ -457,6 +458,9 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
           .prepare(`SELECT type, value, ttl FROM dns_records WHERE target=? ORDER BY type`)
           .all(t)
       : [];
+    const network = tableExists(scan, 'target_network')
+      ? shapeNetworkRows(scan.prepare(TARGET_NETWORK_SQL).all(t) as NetworkDbRow[])
+      : [];
     return {
       target: t,
       created_at: span?.created_at ?? null,
@@ -471,6 +475,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
       cves,
       certs,
       dns,
+      network,
     };
   },
 
@@ -1034,7 +1039,10 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(opts.port, opts.host, () => {
-  console.log(`Operation Hussar UI  →  http://${opts.host}:${opts.port}`);
+  const bound = server.address();
+  const port = typeof bound === 'object' && bound ? bound.port : opts.port;
+  console.log(`Operation Hussar UI  →  http://${opts.host}:${port}`);
+  console.log(`listening on http://${opts.host}:${port}`);
   console.log(`  scan db :  ${path.resolve(opts.scanDb)}  (read-only)`);
   console.log(`  recon db:  ${opts.reconDb ? path.resolve(opts.reconDb) + '  (read-only)' : '(none)'}`);
 });
