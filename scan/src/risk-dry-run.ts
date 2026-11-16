@@ -115,23 +115,50 @@ export function formatReport(r: DryRunReport): string {
   return out.join('\n');
 }
 
-function main(): void {
-  const argv = process.argv;
+const USAGE = 'Usage: risk-dry-run --sqlite <db> [--bumps 1,2,3,5] [--suffix gov.hu] [--discovery-db <db>] [--sample N]\n' +
+  'Read-only. Prints to stdout only; the output names targets, so keep it out of the repo.';
+
+/** Parses argv; throws an Error carrying the usage text on a bad value. -h is handled by main. */
+export function parseDryRunArgs(argv: string[]): DryRunOpts & { db: string } {
+  const bad = (why: string): Error => new Error(`${why}\n${USAGE}`);
   const o: DryRunOpts & { db: string } = {
     db: resolveDbArg(argv), discoveryDb: null, hostSuffix: null, bumps: [1, 2, 3, 5], now: new Date().toISOString(), sample: 5,
+  };
+  const value = (i: number, flag: string): string => {
+    const v = argv[i];
+    if (v === undefined || v === '') throw bad(`${flag} needs a value`);
+    return v;
   };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i]!;
     if (isDbFlag(a)) { i++; continue; }
-    if (a === '--discovery-db') o.discoveryDb = argv[++i]!;
-    else if (a === '--suffix') o.hostSuffix = argv[++i]!;
-    else if (a === '--bumps') o.bumps = argv[++i]!.split(',').map(Number).filter((n) => Number.isFinite(n));
-    else if (a === '--sample') o.sample = parseInt(argv[++i]!, 10);
-    else if (a === '-h' || a === '--help') {
-      console.error('Usage: risk-dry-run --sqlite <db> [--bumps 1,2,3,5] [--suffix gov.hu] [--discovery-db <db>] [--sample N]\n' +
-        'Read-only. Prints to stdout only; the output names targets, so keep it out of the repo.');
-      process.exit(0);
+    if (a === '--discovery-db') o.discoveryDb = value(++i, a);
+    else if (a === '--suffix') o.hostSuffix = value(++i, a);
+    else if (a === '--bumps') {
+      const parts = value(++i, a).split(',');
+      const nums = parts.map((p) => (p.trim() === '' ? NaN : Number(p)));
+      if (nums.some((n) => !Number.isFinite(n))) throw bad('--bumps must be a comma-separated list of numbers');
+      o.bumps = nums;
+    } else if (a === '--sample') {
+      const v = value(++i, a);
+      if (!/^\d+$/.test(v)) throw bad('--sample must be a whole number');
+      o.sample = Number(v);
     }
+  }
+  return o;
+}
+
+function main(): void {
+  if (process.argv.includes('-h') || process.argv.includes('--help')) {
+    console.error(USAGE);
+    process.exit(0);
+  }
+  let o: DryRunOpts & { db: string };
+  try {
+    o = parseDryRunArgs(process.argv);
+  } catch (e) {
+    console.error((e as Error).message);
+    process.exit(2);
   }
   const raw = new Database(o.db, { readonly: true, fileMustExist: true });
   raw.pragma('query_only = ON');

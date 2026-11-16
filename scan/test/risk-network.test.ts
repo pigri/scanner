@@ -7,7 +7,7 @@ import { openDb, type Db } from '../src/lib/db.js';
 import { computeScore, NETWORK_CHANGED_BUMP, type TargetSignals } from '../src/lib/risk.js';
 import { recentNetworkChange, pickCountry, type NetworkEvent } from '../src/lib/risk-network.js';
 import { loadRiskSignals } from '../src/risk.js';
-import { dryRun, formatReport } from '../src/risk-dry-run.js';
+import { dryRun, formatReport, parseDryRunArgs } from '../src/risk-dry-run.js';
 
 const NOW = '2026-11-16T12:00:00.000Z';
 const DAY = 86_400_000;
@@ -15,7 +15,7 @@ const ago = (ms: number): string => new Date(Date.parse(NOW) - ms).toISOString()
 
 const ev = (o: Partial<NetworkEvent> & Pick<NetworkEvent, 'kind' | 'at'>): NetworkEvent => ({
   target: 'a.example', ip: '192.0.2.1', old_country_code: null, new_country_code: null,
-  old_asn: null, new_asn: null, source: 'scan', ...o,
+  old_asn: null, new_asn: null, source: 'scan', run_id: null, ...o,
 });
 
 const base = (): TargetSignals => ({
@@ -73,6 +73,39 @@ describe('recentNetworkChange', () => {
     expect(r.count).toBe(0);
   });
 
+  describe('the first batch of a target', () => {
+    const MIN = 60_000;
+    const H = 3_600_000;
+    const add = (hAgo: number, ip: string, asn: string, o: Partial<NetworkEvent> = {}): NetworkEvent =>
+      ev({ kind: 'ip_added', at: ago(hAgo * H), ip, new_asn: asn, ...o });
+    it('does not count first IPs found minutes apart in different ASNs', () => {
+      const r = recentNetworkChange([add(5, '192.0.2.1', 'AS64496'), { ...add(5, '192.0.2.2', 'AS64497'), at: ago(5 * H - 3 * MIN) }], NOW);
+      expect(r.count).toBe(0);
+    });
+    it('does not count first IPs 2 h apart, inside the window', () => {
+      expect(recentNetworkChange([add(5, '192.0.2.1', 'AS64496'), add(3, '192.0.2.2', 'AS64497')], NOW).count).toBe(0);
+    });
+    it('does not count a same-run first batch spread past the window', () => {
+      expect(recentNetworkChange([
+        add(20, '192.0.2.1', 'AS64496', { run_id: 7 }),
+        add(10, '192.0.2.2', 'AS64497', { run_id: 7 }),
+      ], NOW).count).toBe(0);
+    });
+    it('counts an IP 4 h after the first batch with a new ASN', () => {
+      expect(recentNetworkChange([add(10, '192.0.2.1', 'AS64496'), add(6, '192.0.2.2', 'AS64497')], NOW).count).toBe(1);
+    });
+    it('uses first-batch ASNs as known', () => {
+      expect(recentNetworkChange([add(10, '192.0.2.1', 'AS64496'), add(10, '192.0.2.3', 'AS64497'), add(6, '192.0.2.2', 'AS64497')], NOW).count).toBe(0);
+    });
+    it('counts the new-ASN IP of a later batch, not its known-ASN neighbour', () => {
+      expect(recentNetworkChange([
+        add(20, '192.0.2.1', 'AS64496'),
+        add(5, '192.0.2.2', 'AS64496'),
+        { ...add(5, '192.0.2.3', 'AS64497'), at: ago(5 * H - 3 * MIN) },
+      ], NOW).count).toBe(1);
+    });
+  });
+
   describe('the 30 day window', () => {
     const e = (at: string): NetworkEvent[] => [ev({ kind: 'geo_changed', at, old_country_code: 'HU', new_country_code: 'DE' })];
     it('includes an event exactly 30 days old', () => {
@@ -85,6 +118,9 @@ describe('recentNetworkChange', () => {
       const rec = (at: string): NetworkEvent[] => [{ ...e(at)[0]!, source: 'reconstructed' }];
       expect(recentNetworkChange(rec(ago(29 * DAY)), NOW).count).toBe(1);
       expect(recentNetworkChange(rec(ago(31 * DAY)), NOW).count).toBe(0);
+    });
+    it('ignores an event after now', () => {
+      expect(recentNetworkChange(e(new Date(Date.parse(NOW) + 1).toISOString()), NOW).count).toBe(0);
     });
     it('ignores a future event time that cannot be parsed', () => {
       expect(recentNetworkChange(e('not-a-date'), NOW).count).toBe(0);
@@ -283,5 +319,25 @@ describe('dry run', () => {
     const walFile = `${file}-wal`;
     expect(fs.existsSync(walFile) ? fs.statSync(walFile).size : 0).toBe(0);
     expect(fs.readdirSync(path.dirname(file)).filter((f) => !/^scan\.db(-shm|-wal)?$/.test(f))).toEqual([]);
+  });
+});
+
+describe('dry-run arguments', () => {
+  const parse = (...a: string[]) => parseDryRunArgs(['node', 'x', ...a]);
+  it('accepts the documented flags', () => {
+    const o = parse('--sqlite', 'f.db', '--bumps', '1,2', '--sample', '3', '--suffix', 'hu');
+    expect(o).toMatchObject({ db: 'f.db', bumps: [1, 2], sample: 3, hostSuffix: 'hu' });
+  });
+  it('rejects --bumps without a value', () => {
+    expect(() => parse('--bumps')).toThrow(/usage/i);
+  });
+  it('rejects an empty or non-numeric --bumps', () => {
+    expect(() => parse('--bumps', '')).toThrow(/usage/i);
+    expect(() => parse('--bumps', '1,x')).toThrow(/usage/i);
+    expect(() => parse('--bumps', '1,,2')).toThrow(/usage/i);
+  });
+  it('rejects a non-numeric --sample', () => {
+    expect(() => parse('--sample', 'abc')).toThrow(/usage/i);
+    expect(() => parse('--sample')).toThrow(/usage/i);
   });
 });

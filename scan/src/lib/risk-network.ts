@@ -1,8 +1,8 @@
 import type Database from 'better-sqlite3';
 import type { HostCountryDetail } from './risk.js';
+import { WINDOW_GAP_MS } from './netinfo-rebuild.js';
 import {
-  DNS_TRACKING_START_SQL, DNS_UNTRACKED_TARGETS_SQL, TARGET_NETWORK_LIST_NO_QUEUE_SQL, TARGET_NETWORK_LIST_SQL,
-  listCurrent, type ListNetworkRow, type ListScanContext,
+  TARGET_NETWORK_LIST_NO_QUEUE_SQL, TARGET_NETWORK_LIST_SQL, listCurrent, loadListScanContext, type ListNetworkRow,
 } from './target-network.js';
 
 export const NETWORK_CHANGE_DAYS = 30;
@@ -17,6 +17,7 @@ export interface NetworkEvent {
   new_country_code: string | null;
   old_asn: string | null;
   new_asn: string | null;
+  run_id?: number | string | null;
   source: string;
 }
 
@@ -38,28 +39,38 @@ export function pickCountry(codes: readonly string[]): { code: string; counts: R
 }
 
 /**
- * Events in the last 30 days (inclusive) that count as a network change:
+ * Events in the last 30 days (inclusive, none after `now`) that count as a
+ * network change:
  * - a geo_changed with a new country or ASN;
  * - an ip_added whose ASN is not among the ASNs of the target's strictly earlier
- *   events. With no earlier IP, or only IPs without an ASN, it never counts, so
- *   the first IPs of a new target are not a change.
- * Scan and reconstructed events follow the same window.
+ *   events.
+ * The target's first batch of ip_added events never counts (a geo_changed always
+ * implies an earlier state, so it is not part of the exemption): every event within WINDOW_GAP_MS of its
+ * earliest event, or sharing that event's non-null run_id. Its ASNs seed the
+ * known set, so the first IPs of a new target are not a change.
  */
 export function recentNetworkChange(events: readonly NetworkEvent[], now: string): { count: number } {
   const t = Date.parse(now);
+  if (!Number.isFinite(t)) return { count: 0 };
   const timed = events
     .map((e) => ({ e, at: Date.parse(e.at) }))
     .filter((x) => Number.isFinite(x.at));
+  if (timed.length === 0) return { count: 0 };
+  const first = timed.reduce((m, x) => (x.at < m.at ? x : m));
+  const firstRun = first.e.run_id ?? null;
+  const inFirst = (x: { e: NetworkEvent; at: number }): boolean =>
+    x.at - first.at <= WINDOW_GAP_MS || (firstRun !== null && x.e.run_id === firstRun);
   let count = 0;
-  for (const { e, at } of timed) {
-    if (!Number.isFinite(t) || at < t - WINDOW_MS) continue;
+  for (const x of timed) {
+    const { e, at } = x;
+    if (at < t - WINDOW_MS || at > t) continue;
     if (e.kind === 'geo_changed') {
       if ((e.new_country_code !== null && e.new_country_code !== e.old_country_code) ||
           (e.new_asn !== null && e.new_asn !== e.old_asn)) count++;
-    } else if (e.kind === 'ip_added' && e.new_asn !== null) {
+    } else if (e.kind === 'ip_added' && e.new_asn !== null && !inFirst(x)) {
       const earlier = new Set<string>();
       for (const o of timed) {
-        if (o.at >= at) continue;
+        if (!inFirst(o) && o.at >= at) continue;
         if (o.e.new_asn) earlier.add(o.e.new_asn);
         if (o.e.old_asn) earlier.add(o.e.old_asn);
       }
@@ -77,18 +88,6 @@ export interface NetworkSignal {
 const hasTable = (raw: Database.Database, name: string): boolean =>
   raw.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
 
-function listContext(raw: Database.Database): ListScanContext {
-  if (!hasTable(raw, 'dns_records')) return { untracked: new Set(), trackingStart: null };
-  const hasLastSeen = (raw.prepare('PRAGMA table_info(dns_records)').all() as { name: string }[]).some((c) => c.name === 'last_seen');
-  if (!hasLastSeen) {
-    const all = raw.prepare('SELECT DISTINCT target FROM dns_records').all() as { target: string }[];
-    return { untracked: new Set(all.map((r) => r.target)), trackingStart: null };
-  }
-  const untracked = new Set((raw.prepare(DNS_UNTRACKED_TARGETS_SQL).all() as { target: string }[]).map((r) => r.target));
-  const t = raw.prepare(DNS_TRACKING_START_SQL).get() as { tracking_start: string | null };
-  return { untracked, trackingStart: t.tracking_start };
-}
-
 /**
  * Per target: the country of its current public IPs and its recent network
  * changes. Current follows the list's rule (latest done scan, else 24 h).
@@ -105,7 +104,7 @@ export function loadNetworkSignals(
   if (hasTable(raw, 'target_network')) {
     const queue = hasTable(raw, 'scan_queue');
     const rows = raw.prepare(queue ? TARGET_NETWORK_LIST_SQL : TARGET_NETWORK_LIST_NO_QUEUE_SQL).all() as ListNetworkRow[];
-    const ctx = queue ? listContext(raw) : undefined;
+    const ctx = queue ? loadListScanContext(raw) : undefined;
     const groups = new Map<string, ListNetworkRow[]>();
     for (const r of rows) {
       const g = groups.get(r.target);
@@ -122,7 +121,7 @@ export function loadNetworkSignals(
     }
   }
   if (hasTable(raw, 'target_network_events')) {
-    const rows = raw.prepare(`SELECT target, ip, kind, at, old_country_code, new_country_code, old_asn, new_asn, source
+    const rows = raw.prepare(`SELECT target, ip, kind, at, old_country_code, new_country_code, old_asn, new_asn, run_id, source
       FROM target_network_events WHERE kind IN ('ip_added', 'geo_changed')`).all() as NetworkEvent[];
     for (const e of rows) {
       const key = fold(e.target);

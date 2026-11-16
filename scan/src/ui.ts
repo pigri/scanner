@@ -29,9 +29,7 @@ import {
   summarizeNetworks,
   unreachableSince,
   noIpScanSql,
-  DNS_UNTRACKED_TARGETS_SQL,
-  DNS_TRACKING_START_SQL,
-  type ListScanContext,
+  loadListScanContext,
   type ListNetworkRow,
   type NetworkDbRow,
   type HistoryDbRow,
@@ -197,22 +195,6 @@ interface TargetRow {
   asns: string[];
   unreachableSince: string | null;
 }
-function listScanContext(): ListScanContext {
-  if (!tableExists(scan, 'dns_records')) return { untracked: new Set(), trackingStart: null };
-  // The read-only UI never runs the migration that adds dns_records.last_seen.
-  const hasLastSeen = (scan.prepare('PRAGMA table_info(dns_records)').all() as { name: string }[]).some(
-    (c) => c.name === 'last_seen',
-  );
-  if (!hasLastSeen) {
-    const all = scan.prepare('SELECT DISTINCT target FROM dns_records').all() as { target: string }[];
-    return { untracked: new Set(all.map((r) => r.target)), trackingStart: null };
-  }
-  const untracked = new Set(
-    (scan.prepare(DNS_UNTRACKED_TARGETS_SQL).all() as { target: string }[]).map((r) => r.target),
-  );
-  const t = scan.prepare(DNS_TRACKING_START_SQL).get() as { tracking_start: string | null };
-  return { untracked, trackingStart: t.tracking_start };
-}
 let targetsCache: { rows: TargetRow[]; at: number } | null = null;
 function targetRows(): TargetRow[] {
   const now = Date.now();
@@ -222,7 +204,7 @@ function targetRows(): TargetRow[] {
     .all() as TargetRow[];
   const nets = tableExists(scan, 'target_network')
     ? tableExists(scan, 'scan_queue')
-      ? summarizeNetworks(scan.prepare(TARGET_NETWORK_LIST_SQL).all() as ListNetworkRow[], listScanContext())
+      ? summarizeNetworks(scan.prepare(TARGET_NETWORK_LIST_SQL).all() as ListNetworkRow[], loadListScanContext(scan))
       : summarizeNetworks(scan.prepare(TARGET_NETWORK_LIST_NO_QUEUE_SQL).all() as ListNetworkRow[])
     : new Map();
   const noIp = new Map<string, string>();
