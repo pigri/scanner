@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, writeLines, resolveOutputPath } from './lib/runner.js';
 import { openDb } from './lib/db.js';
-import { parseHttpxRow } from './lib/httpx-parse.js';
+import { ingestHttpxOutput } from './lib/httpx-parse.js';
 
 async function main(): Promise<void> {
   const opts = parseCommonCli(process.argv);
@@ -69,15 +69,7 @@ their HTTP endpoint. Default template:
   console.error(`httpx exited ${r.code}, output: ${outFile}`);
 
   if (db && runId !== null && fs.existsSync(outFile)) {
-    let count = 0;
-    for (const line of fs.readFileSync(outFile, 'utf8').split('\n')) {
-      const probe = parseHttpxRow(line);
-      if (!probe) continue;
-      try {
-        db.insertHttpProbe(probe, now, runId);
-        count++;
-      } catch { /* ignore unwritable row */ }
-    }
+    const count = ingestHttpxOutput(db, fs.readFileSync(outFile, 'utf8'), now, runId);
     db.finishRun(runId, { targetsCount: targets.length, findingsCount: count, at: new Date().toISOString() });
     db.close();
     console.error(`  sqlite: ${path.resolve(opts.sqlite!)} (+${count} probes, run #${runId})`);
