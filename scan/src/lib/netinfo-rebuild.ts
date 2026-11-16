@@ -141,9 +141,12 @@ export function rebuildHistory(opts: RebuildOpts): RebuildResult {
         // Keep the merged sequence alternating: drop trailing transitions the first scan event cannot follow.
         const first = firstScan.get(g[0]!.target)!.get(g[0]!.ip);
         if (first) {
-          // ip_gone needs the ip present before it, ip_back needs it absent. ip_added has no precondition.
+          // The scan writer takes first_seen from the earliest evidence, so anything the rebuild
+          // puts before a scan ip_added is a window-start artifact.
+          if (first.kind === 'ip_added') g.length = 0;
+          // ip_gone needs the ip present before it, ip_back needs it absent.
           const ok = (last: Proposed | undefined): boolean =>
-            first.kind === 'ip_gone' ? !last || last.kind !== 'ip_gone' : first.kind === 'ip_back' ? !!last && last.kind === 'ip_gone' : true;
+            first.kind === 'ip_gone' ? !last || last.kind !== 'ip_gone' : !!last && last.kind === 'ip_gone';
           while (g.length > 0 && !ok(g[g.length - 1])) g.pop();
         }
         for (const e of g) result.inserted += insert.run({ ...e, run_id: runId }).changes;
@@ -160,9 +163,12 @@ export function rebuildHistory(opts: RebuildOpts): RebuildResult {
 
     // Per IP: the windows (by index) that saw it.
     const seen = new Map<string, Set<number>>();
+    // Windows that have an ip row for any ip of the target.
+    const hasIpRows = new Set<number>();
     const mark = (raw: string, w: number): void => {
       const n = normalizeIp(raw);
       if (!n) return;
+      hasIpRows.add(w);
       let s = seen.get(n.ip);
       if (!s) seen.set(n.ip, (s = new Set()));
       s.add(w);
@@ -174,7 +180,16 @@ export function rebuildHistory(opts: RebuildOpts): RebuildResult {
       if (w !== undefined) mark(r.ip, w);
     }
     const bounds = windows.map((w) => [Date.parse(w.start), Date.parse(w.end)] as const);
+    // Per ip, the dns [seen_at, last_seen] ranges: a window inside one is not an absence.
+    const dnsRanges = new Map<string, Array<readonly [number, number]>>();
     for (const r of dnsStmt.all(target) as { ip: string; f: string; l: string }[]) {
+      const n = normalizeIp(r.ip);
+      const f = Date.parse(r.f), l = Date.parse(r.l);
+      if (n && Number.isFinite(f) && Number.isFinite(l)) {
+        const list = dnsRanges.get(n.ip) ?? [];
+        list.push([f, l]);
+        dnsRanges.set(n.ip, list);
+      }
       for (const t of [Date.parse(r.f), Date.parse(r.l)]) {
         if (!Number.isFinite(t)) continue;
         const w = bounds.findIndex(([a, b]) => t >= a && t <= b);
@@ -190,6 +205,14 @@ export function rebuildHistory(opts: RebuildOpts): RebuildResult {
     for (const r of nullIpStmt.all({ t: target }) as { run_id: number }[]) {
       const w = byRun.get(r.run_id);
       if (w !== undefined) inconclusive.add(w);
+    }
+
+    // A window with the target's done queue start is a full scan.
+    const fullScan = new Set<number>();
+    for (const q of queueStmt.all(target) as { started_at: string }[]) {
+      const t = Date.parse(q.started_at);
+      const w = bounds.findIndex(([a, b]) => t >= a && t <= b);
+      if (w >= 0) fullScan.add(w);
     }
 
     const untracked = (untrackedStmt.get(target) as { n: number }).n === 1;
@@ -208,7 +231,9 @@ export function rebuildHistory(opts: RebuildOpts): RebuildResult {
           if (state === 'never') push('ip_added');
           else if (state === 'gone') push('ip_back');
           state = 'present';
-        } else if (state === 'present' && !inconclusive.has(i) && scanStatus(NEVER, at, untracked, trackingStart) === 'no') {
+        } else if (state === 'present' && !inconclusive.has(i) && (hasIpRows.has(i) || fullScan.has(i))
+          && !(dnsRanges.get(ip) ?? []).some(([f, l]) => Date.parse(windows[i]!.start) > f && Date.parse(windows[i]!.start) < l)
+          && scanStatus(NEVER, at, untracked, trackingStart) === 'no') {
           push('ip_gone');
           state = 'gone';
         }

@@ -112,11 +112,30 @@ describe('rebuildHistory', () => {
     ]);
   });
 
-  it('counts a run that only left findings as a window that did not see the ip', () => {
+  it('counts a window with ip rows for other ips only as an absence', () => {
     const db = openDb(':memory:');
     const r1 = run(db, D0), r2 = run(db, D0 + DAY);
     port(db, 'a.example', '192.0.2.10', D0, r1);
+    port(db, 'a.example', '198.51.100.7', D0 + DAY, r2);
+    rebuild(db);
+    expect(brief(db)).toContain(`192.0.2.10 ip_gone ${iso(D0 + DAY)}`);
+  });
+
+  it('a findings-only window between sightings is inconclusive: no gone, no back', () => {
+    const db = openDb(':memory:');
+    const r1 = run(db, D0), r2 = run(db, D0 + DAY), r3 = run(db, D0 + 2 * DAY);
+    port(db, 'a.example', '192.0.2.10', D0, r1);
     finding(db, 'a.example', D0 + DAY, r2);
+    port(db, 'a.example', '192.0.2.10', D0 + 2 * DAY, r3);
+    rebuild(db);
+    expect(brief(db)).toEqual([`192.0.2.10 ip_added ${iso(D0)}`]);
+  });
+
+  it('a done queue start with no ip rows in its window is an absence', () => {
+    const db = openDb(':memory:');
+    port(db, 'a.example', '192.0.2.10', D0, run(db, D0));
+    finding(db, 'a.example', D0 + DAY, run(db, D0 + DAY));
+    queue(db, 'a.example', 'done', D0 + DAY + H);
     rebuild(db);
     expect(brief(db)).toEqual([`192.0.2.10 ip_added ${iso(D0)}`, `192.0.2.10 ip_gone ${iso(D0 + DAY)}`]);
   });
@@ -131,6 +150,17 @@ describe('rebuildHistory', () => {
     expect(brief(db)).toEqual([`192.0.2.10 ip_added ${iso(D0)}`]);
   });
 
+  it('a window strictly inside a dns record range for the ip is inconclusive, not an absence', () => {
+    const db = openDb(':memory:');
+    const r1 = run(db, D0), r2 = run(db, D0 + DAY), r3 = run(db, D0 + 2 * DAY);
+    port(db, 'a.example', '192.0.2.10', D0, r1);
+    port(db, 'a.example', '198.51.100.7', D0 + DAY, r2);
+    port(db, 'a.example', '192.0.2.10', D0 + 2 * DAY, r3);
+    db.raw.prepare("INSERT INTO dns_records (target, name, type, value, seen_at, last_seen) VALUES ('a.example','a.example','A','192.0.2.10',?,?)").run(iso(D0 - H), iso(D0 + 3 * DAY));
+    rebuild(db);
+    expect(brief(db).filter((b) => b.startsWith('192.0.2.10'))).toEqual([`192.0.2.10 ip_added ${iso(D0)}`]);
+  });
+
   it('counts a dns record whose seen_at or last_seen falls in a window', () => {
     const db = openDb(':memory:');
     const r1 = run(db, D0), r2 = run(db, D0 + DAY), r3 = run(db, D0 + 2 * DAY);
@@ -139,8 +169,8 @@ describe('rebuildHistory', () => {
     finding(db, 'a.example', D0 + 2 * DAY, r3);
     db.raw.prepare("INSERT INTO dns_records (target, name, type, value, seen_at, last_seen) VALUES ('a.example','a.example','A','192.0.2.10',?,?)").run(iso(D0 + H), iso(D0 + 2 * DAY + H));
     rebuild(db);
-    // Seen in window 1 (seen_at) and window 3 (last_seen); window 2 has neither.
-    expect(brief(db)).toEqual([`192.0.2.10 ip_added ${iso(D0)}`, `192.0.2.10 ip_gone ${iso(D0 + DAY)}`, `192.0.2.10 ip_back ${iso(D0 + 2 * DAY)}`]);
+    // Seen in window 1 (seen_at) and window 3 (last_seen); window 2 lies inside the record's range.
+    expect(brief(db)).toEqual([`192.0.2.10 ip_added ${iso(D0)}`]);
   });
 
   it('emits no ip_gone for a window whose dns status is unknown', () => {
@@ -265,7 +295,7 @@ describe('rebuildHistory and scan events', () => {
     db.raw.prepare("INSERT INTO target_network_events (target, ip, kind, at, source) VALUES ('a.example','192.0.2.10','ip_added',?, 'scan')").run(iso(D0 + DAY));
     rebuild(db);
     // The gone at D0 + DAY would be at the scan event's time: left to the scan writer.
-    expect(events(db, "ip = '192.0.2.10'").map((e) => `${e.kind} ${e.source}`)).toEqual(['ip_added reconstructed', 'ip_added scan']);
+    expect(events(db, "ip = '192.0.2.10'").map((e) => `${e.kind} ${e.source}`)).toEqual(['ip_added scan']);
   });
 
   it('does not let a later scan run duplicate what a rebuild recorded for a gone ip', () => {
@@ -370,6 +400,15 @@ describe('event order across sources', () => {
     expect(kinds(db)).toEqual(['ip_added reconstructed', 'ip_gone reconstructed', 'ip_back reconstructed', 'ip_gone scan']);
   });
 
+  it('writes nothing for an ip whose first scan event is ip_added, even when the run started before the evidence', () => {
+    const db = openDb(':memory:');
+    const r = run(db, D0);
+    port(db, 'a.example', '192.0.2.10', D0 + 60_000, r);
+    runNetinfo({ db, targets: ['a.example'], geo: null, now: NOW });
+    rebuild(db);
+    expect(kinds(db)).toEqual(['ip_added scan']);
+  });
+
   it('never alters scan events', () => {
     const db = openDb(':memory:');
     seed(db);
@@ -385,6 +424,9 @@ describe('event order across sources', () => {
     port(db, 'b.example', '203.0.113.5', D0, run(db, D0));
     db.insertPort({ target: 'b.example', ip: '203.0.113.5', port: 80, protocol: 'tcp' }, iso(D0 + 4 * DAY), run(db, D0 + 4 * DAY));
     scanEv(db, '192.0.2.10', 'ip_back', D0 + 20 * DAY);
+    const rc = run(db, D0 + 30 * DAY);
+    port(db, 'c.example', '203.0.113.9', D0 + 30 * DAY + 60_000, rc);
+    runNetinfo({ db, targets: ['c.example'], geo: null, now: NOW });
     rebuild(db);
     rebuild(db);
     const rows = db.raw.prepare("SELECT target, ip, kind FROM target_network_events ORDER BY target, ip, at, id").all() as { target: string; ip: string; kind: string }[];
@@ -396,6 +438,6 @@ describe('event order across sources', () => {
       else expect(r.kind).toBe('ip_added');
       last.set(k, present);
     }
-    expect(last.size).toBe(3);
+    expect(last.size).toBe(4);
   });
 });
