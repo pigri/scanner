@@ -21,6 +21,11 @@ export const TARGET_ANSWERED_DNS_SQL = `SELECT 'dns' AS source, MAX(COALESCE(las
     COUNT(CASE WHEN COALESCE(last_seen, seen_at) >= @s THEN 1 END) AS n
   FROM dns_records WHERE target = @t`;
 
+/** For a DB whose dns_records predates last_seen: seen_at is the only time. Bind @t and @s. */
+export const TARGET_ANSWERED_DNS_NO_LAST_SEEN_SQL = `SELECT 'dns' AS source, MAX(seen_at) AS at,
+    COUNT(CASE WHEN seen_at >= @s THEN 1 END) AS n
+  FROM dns_records WHERE target = @t`;
+
 /** When DNS per-scan tracking began, and whether @t has rows from before it. Bind @t. */
 export const DNS_TRACKING_SQL = `SELECT MIN(last_seen) AS tracking_start,
     EXISTS(SELECT 1 FROM dns_records WHERE target = @t AND last_seen IS NULL) AS untracked

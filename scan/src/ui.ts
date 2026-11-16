@@ -23,6 +23,7 @@ import {
   TARGET_SCAN_SQL,
   TARGET_ANSWERED_SQL,
   TARGET_ANSWERED_DNS_SQL,
+  TARGET_ANSWERED_DNS_NO_LAST_SEEN_SQL,
   DNS_TRACKING_SQL,
   summarizeNetworks,
   type ListNetworkRow,
@@ -506,12 +507,23 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
       : undefined;
     const doneStart = queueRow?.status === 'done' ? queueRow.started_at : null;
     const hasDns = tableExists(scan, 'dns_records');
-    const tracking = hasDns
+    // The read-only UI never runs the migration that adds dns_records.last_seen.
+    const hasDnsLastSeen =
+      hasDns &&
+      (scan.prepare('PRAGMA table_info(dns_records)').all() as { name: string }[]).some((c) => c.name === 'last_seen');
+    const tracking = hasDnsLastSeen
       ? (scan.prepare(DNS_TRACKING_SQL).get({ t }) as { tracking_start: string | null; untracked: number })
-      : { tracking_start: null, untracked: 0 };
+      : {
+          tracking_start: null,
+          untracked: hasDns && scan.prepare('SELECT 1 FROM dns_records WHERE target = ? LIMIT 1').get(t) ? 1 : 0,
+        };
     const answered = [
       ...(scan.prepare(TARGET_ANSWERED_SQL).all({ t, s: doneStart }) as AnsweredRow[]),
-      ...(hasDns ? (scan.prepare(TARGET_ANSWERED_DNS_SQL).all({ t, s: doneStart }) as AnsweredRow[]) : []),
+      ...(hasDns
+        ? (scan
+            .prepare(hasDnsLastSeen ? TARGET_ANSWERED_DNS_SQL : TARGET_ANSWERED_DNS_NO_LAST_SEEN_SQL)
+            .all({ t, s: doneStart }) as AnsweredRow[])
+        : []),
     ];
     const count = (src: string): number => answered.find((a) => a.source === src)?.n ?? 0;
     const latestScan = !queueRow

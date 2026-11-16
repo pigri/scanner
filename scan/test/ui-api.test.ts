@@ -183,3 +183,29 @@ describe('GET /api/target latest scan', () => {
     expect(d.lastAnswered).toBeNull();
   }, 40_000);
 });
+
+describe('GET /api/target on a DB without dns_records.last_seen', () => {
+  it('returns 200, reads seen_at, and marks the dns-only ip unknown', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ui-api-'));
+    dirs.push(dir);
+    const file = path.join(dir, 'scan.db');
+    const { raw } = openDb(file);
+    raw.exec(`DROP TABLE dns_records;
+      CREATE TABLE dns_records (id INTEGER PRIMARY KEY, target TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL,
+        value TEXT NOT NULL, ttl INTEGER, seen_at TEXT NOT NULL, run_id INTEGER, UNIQUE(target, name, type, value))`);
+    raw.prepare(`INSERT INTO dns_records (target, name, type, value, seen_at) VALUES ('old.example', 'old.example', 'A', '192.0.2.50', '2026-08-31T10:00:00.000Z')`).run();
+    raw.prepare(`INSERT INTO target_network (target, ip, ip_version, ip_class, from_ports, from_dns, first_seen, last_seen)
+      VALUES ('old.example', '192.0.2.50', 4, 'public', 0, 1, '2026-08-31T10:00:00.000Z', '2026-08-31T10:00:00.000Z')`).run();
+    raw.prepare(`INSERT INTO scan_queue (target, status, queued_at, started_at, finished_at) VALUES ('old.example', 'done', ?, ?, ?)`)
+      .run('2026-11-01T00:00:00.000Z', '2026-11-04T09:00:00.000Z', '2026-11-04T09:18:00.000Z');
+    raw.close();
+    const base = await startUi(file);
+    const r = await fetch(`${base}/api/target?t=old.example`);
+    expect(r.status).toBe(200);
+    const d = (await r.json()) as any;
+    expect(d.network[0]).toMatchObject({ scanStatus: 'unknown', current: true });
+    expect(d.latestScan).toMatchObject({ dns: 0 });
+    expect(d.lastAnswered).toEqual({ at: '2026-08-31T10:00:00.000Z', source: 'dns' });
+    expect(d.dnsTrackedSince).toBeNull();
+  }, 40_000);
+});
