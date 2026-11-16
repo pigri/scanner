@@ -117,3 +117,95 @@ describe('GET /api/targets country and asn', () => {
     expect(d.asns).toEqual([]);
   }, 40_000);
 });
+
+function seedScan(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ui-api-'));
+  dirs.push(dir);
+  const file = path.join(dir, 'scan.db');
+  const { raw } = openDb(file);
+  const net = raw.prepare(
+    `INSERT INTO target_network (target, ip, ip_version, ip_class, from_ports, from_dns, first_seen, last_seen)
+     VALUES (?, ?, 4, 'public', ?, ?, ?, ?)`,
+  );
+  const queue = raw.prepare(
+    `INSERT INTO scan_queue (target, status, queued_at, started_at, finished_at) VALUES (?, ?, ?, ?, ?)`,
+  );
+  // Answered by port and HTTP months ago; the latest scan found nothing.
+  net.run('files.example', '192.0.2.10', 1, 0, '2026-08-31T10:00:00.000Z', '2026-08-31T10:00:00.000Z');
+  raw.prepare(`INSERT INTO ports (target, ip, port, protocol, seen_at) VALUES (?, ?, 80, 'tcp', ?)`).run('files.example', '192.0.2.10', '2026-08-31T10:00:00.000Z');
+  raw.prepare(`INSERT INTO http_probes (target, url, status_code, seen_at) VALUES (?, ?, 200, ?)`).run('files.example', 'http://files.example/', '2026-09-04T22:01:00.000Z');
+  queue.run('files.example', 'done', '2026-11-01T00:00:00.000Z', '2026-11-04T09:00:00.000Z', '2026-11-04T09:18:00.000Z');
+  // DNS-only, written before last_seen existed; another target proves tracking started later.
+  const dns = raw.prepare(`INSERT INTO dns_records (target, name, type, value, seen_at, last_seen) VALUES (?, ?, 'A', ?, ?, ?)`);
+  dns.run('dnsonly.example', 'dnsonly.example', '192.0.2.20', '2026-08-31T10:00:00.000Z', null);
+  dns.run('tracked.example', 'tracked.example', '192.0.2.30', '2026-11-01T00:00:00.000Z', '2026-11-16T00:00:00.000Z');
+  net.run('dnsonly.example', '192.0.2.20', 0, 1, '2026-08-31T10:00:00.000Z', '2026-08-31T10:00:00.000Z');
+  queue.run('dnsonly.example', 'done', '2026-11-01T00:00:00.000Z', '2026-11-04T09:00:00.000Z', '2026-11-04T09:18:00.000Z');
+  // No done scan: the old 24 h rule applies.
+  net.run('queued.example', '192.0.2.40', 1, 0, '2026-08-01T00:00:00.000Z', '2026-08-31T10:00:00.000Z');
+  net.run('queued.example', '192.0.2.41', 1, 0, '2026-08-01T00:00:00.000Z', '2026-09-30T10:00:00.000Z');
+  raw.prepare(`INSERT INTO scan_queue (target, status, queued_at) VALUES (?, 'pending', ?)`).run('queued.example', '2026-11-10T00:00:00.000Z');
+  raw.close();
+  return file;
+}
+
+describe('GET /api/target latest scan', () => {
+  it('marks an ip the latest scan missed, and reports what answered last', async () => {
+    const base = await startUi(seedScan());
+    const d = (await (await fetch(`${base}/api/target?t=files.example`)).json()) as any;
+    expect(d.latestScan).toEqual({ started_at: '2026-11-04T09:00:00.000Z', finished_at: '2026-11-04T09:18:00.000Z', ports: 0, http: 0, dns: 0 });
+    expect(d.lastAnswered).toEqual({ at: '2026-09-04T22:01:00.000Z', source: 'http' });
+    expect(d.network[0]).toMatchObject({ ip: '192.0.2.10', scanStatus: 'no', current: false });
+  }, 40_000);
+
+  it('marks a DNS-only ip from before tracking as unknown and current', async () => {
+    const base = await startUi(seedScan());
+    const d = (await (await fetch(`${base}/api/target?t=dnsonly.example`)).json()) as any;
+    expect(d.network[0]).toMatchObject({ scanStatus: 'unknown', current: true });
+    expect(d.latestScan).toMatchObject({ dns: 0 });
+    expect(d.lastAnswered).toEqual({ at: '2026-08-31T10:00:00.000Z', source: 'dns' });
+  }, 40_000);
+
+  it('falls back to the 24 h rule and the queue state when there is no done scan', async () => {
+    const base = await startUi(seedScan());
+    const d = (await (await fetch(`${base}/api/target?t=queued.example`)).json()) as any;
+    expect(d.latestScan).toEqual({ state: 'queued' });
+    expect(d.network.map((n: any) => [n.ip, n.scanStatus, n.current])).toEqual([
+      ['192.0.2.40', 'none', false],
+      ['192.0.2.41', 'none', true],
+    ]);
+  }, 40_000);
+
+  it('returns a null latest scan and no answer for an unknown target', async () => {
+    const base = await startUi(seedScan());
+    const d = (await (await fetch(`${base}/api/target?t=nothing.example`)).json()) as any;
+    expect(d.latestScan).toBeNull();
+    expect(d.lastAnswered).toBeNull();
+  }, 40_000);
+});
+
+describe('GET /api/target on a DB without dns_records.last_seen', () => {
+  it('returns 200, reads seen_at, and marks the dns-only ip unknown', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ui-api-'));
+    dirs.push(dir);
+    const file = path.join(dir, 'scan.db');
+    const { raw } = openDb(file);
+    raw.exec(`DROP TABLE dns_records;
+      CREATE TABLE dns_records (id INTEGER PRIMARY KEY, target TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL,
+        value TEXT NOT NULL, ttl INTEGER, seen_at TEXT NOT NULL, run_id INTEGER, UNIQUE(target, name, type, value))`);
+    raw.prepare(`INSERT INTO dns_records (target, name, type, value, seen_at) VALUES ('old.example', 'old.example', 'A', '192.0.2.50', '2026-08-31T10:00:00.000Z')`).run();
+    raw.prepare(`INSERT INTO target_network (target, ip, ip_version, ip_class, from_ports, from_dns, first_seen, last_seen)
+      VALUES ('old.example', '192.0.2.50', 4, 'public', 0, 1, '2026-08-31T10:00:00.000Z', '2026-08-31T10:00:00.000Z')`).run();
+    raw.prepare(`INSERT INTO scan_queue (target, status, queued_at, started_at, finished_at) VALUES ('old.example', 'done', ?, ?, ?)`)
+      .run('2026-11-01T00:00:00.000Z', '2026-11-04T09:00:00.000Z', '2026-11-04T09:18:00.000Z');
+    raw.close();
+    const base = await startUi(file);
+    const r = await fetch(`${base}/api/target?t=old.example`);
+    expect(r.status).toBe(200);
+    const d = (await r.json()) as any;
+    expect(d.network[0]).toMatchObject({ scanStatus: 'unknown', current: true });
+    expect(d.latestScan).toMatchObject({ dns: 0 });
+    expect(d.lastAnswered).toEqual({ at: '2026-08-31T10:00:00.000Z', source: 'dns' });
+    expect(d.dnsTrackedSince).toBeNull();
+  }, 40_000);
+});
