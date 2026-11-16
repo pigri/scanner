@@ -448,6 +448,61 @@ describe('history events of a discarded batch', () => {
     expect(events()).toEqual(before);
   });
 
+  it('reapStale with an ownerId drops the events of every reaped row and only those', () => {
+    const OLD = T(2);
+    const FRESH = T(20);
+    db.enqueueMany([
+      { target: 'example.com', priority: 4 },
+      { target: 'example.net', priority: 3 },
+      { target: 'example.org', priority: 2 },
+      { target: 'example.edu', priority: 1 },
+    ], T(0));
+    db.scanQueue.claimBatch(1, FRESH, 'w1'); // owner, fresh heartbeat
+    db.scanQueue.claimBatch(1, FRESH, 'w2'); // other worker, fresh heartbeat
+    db.scanQueue.claimBatch(1, OLD, 'w3'); // stale
+    db.scanQueue.claimBatch(1, OLD, 'w2'); // stale
+    for (const [target, ip, at] of [
+      ['example.com', '192.0.2.1', FRESH],
+      ['example.net', '192.0.2.2', FRESH],
+      ['example.org', '192.0.2.3', OLD],
+      ['example.edu', '192.0.2.4', OLD],
+    ] as const) {
+      ins(target, ip, 'ip_gone', at);
+      ins(target, ip, 'ip_back', at);
+    }
+    const r = db.scanQueue.reapStale({ atIso: T(30), staleBeforeIso: T(15), legacyBeforeIso: T(0), ownerId: 'w1' });
+    expect(r).toEqual({ requeued: 3, failed: 0 });
+    expect(events()).toEqual([
+      'example.net|192.0.2.2|ip_gone|' + FRESH + '|scan',
+      'example.net|192.0.2.2|ip_back|' + FRESH + '|scan',
+    ]);
+  });
+
+  describe('a claim with no worker id', () => {
+    function setupNull(): number {
+      db.enqueueMany([{ target: 'example.com', priority: 1 }], T(0));
+      const [a] = db.scanQueue.claimBatch(1, AT);
+      expect(db.raw.prepare('SELECT claimed_by FROM scan_queue WHERE id=?').get(a!.id)).toEqual({ claimed_by: null });
+      ins('example.com', '192.0.2.1', 'ip_gone', AT);
+      ins('example.com', '192.0.2.2', 'ip_back', AT);
+      ins('example.com', '192.0.2.3', 'ip_added', AT);
+      return a!.id;
+    }
+    const keptNull = ['example.com|192.0.2.3|ip_added|' + AT + '|scan'];
+
+    it('markFailed drops the events', () => {
+      const id = setupNull();
+      db.scanQueue.markFailed(id, 'boom', T(5));
+      expect(events()).toEqual(keptNull);
+    });
+
+    it('release drops the events', () => {
+      const id = setupNull();
+      expect(db.scanQueue.release([id])).toBe(1);
+      expect(events()).toEqual(keptNull);
+    });
+  });
+
   it('report_queue has no hook: release works and events stay', () => {
     db.reportQueue.enqueueMany([{ target: 'example.com', priority: 1 }], T(0));
     const [r] = db.reportQueue.claimBatch(1, AT, 'w1');
