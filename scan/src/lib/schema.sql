@@ -255,7 +255,8 @@ CREATE TABLE IF NOT EXISTS dns_records (
   type     TEXT NOT NULL,           -- A | AAAA | CNAME | MX | TXT | NS | SOA | SRV
   value    TEXT NOT NULL,
   ttl      INTEGER,
-  seen_at  TEXT NOT NULL,
+  seen_at  TEXT NOT NULL,           -- first seen
+  last_seen TEXT,                   -- NULL on rows written before the column existed
   run_id   INTEGER REFERENCES runs(id) ON DELETE SET NULL,
   UNIQUE(target, name, type, value)
 );
