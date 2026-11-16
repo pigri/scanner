@@ -185,13 +185,14 @@ npm run worker  -- --batch-size 50 --scope scope.txt        # loops until queue 
 
 **Worker loop:**
 1. At startup, return this worker's own `in_progress` rows to `pending`.
-2. Before each claim: at most once a minute, reset stale rows; with `--netns`, check the namespace and DNS (a DNS failure backs off and retries; a namespace mismatch exits 75).
+2. Before each claim: at most once a minute, reset stale rows. With `--netns`, check the namespace and DNS; with `--egress-country` or `--egress-not-country`, check the egress country (see `deploy/README.md`). A DNS or country failure backs off and retries; a namespace mismatch exits 75.
 3. `claimBatch(N)` — grab the next N pending rows, recording the owner and heartbeat.
 4. Write to `queue-batch-<n>.txt`.
-5. `spawn npx tsx src/scan-all.ts --targets queue-batch-<n>.txt --sqlite scan.db …`, bumping the heartbeat every 60 s while it runs.
-6. With `--netns`, check the namespace again. If it changed, release the batch to `pending` (no attempt counted) and exit 75.
-7. Otherwise mark the rows done (with `run_id`) or failed (with the error string), and hand done targets to `report_queue`.
-8. Repeat until the queue is empty (or forever with `--watch`) or `--max-batches` is reached.
+5. Run `node --import tsx src/scan-all.ts --targets queue-batch-<n>.txt --sqlite scan.db …` in its own process group, bumping the heartbeat every 60 s while it runs.
+6. On SIGTERM or SIGINT during a batch, forward the signal to scan-all's process group (SIGKILL after a 60 s grace), release the batch to `pending` (no attempt counted) and stop.
+7. After the batch, check the namespace and the egress country again (not DNS). If either fails, the batch ran from the wrong place: release it to `pending` (no attempt counted) and exit 75.
+8. Otherwise mark the rows done (with `run_id`) or failed (with the error string), and hand done targets to `report_queue`.
+9. Repeat until the queue is empty (or forever with `--watch`) or `--max-batches` is reached.
 
 **Recipes:**
 ```
