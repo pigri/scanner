@@ -152,9 +152,9 @@ export function unreachableSince(
  * lacks. With byTarget, bind one target; else it lists every such target.
  */
 export function noIpScanSql(hasPorts: boolean, hasHttp: boolean, byTarget: boolean): string {
-  const ex = (table: string, idx: string): string =>
-    `EXISTS(SELECT 1 FROM ${table} x INDEXED BY ${idx} WHERE x.target = q.target AND x.seen_at >= q.started_at)`;
-  const answered = [hasPorts ? ex('ports', 'idx_ports_target') : '', hasHttp ? ex('http_probes', 'idx_http_target') : '']
+  const ex = (table: string): string =>
+    `EXISTS(SELECT 1 FROM ${table} x WHERE x.target = q.target AND x.seen_at >= q.started_at)`;
+  const answered = [hasPorts ? ex('ports') : '', hasHttp ? ex('http_probes') : '']
     .filter(Boolean)
     .join(' OR ');
   return `SELECT q.target, q.started_at, ${answered ? `(${answered})` : '0'} AS answered

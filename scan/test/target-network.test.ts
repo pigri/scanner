@@ -454,6 +454,17 @@ describe('noIpScanSql', () => {
     const none = raw.prepare(noIpScanSql(false, false, false)).all() as { answered: number }[];
     expect(none.every((r) => r.answered === 0)).toBe(true);
   });
+  it('counts a port or http row seen exactly at the scan start as answered', () => {
+    const raw = setup();
+    raw.prepare(`INSERT INTO scan_queue (target, status, queued_at, started_at) VALUES ('edgeport.example', 'done', ?, ?)`).run(S, S);
+    raw.prepare(`INSERT INTO scan_queue (target, status, queued_at, started_at) VALUES ('edgehttp.example', 'done', ?, ?)`).run(S, S);
+    raw.prepare(`INSERT INTO ports (target, ip, port, protocol, seen_at) VALUES ('edgeport.example', '192.0.2.3', 80, 'tcp', ?)`).run(S);
+    raw.prepare(`INSERT INTO http_probes (target, url, seen_at) VALUES ('edgehttp.example', 'http://edgehttp.example/', ?)`).run(S);
+    const rows = raw.prepare(noIpScanSql(true, true, false)).all() as { target: string; answered: number }[];
+    const by = Object.fromEntries(rows.map((r) => [r.target, r.answered]));
+    expect(by['edgeport.example']).toBe(1);
+    expect(by['edgehttp.example']).toBe(1);
+  });
   it('uses the per-target indexes', () => {
     const plan = setup().prepare('EXPLAIN QUERY PLAN ' + noIpScanSql(true, true, false)).all().map((r: any) => r.detail).join('\n');
     expect(plan).toMatch(/idx_ports_target/);

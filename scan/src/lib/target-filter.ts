@@ -169,9 +169,9 @@ export function filterAndFacet<T extends TargetRowLike>(
       case 'versionMatch':
         return byNum('versionMatch');
       case 'updated':
-        return (b.updated_at || '').localeCompare(a.updated_at || '') || a.target.localeCompare(b.target);
+        return (b.updated_at || '').localeCompare(a.updated_at || '') || byReach(a, b) || a.target.localeCompare(b.target);
       case 'created':
-        return (b.created_at || '').localeCompare(a.created_at || '') || a.target.localeCompare(b.target);
+        return (b.created_at || '').localeCompare(a.created_at || '') || byReach(a, b) || a.target.localeCompare(b.target);
       case 'target':
         return a.target.localeCompare(b.target);
       default:

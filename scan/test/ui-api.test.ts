@@ -476,6 +476,39 @@ describe('unreachable flag', () => {
       }
     }, 40_000);
 
+    it('does not flag a port or http row seen exactly at the scan start', async () => {
+      const base = await startUi(seedReach((raw) => {
+        const q = raw.prepare(`INSERT INTO scan_queue (target, status, queued_at, started_at, finished_at) VALUES (?, 'done', ?, ?, ?)`);
+        const risk = raw.prepare('INSERT INTO risk_latest (target, score, created_at, updated_at) VALUES (?, ?, ?, ?)');
+        for (const t of ['edgeport', 'edgehttp']) {
+          q.run(`${t}.example`, '2026-11-04T08:00:00.000Z', S, '2026-11-04T09:30:00.000Z');
+          risk.run(`${t}.example`, 7, '2026-11-04T09:30:00.000Z', '2026-11-04T09:30:00.000Z');
+        }
+        raw.prepare(`INSERT INTO ports (target, ip, port, protocol, seen_at) VALUES ('edgeport.example', '192.0.2.82', 80, 'tcp', ?)`).run(S);
+        raw.prepare(`INSERT INTO http_probes (target, url, seen_at) VALUES ('edgehttp.example', 'http://edgehttp.example/', ?)`).run(S);
+      }));
+      const by = Object.fromEntries((await list(base)).rows.map((r: any) => [r.target, r]));
+      expect(by['edgeport.example'].unreachableSince).toBeNull();
+      expect(by['edgehttp.example'].unreachableSince).toBeNull();
+      for (const t of ['edgeport', 'edgehttp']) {
+        const d = (await (await fetch(`${base}/api/target?t=${t}.example`)).json()) as any;
+        expect(d.unreachableSince).toBeNull();
+      }
+    }, 40_000);
+
+    it('answers /api/targets with 200 and the flag when the per-target indexes are missing', async () => {
+      const base = await startUi(seedReach((raw) => {
+        noIp(raw);
+        raw.exec('DROP INDEX idx_ports_target; DROP INDEX idx_http_target');
+      }));
+      const r = await fetch(`${base}/api/targets?limit=100`);
+      expect(r.status).toBe(200);
+      const by = Object.fromEntries(((await r.json()) as any).rows.map((x: any) => [x.target, x]));
+      expect(by['silent.example'].unreachableSince).toBe(S);
+      expect(by['portrow.example'].unreachableSince).toBeNull();
+      expect(by['httprow.example'].unreachableSince).toBeNull();
+    }, 40_000);
+
     it('answers /api/targets with 200 when ports or http_probes is missing', async () => {
       for (const drop of ['ports', 'http_probes']) {
         const base = await startUi(seedReach((raw) => { noIp(raw); raw.exec(`DROP TABLE ${drop}`); }));
