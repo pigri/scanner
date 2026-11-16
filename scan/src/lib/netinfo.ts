@@ -2,6 +2,7 @@ import type { Db } from './db.js';
 import type { GeoLookup, GeoRow } from './geoip.js';
 import { classifyIp, normalizeIp, type IpClass } from './ip.js';
 import { lookupPtrs, type LookupPtrsOpts } from './ptr.js';
+import { scanStatus } from './target-network.js';
 
 export const WRITE_CHUNK = 500;
 
@@ -13,6 +14,8 @@ export interface NetinfoOpts {
   geo: GeoLookup | null;
   now?: Date;
   chunkSize?: number;
+  /** The netinfo run row, stored on the events this run writes. */
+  runId?: number | null;
 }
 
 export interface NetinfoResult {
@@ -89,6 +92,18 @@ const DNS_SQL = `SELECT value ip, MIN(seen_at) f, MAX(COALESCE(last_seen, seen_a
 
 const HTTP_SQL = `SELECT ip, MIN(seen_at) f, MAX(seen_at) l FROM http_probes
   WHERE target = ? AND ip IS NOT NULL AND ip != '' GROUP BY ip`;
+
+const STORED_SQL = 'SELECT asn, country_code, first_seen, last_seen FROM target_network WHERE target = ? AND ip = ?';
+const LAST_PRESENCE_SQL = `SELECT kind FROM target_network_events
+  WHERE target = ? AND ip = ? AND kind IN ('ip_added', 'ip_gone', 'ip_back') ORDER BY at DESC, id DESC LIMIT 1`;
+const BATCH_START_SQL = "SELECT started_at FROM scan_queue WHERE target = ? AND status = 'in_progress'";
+const DNS_UNTRACKED_SQL = 'SELECT EXISTS(SELECT 1 FROM dns_records WHERE target = ? AND last_seen IS NULL) AS n';
+const TRACKING_START_SQL = 'SELECT MIN(last_seen) AS t FROM dns_records';
+const INSERT_EVENT = `INSERT OR IGNORE INTO target_network_events
+  (target, ip, kind, at, old_country_code, new_country_code, old_asn, new_asn, run_id, source)
+  VALUES (@target, @ip, @kind, @at, @old_country_code, @new_country_code, @old_asn, @new_asn, @run_id, 'scan')`;
+
+interface StoredRow { asn: string | null; country_code: string | null; first_seen: string; last_seen: string }
 
 type EvidenceRow = { ip: string; f: string; l: string };
 
@@ -202,10 +217,55 @@ function derive(opts: NetinfoOpts): { out: NetRow[]; result: NetinfoResult } {
 function write(opts: NetinfoOpts, out: NetRow[], result: NetinfoResult): void {
   const { db } = opts;
   const chunk = Math.max(1, opts.chunkSize ?? WRITE_CHUNK);
+  const nowIso = (opts.now ?? new Date()).toISOString();
+  const runId = opts.runId ?? null;
+  // ip_gone / ip_back only make sense for a worker batch: --all rewrites rows outside any scan.
+  const batchMode = opts.targets !== 'all';
   const upsert = db.raw.prepare(UPSERT);
+  const getStored = db.raw.prepare(STORED_SQL);
+  const lastPresence = db.raw.prepare(LAST_PRESENCE_SQL);
+  const batchStart = db.raw.prepare(BATCH_START_SQL);
+  const dnsUntracked = db.raw.prepare(DNS_UNTRACKED_SQL);
+  const insertEvent = db.raw.prepare(INSERT_EVENT);
+  let trackingStart: string | null | undefined;
+
   for (let i = 0; i < out.length; i += chunk) {
     const slice = out.slice(i, i + chunk);
-    db.raw.transaction(() => { for (const r of slice) upsert.run(r); }).immediate();
+    db.raw.transaction(() => {
+      const scanCtx = new Map<string, { s: string; untracked: boolean } | null>();
+      const ctxOf = (target: string): { s: string; untracked: boolean } | null => {
+        if (scanCtx.has(target)) return scanCtx.get(target)!;
+        const row = batchStart.get(target) as { started_at: string | null } | undefined;
+        const c = row?.started_at ? { s: row.started_at, untracked: (dnsUntracked.get(target) as { n: number }).n === 1 } : null;
+        scanCtx.set(target, c);
+        return c;
+      };
+      for (const r of slice) {
+        const before = getStored.get(r.target, r.ip) as StoredRow | undefined;
+        upsert.run(r);
+        const after = getStored.get(r.target, r.ip) as StoredRow;
+        const ev = (kind: string, at: string, oldCc: string | null, newCc: string | null, oldAsn: string | null, newAsn: string | null): void => {
+          insertEvent.run({ target: r.target, ip: r.ip, kind, at, old_country_code: oldCc, new_country_code: newCc, old_asn: oldAsn, new_asn: newAsn, run_id: runId });
+        };
+        if (!before) {
+          ev('ip_added', after.first_seen, null, after.country_code, null, after.asn);
+        } else if (
+          (before.country_code !== null && after.country_code !== before.country_code) ||
+          (before.asn !== null && after.asn !== before.asn)
+        ) {
+          ev('geo_changed', nowIso, before.country_code, after.country_code, before.asn, after.asn);
+        }
+        if (!batchMode) continue;
+        const c = ctxOf(r.target);
+        if (!c) continue;
+        if (trackingStart === undefined) trackingStart = (db.raw.prepare(TRACKING_START_SQL).get() as { t: string | null }).t;
+        const status = scanStatus(after.last_seen, c.s, c.untracked, trackingStart);
+        const last = before ? (lastPresence.get(r.target, r.ip) as { kind: string } | undefined)?.kind : undefined;
+        const present = last !== 'ip_gone';
+        if (status === 'no' && present) ev('ip_gone', c.s, null, null, null, null);
+        else if (status === 'yes' && !present) ev('ip_back', c.s, null, null, null, null);
+      }
+    }).immediate();
     result.rowsWritten += slice.length;
   }
 }

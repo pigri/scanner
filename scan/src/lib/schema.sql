@@ -314,3 +314,22 @@ CREATE TABLE IF NOT EXISTS target_network (
   last_seen      TEXT NOT NULL,
   PRIMARY KEY (target, ip)
 ) WITHOUT ROWID;
+
+-- History of target_network: one row per change. Written only by netinfo (lib/netinfo.ts,
+-- lib/netinfo-rebuild.ts); rows are never updated or deleted. source 'reconstructed' marks
+-- events inferred from older evidence by `netinfo --rebuild-history`.
+CREATE TABLE IF NOT EXISTS target_network_events (
+  id               INTEGER PRIMARY KEY,
+  target           TEXT NOT NULL,
+  ip               TEXT NOT NULL,
+  kind             TEXT NOT NULL CHECK (kind IN ('ip_added', 'ip_gone', 'ip_back', 'geo_changed')),
+  at               TEXT NOT NULL,     -- event time, not write time
+  old_country_code TEXT,
+  new_country_code TEXT,
+  old_asn          TEXT,
+  new_asn          TEXT,
+  run_id           INTEGER REFERENCES runs(id) ON DELETE SET NULL,
+  source           TEXT NOT NULL CHECK (source IN ('scan', 'reconstructed')),
+  UNIQUE (target, ip, kind, at)
+);
+CREATE INDEX IF NOT EXISTS idx_tne_target_at ON target_network_events(target, at);

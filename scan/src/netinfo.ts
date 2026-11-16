@@ -81,7 +81,7 @@ async function main(): Promise<void> {
   try {
     const now = new Date().toISOString();
     const runId = startNetinfoRun(db, { mode: own.all ? 'all' : 'targets', mmdb: own.mmdb, geo: geo !== null, ptr: own.ptr }, now);
-    const base = { db, targets, geo };
+    const base = { db, targets, geo, runId };
     const r = own.ptr
       ? await runNetinfoPtr({ ...base, ptr: { budgetMs: own.ptrBudgetSec * 1000 } })
       : runNetinfo(base);
