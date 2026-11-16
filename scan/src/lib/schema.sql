@@ -291,3 +291,24 @@ CREATE TABLE IF NOT EXISTS host_state (
   updated_at        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_host_state_active ON host_state(active);
+
+-- Per-target network info: one row per (target, IP) derived from ports and
+-- dns_records evidence. Written only by lib/netinfo.ts; rows are never deleted.
+CREATE TABLE IF NOT EXISTS target_network (
+  target         TEXT NOT NULL,
+  ip             TEXT NOT NULL,     -- canonical text form
+  ip_version     INTEGER NOT NULL,  -- 4 | 6
+  ip_class       TEXT NOT NULL,     -- public | private | cgnat | loopback | link-local | multicast | unspecified | reserved
+  asn            TEXT,
+  as_name        TEXT,
+  as_domain      TEXT,
+  country_code   TEXT,
+  country        TEXT,
+  geo_checked_at TEXT,              -- NULL = never looked up
+  ptr_json       TEXT,              -- NULL = not looked up; '[]' = no PTR
+  from_ports     INTEGER NOT NULL DEFAULT 0,
+  from_dns       INTEGER NOT NULL DEFAULT 0,
+  first_seen     TEXT NOT NULL,
+  last_seen      TEXT NOT NULL,
+  PRIMARY KEY (target, ip)
+) WITHOUT ROWID;

@@ -22,6 +22,7 @@
     "ffuf": "tsx src/ffuf.ts",
     "cve-rollup": "tsx src/cve-rollup.ts",
     "cve-enrich": "tsx src/cve-enrich.ts",
+    "netinfo": "tsx src/netinfo.ts",
     "version-match": "tsx src/version-match.ts",
     "version-match:all": "tsx src/version-match.ts --all --sqlite scan.db",
     "nvd-sync": "tsx src/nvd-sync.ts",
@@ -67,6 +68,7 @@
   "dependencies": {
     "better-sqlite3": "^13.0.3",
     "fast-xml-parser": "^5.0.0",
+    "maxmind": "^5.0.7",
     "puppeteer-core": "^25.8.0"
   },
   "devDependencies": {
