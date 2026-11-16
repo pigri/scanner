@@ -35,6 +35,9 @@ function seed(dropTable: boolean): string {
   ins.run({ ...base, ip: '198.51.100.1', cls: 'private' });
   ins.run({ ...base, ip: '2001:db8::1', v: 6, fp: 0, fd: 1, ptr: '[]' });
   ins.run({ ...base, target: 'other.example', ip: '198.51.100.7' });
+  ins.run({ ...base, target: 'de.example', ip: '192.0.2.9', asn: 'AS64511', cc: 'DE', c: 'Germany', chk: iso(0) });
+  const risk = raw.prepare('INSERT INTO risk_latest (target, score, created_at, updated_at) VALUES (?, ?, ?, ?)');
+  for (const t of ['host.example', 'other.example', 'de.example']) risk.run(t, 10, iso(0), iso(0));
   if (dropTable) raw.exec('DROP TABLE target_network');
   raw.close();
   return file;
@@ -79,5 +82,38 @@ describe('GET /api/target network', () => {
     expect(r.status).toBe(200);
     const d = (await r.json()) as { network: unknown[] };
     expect(d.network).toEqual([]);
+  }, 40_000);
+});
+
+describe('GET /api/targets country and asn', () => {
+  it('filters by country and returns the facets', async () => {
+    const base = await startUi(seed(false));
+    const all = (await (await fetch(`${base}/api/targets?limit=100`)).json()) as any;
+    expect(all.rows.map((r: any) => r.target).sort()).toEqual(['de.example', 'host.example', 'other.example']);
+    const byT = Object.fromEntries(all.rows.map((r: any) => [r.target, r]));
+    expect(byT['host.example']).toMatchObject({ countries: ['HU'], asns: ['AS64496'] });
+    expect(byT['other.example']).toMatchObject({ countries: [], asns: [] });
+    expect(all.countries).toEqual([{ value: 'DE', c: 1 }, { value: 'HU', c: 1 }]);
+
+    const r = await fetch(`${base}/api/targets?limit=100&country=DE`);
+    expect(r.status).toBe(200);
+    const d = (await r.json()) as any;
+    expect(d.rows.map((x: any) => x.target)).toEqual(['de.example']);
+    expect(d.countries).toEqual([{ value: 'DE', c: 1 }, { value: 'HU', c: 1 }]);
+    expect(d.asns).toEqual([{ value: 'AS64496', c: 1 }, { value: 'AS64511', c: 1 }]);
+
+    const a = (await (await fetch(`${base}/api/targets?limit=100&asn=AS64496`)).json()) as any;
+    expect(a.rows.map((x: any) => x.target)).toEqual(['host.example']);
+  }, 40_000);
+
+  it('still answers with empty arrays when the table is missing', async () => {
+    const base = await startUi(seed(true));
+    const r = await fetch(`${base}/api/targets?limit=100`);
+    expect(r.status).toBe(200);
+    const d = (await r.json()) as any;
+    expect(d.rows).toHaveLength(3);
+    for (const row of d.rows) expect(row).toMatchObject({ countries: [], asns: [] });
+    expect(d.countries).toEqual([]);
+    expect(d.asns).toEqual([]);
   }, 40_000);
 });

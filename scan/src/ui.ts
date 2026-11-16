@@ -16,7 +16,14 @@ import { filterAndFacet } from './lib/target-filter.js';
 import { buildNewsSql } from './lib/news-sql.js';
 import { TARGET_ROWS_SQL, riskLatestMissingMessage } from './lib/target-rows-sql.js';
 import { NO_URL, latestRiskRow } from './lib/risk-latest.js';
-import { TARGET_NETWORK_SQL, shapeNetworkRows, type NetworkDbRow } from './lib/target-network.js';
+import {
+  TARGET_NETWORK_SQL,
+  TARGET_NETWORK_LIST_SQL,
+  shapeNetworkRows,
+  summarizeNetworks,
+  type ListNetworkRow,
+  type NetworkDbRow,
+} from './lib/target-network.js';
 
 interface Opts {
   scanDb: string;
@@ -154,6 +161,8 @@ interface TargetRow {
   findings: number; cves: number; versionMatch: number;
   organization: string | null;
   active: number;
+  countries: string[];
+  asns: string[];
 }
 let targetsCache: { rows: TargetRow[]; at: number } | null = null;
 function targetRows(): TargetRow[] {
@@ -162,6 +171,14 @@ function targetRows(): TargetRow[] {
   const rows = scan
     .prepare(TARGET_ROWS_SQL)
     .all() as TargetRow[];
+  const nets = tableExists(scan, 'target_network')
+    ? summarizeNetworks(scan.prepare(TARGET_NETWORK_LIST_SQL).all() as ListNetworkRow[])
+    : new Map();
+  for (const r of rows) {
+    const n = nets.get(r.target);
+    r.countries = n?.countries ?? [];
+    r.asns = n?.asns ?? [];
+  }
   targetsCache = { rows, at: now };
   return rows;
 }
@@ -374,6 +391,8 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
       minScore: minRaw != null && minRaw !== '' ? Number(minRaw) : null,
       maxScore: maxRaw != null && maxRaw !== '' ? Number(maxRaw) : null,
       org: q.get('org') || '',
+      country: q.get('country') || '',
+      asn: q.get('asn') || '',
       archived: q.get('archived') || '',
       sort: q.get('sort') || 'score',
       offset: clampInt(q.get('offset'), 0, 0, 1e9),
@@ -1363,10 +1382,10 @@ async function renderOverview(){
   overviewTimer=setTimeout(()=>{if(current==='overview'&&!document.hidden)renderOverview();},30000);
 }
 
-const T_DEFAULT={q:'',severities:[],cve:'',org:'',archived:'',minScore:'',maxScore:'',sort:'score',offset:0,limit:100};
+const T_DEFAULT={q:'',severities:[],cve:'',org:'',country:'',asn:'',archived:'',minScore:'',maxScore:'',sort:'score',offset:0,limit:100};
 let tState={...T_DEFAULT};
 async function renderTargets(){
-  const d=await api('targets',{q:tState.q,severity:tState.severities.join(','),cve:tState.cve,org:tState.org,archived:tState.archived,minScore:tState.minScore,maxScore:tState.maxScore,sort:tState.sort,offset:tState.offset,limit:tState.limit});
+  const d=await api('targets',{q:tState.q,severity:tState.severities.join(','),cve:tState.cve,org:tState.org,country:tState.country,asn:tState.asn,archived:tState.archived,minScore:tState.minScore,maxScore:tState.maxScore,sort:tState.sort,offset:tState.offset,limit:tState.limit});
   // severity facet chips — targets having ≥1 finding of that severity
   const sevChips=el('div',{class:'toolbar'},el('span',{class:'muted'},'hosts with:'),...SEV.map(s=>{
     const on=tState.severities.includes(s);
@@ -1381,6 +1400,8 @@ async function renderTargets(){
   })(),el('span',{class:'muted'},num(d.total)+' targets'));
   const cveSel=fsel(tState.cve,[{value:'',label:'CVE: any'},{value:'1',label:'has CVE'},{value:'0',label:'no CVE'}],v=>{tState.cve=v;tState.offset=0;renderTargets();});
   const orgSel=fsel(tState.org,[{value:'',label:'org: any'},...(d.orgs||[]).map(o=>({value:o.org,label:o.org+' ('+num(o.c)+')'}))],v=>{tState.org=v;tState.offset=0;renderTargets();});
+  const countrySel=fsel(tState.country,[{value:'',label:'country: any'},...(d.countries||[]).map(o=>({value:o.value,label:o.value+' ('+num(o.c)+')'}))],v=>{tState.country=v;tState.offset=0;renderTargets();});
+  const asnSel=fsel(tState.asn,[{value:'',label:'ASN: any'},...(d.asns||[]).map(o=>({value:o.value,label:o.value+' ('+num(o.c)+')'}))],v=>{tState.asn=v;tState.offset=0;renderTargets();});
   const sortSel=fsel(tState.sort,[{value:'score',label:'sort: risk score'},{value:'critical',label:'sort: critical'},{value:'high',label:'sort: high'},{value:'findings',label:'sort: findings'},{value:'cves',label:'sort: CVEs'},{value:'versionMatch',label:'sort: version-match CVEs'},{value:'updated',label:'sort: updated'},{value:'created',label:'sort: created'},{value:'target',label:'sort: name'}],v=>{tState.sort=v;tState.offset=0;renderTargets();});
   const minS=el('input',{type:'number',min:'0',max:'100',placeholder:'min',value:tState.minScore,style:'width:70px',title:'min risk score'});
   minS.addEventListener('change',()=>{tState.minScore=minS.value;tState.offset=0;renderTargets();});
@@ -1388,10 +1409,10 @@ async function renderTargets(){
   maxS.addEventListener('change',()=>{tState.maxScore=maxS.value;tState.offset=0;renderTargets();});
   const search=el('input',{type:'search',placeholder:'filter target name…',value:tState.q});
   search.addEventListener('input',debounce(()=>{tState.q=search.value;tState.offset=0;renderTargets();},250));
-  const active=tState.severities.length||tState.cve||tState.org||tState.archived||tState.minScore||tState.maxScore||tState.q||tState.sort!=='score';
+  const active=tState.severities.length||tState.cve||tState.org||tState.country||tState.asn||tState.archived||tState.minScore||tState.maxScore||tState.q||tState.sort!=='score';
   const clear=el('button',{class:'pillbtn',onclick:()=>{tState={...T_DEFAULT,severities:[]};renderTargets();}},'clear'+(active?' ✕':''));
-  const filterRow=el('div',{class:'toolbar'},cveSel,orgSel,sortSel,el('span',{class:'muted'},'score'),minS,el('span',{class:'muted'},'–'),maxS,search,clear);
-  const rows=d.rows.map(r=>[el('span',{},link(r.target),r.active===0?el('span',{class:'pill muted',style:'margin-left:6px'},'archived'):''),el('span',{class:'mono muted'},esc(r.organization)),el('span',{class:'score'},r.score),
+  const filterRow=el('div',{class:'toolbar'},cveSel,orgSel,countrySel,asnSel,sortSel,el('span',{class:'muted'},'score'),minS,el('span',{class:'muted'},'–'),maxS,search,clear);
+  const rows=d.rows.map(r=>[el('span',{},link(r.target),r.active===0?el('span',{class:'pill muted',style:'margin-left:6px'},'archived'):''),el('span',{class:'mono muted'},esc(r.organization)),el('span',{class:'mono'},(r.countries||[]).join(', ')),el('span',{class:'mono'},(r.asns||[]).join(', ')),el('span',{class:'score'},r.score),
     r.critical?el('span',{class:'pill sev-critical'},r.critical):'',
     r.high?el('span',{class:'pill sev-high'},r.high):'',
     r.medium?el('span',{class:'pill sev-medium'},r.medium):'',
@@ -1401,7 +1422,7 @@ async function renderTargets(){
     el('span',{class:'mono muted'},isoSec(r.created_at)),
     el('span',{class:'mono muted'},isoSec(r.updated_at))]);
   setView(sevChips,filterRow,
-    el('div',{class:'panel'},table(['Target','Organization','Score','Crit','High','Med','Findings','CVEs','VM CVEs','Created','Updated'],rows,[2,6]),pager(tState,d.total,renderTargets)));
+    el('div',{class:'panel'},table(['Target','Organization','IP country','ASN','Score','Crit','High','Med','Findings','CVEs','VM CVEs','Created','Updated'],rows,[4,8]),pager(tState,d.total,renderTargets)));
 }
 
 async function renderTarget(t){
