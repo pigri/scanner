@@ -85,6 +85,12 @@ describe('recentNetworkChange', () => {
     it('does not count first IPs 2 h apart, inside the window', () => {
       expect(recentNetworkChange([add(5, '192.0.2.1', 'AS64496'), add(3, '192.0.2.2', 'AS64497')], NOW).count).toBe(0);
     });
+    it('keeps an IP exactly 3 h after the first one in the first batch', () => {
+      expect(recentNetworkChange([add(10, '192.0.2.1', 'AS64496'), add(7, '192.0.2.2', 'AS64497')], NOW).count).toBe(0);
+    });
+    it('counts an IP 3 h and 1 ms after the first one', () => {
+      expect(recentNetworkChange([add(10, '192.0.2.1', 'AS64496'), { ...add(7, '192.0.2.2', 'AS64497'), at: ago(7 * H - 1) }], NOW).count).toBe(1);
+    });
     it('does not count a same-run first batch spread past the window', () => {
       expect(recentNetworkChange([
         add(20, '192.0.2.1', 'AS64496', { run_id: 7 }),

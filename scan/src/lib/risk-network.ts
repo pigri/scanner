@@ -44,10 +44,10 @@ export function pickCountry(codes: readonly string[]): { code: string; counts: R
  * - a geo_changed with a new country or ASN;
  * - an ip_added whose ASN is not among the ASNs of the target's strictly earlier
  *   events.
- * The target's first batch of ip_added events never counts (a geo_changed always
- * implies an earlier state, so it is not part of the exemption): every event within WINDOW_GAP_MS of its
- * earliest event, or sharing that event's non-null run_id. Its ASNs seed the
- * known set, so the first IPs of a new target are not a change.
+ * The target's first batch of ip_added events never counts: every event within
+ * WINDOW_GAP_MS of its earliest event, or sharing that event's non-null run_id.
+ * Its ASNs seed the known set, so the first IPs of a new target are not a change.
+ * A geo_changed is not exempt, because it always implies an earlier state.
  */
 export function recentNetworkChange(events: readonly NetworkEvent[], now: string): { count: number } {
   const t = Date.parse(now);
