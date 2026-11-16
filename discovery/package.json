@@ -6,6 +6,7 @@
   "scripts": {
     "sweep": "tsx src/ddg-sweep.ts",
     "enrich": "tsx src/enrich.ts",
+    "geoip-sync": "tsx src/geoip-sync.ts",
     "visualize": "tsx src/visualize.ts",
     "asn-prefixes": "tsx src/asn-prefixes.ts",
     "ripe-search": "tsx src/ripe-search.ts",

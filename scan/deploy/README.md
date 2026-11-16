@@ -161,8 +161,15 @@ systemctl --user enable --now scan-worker scan-report-worker
 
 ## Scheduling (daily new hosts + weekly full re-scan)
 
-With the workers running as daemons, five **systemd timers** feed them:
+With the workers running as daemons, these **systemd timers** feed them:
 
+- **`geoip-sync.timer`** (daily 01:30): `geoip-sync` (in `discovery/`) refreshes
+  `discovery/ipinfo_lite.mmdb` from the fixed `/releases/latest/download/` URL.
+  It downloads to `.tmp`, accepts the file only when it is at least 1 MiB and
+  opens as an MMDB, then renames it into place; on any failure the old file
+  stays and the unit fails. Host namespace, no VPN. Run it once by hand first
+  (`cd ~/gen0sec/redteam/discovery && npm run geoip-sync`) and link and enable
+  it like the other timers (`geoip-sync.service`, `geoip-sync.timer`).
 - **`nvd-sync.timer`** (daily 01:30): `nvd-sync` incrementally refreshes the
   offline NVD mirror `/storage/gen0sec-scan/nvd.db` (full build when the db does
   not exist yet) that `version-match` reads during `scan-all`. Runs before the

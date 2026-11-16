@@ -1,17 +1,13 @@
 #!/usr/bin/env -S node --loader tsx
 import fs from 'node:fs';
 import path from 'node:path';
-import { pipeline } from 'node:stream/promises';
-import { Readable } from 'node:stream';
 import maxmind from 'maxmind';
 import type { EnrichedAddress, EnrichedRow } from './lib/graph.js';
 import { fetchCert, certCsvFields } from './lib/cert.js';
 import { openDb, type Db } from './lib/db.js';
 import { ResolverPool, resolveHost, reverseIp, DEFAULT_RESOLVERS } from './lib/resolve.js';
 import { pool } from './lib/pool.js';
-
-const MMDB_URL =
-  'https://github.com/gen0sec/geoip-databases/releases/latest/download/ipinfo_lite.mmdb';
+import { syncMmdb, MMDB_URL } from './lib/mmdb.js';
 
 interface Opts {
   input: string;
@@ -104,11 +100,9 @@ Options:
 async function ensureMmdb(file: string, force: boolean): Promise<void> {
   if (!force && fs.existsSync(file)) return;
   console.error(`downloading ${MMDB_URL}...`);
-  const res = await fetch(MMDB_URL, { redirect: 'follow' });
-  if (!res.ok || !res.body) throw new Error(`mmdb download failed: ${res.status}`);
-  await pipeline(Readable.fromWeb(res.body as any), fs.createWriteStream(file));
-  const stat = fs.statSync(file);
-  console.error(`saved ${file} (${(stat.size / 1024 / 1024).toFixed(1)} MiB)`);
+  const r = await syncMmdb({ file });
+  if (!r.ok) throw new Error(`mmdb download failed: ${r.error}`);
+  console.error(`saved ${file} (${(r.bytes / 1024 / 1024).toFixed(1)} MiB)`);
 }
 
 function csvEscape(v: unknown): string {
