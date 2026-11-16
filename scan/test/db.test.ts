@@ -153,6 +153,54 @@ describe('certificates subject columns', () => {
 });
 
 
+describe('dns_records.last_seen', () => {
+  const T1 = '2026-11-01T00:00:00Z';
+  const T2 = '2026-11-02T00:00:00Z';
+  const rec = { target: 'example.test', name: 'example.test', type: 'A', value: '192.0.2.1', ttl: 300 };
+
+  it('sets last_seen to seen_at on the first insert', () => {
+    db.insertDnsRecord(rec, T1, null);
+    const row = db.raw.prepare('SELECT seen_at, last_seen FROM dns_records').get();
+    expect(row).toEqual({ seen_at: T1, last_seen: T1 });
+  });
+
+  it('keeps seen_at and moves last_seen on a repeat, leaving one row', () => {
+    db.insertDnsRecord(rec, T1, null);
+    db.insertDnsRecord(rec, T2, null);
+    const rows = db.raw.prepare('SELECT seen_at, last_seen FROM dns_records').all();
+    expect(rows).toEqual([{ seen_at: T1, last_seen: T2 }]);
+  });
+
+  it('adds the column to a legacy table, keeps old rows NULL, and reopens cleanly', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-migrate-'));
+    try {
+      const f = path.join(dir, 'legacy.db');
+      const raw = new Database(f);
+      raw.exec(`CREATE TABLE dns_records (
+        id INTEGER PRIMARY KEY, target TEXT NOT NULL, name TEXT NOT NULL,
+        type TEXT NOT NULL, value TEXT NOT NULL, ttl INTEGER, seen_at TEXT NOT NULL,
+        run_id INTEGER, UNIQUE(target, name, type, value))`);
+      raw.prepare('INSERT INTO dns_records(target, name, type, value, seen_at) VALUES(?,?,?,?,?)')
+        .run('old.example', 'old.example', 'A', '198.51.100.1', T1);
+      raw.close();
+
+      const first = openDb(f);
+      const cols = (first.raw.prepare('PRAGMA table_info(dns_records)').all() as { name: string }[])
+        .filter((r) => r.name === 'last_seen');
+      expect(cols).toHaveLength(1);
+      expect(first.raw.prepare('SELECT last_seen FROM dns_records').get()).toEqual({ last_seen: null });
+      first.close();
+
+      let second: Db | undefined;
+      expect(() => { second = openDb(f); }).not.toThrow();
+      second?.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+
 describe('host_state', () => {
   const T1 = '2026-11-01T00:00:00Z';
   const T2 = '2026-11-02T00:00:00Z';

@@ -196,6 +196,16 @@ export function openDb(dbPath: string, options: OpenDbOptions = {}): Db {
     if (!certCols.has(col)) raw.exec(`ALTER TABLE certificates ADD COLUMN ${col} TEXT`);
   }
 
+  // dns_records.last_seen. Many stage processes open the DB at once, so the
+  // ALTER re-checks under the write lock.
+  const hasDnsLastSeen = () =>
+    (raw.prepare('PRAGMA table_info(dns_records)').all() as { name: string }[]).some((r) => r.name === 'last_seen');
+  if (!hasDnsLastSeen()) {
+    raw.transaction(() => {
+      if (!hasDnsLastSeen()) raw.exec('ALTER TABLE dns_records ADD COLUMN last_seen TEXT');
+    }).immediate();
+  }
+
   // Queue claim ownership: who holds an in_progress row and when it last proved
   // it is alive, so abandoned rows can be reset (see queue.ts reapStale).
   for (const table of ['scan_queue', 'report_queue'] as const) {
@@ -241,8 +251,9 @@ export function openDb(dbPath: string, options: OpenDbOptions = {}): Db {
     VALUES(@target, @url, @method, @source, @status, @content_type, @seen_at, @run_id)
   `);
   const insertDnsStmt = raw.prepare(`
-    INSERT OR IGNORE INTO dns_records(target, name, type, value, ttl, seen_at, run_id)
-    VALUES(@target, @name, @type, @value, @ttl, @seen_at, @run_id)
+    INSERT INTO dns_records(target, name, type, value, ttl, seen_at, last_seen, run_id)
+    VALUES(@target, @name, @type, @value, @ttl, @seen_at, @seen_at, @run_id)
+    ON CONFLICT(target, name, type, value) DO UPDATE SET last_seen = excluded.last_seen
   `);
   const hostStateGetStmt = raw.prepare('SELECT * FROM host_state WHERE target = ?');
   const hostStateUpsertStmt = raw.prepare(`
