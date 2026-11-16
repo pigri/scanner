@@ -2,8 +2,12 @@ export const TARGET_NETWORK_SQL = `SELECT ip, ip_version, ip_class, asn, as_name
   geo_checked_at, ptr_json, from_ports, from_dns, first_seen, last_seen
   FROM target_network WHERE target = ? ORDER BY ip LIMIT 500`;
 
-export const TARGET_NETWORK_LIST_SQL = `SELECT target, ip, asn, country_code, country,
-  last_seen, ip_class FROM target_network ORDER BY target, ip`;
+/** `started_at` is the target's latest done scan, NULL when it has none. */
+export const TARGET_NETWORK_LIST_SQL = `SELECT tn.target, tn.ip, tn.asn, tn.country_code, tn.country,
+  tn.last_seen, tn.ip_class, q.started_at
+  FROM target_network tn
+  LEFT JOIN scan_queue q ON q.target = tn.target AND q.status = 'done'
+  ORDER BY tn.target, tn.ip`;
 
 /** The target's queue row (target is UNIQUE there). Only a `done` row is a latest scan. */
 export const TARGET_SCAN_SQL = `SELECT status, started_at, finished_at FROM scan_queue WHERE target = ?`;
@@ -30,6 +34,12 @@ export const TARGET_ANSWERED_DNS_NO_LAST_SEEN_SQL = `SELECT 'dns' AS source, MAX
 export const DNS_TRACKING_SQL = `SELECT MIN(last_seen) AS tracking_start,
     EXISTS(SELECT 1 FROM dns_records WHERE target = @t AND last_seen IS NULL) AS untracked
   FROM dns_records`;
+
+/** Targets that have a dns_records row written before last_seen existed. One read per list build. */
+export const DNS_UNTRACKED_TARGETS_SQL = `SELECT DISTINCT target FROM dns_records WHERE last_seen IS NULL`;
+
+/** When DNS per-scan tracking began. NULL when nothing is tracked yet. */
+export const DNS_TRACKING_START_SQL = `SELECT MIN(last_seen) AS tracking_start FROM dns_records`;
 
 export type ScanStatus = 'yes' | 'no' | 'unknown' | 'none';
 
@@ -156,6 +166,16 @@ export interface ListNetworkRow {
   country: string | null;
   last_seen: string;
   ip_class: string;
+  /** `started_at` of the target's latest done scan; null or absent when it has none. */
+  started_at?: string | null;
+}
+
+/** What the list needs to decide scan status for every target at once. */
+export interface ListScanContext {
+  /** Targets with dns_records rows that have NULL last_seen. */
+  untracked: ReadonlySet<string>;
+  /** MIN(dns_records.last_seen); null when nothing is tracked yet. */
+  trackingStart: string | null;
 }
 
 export interface NetworkSummary {
@@ -163,11 +183,23 @@ export interface NetworkSummary {
   asns: string[];
 }
 
-/** Distinct countries and ASNs of each target's current public IPs. Rows must be grouped by target. */
-export function summarizeNetworks(rows: readonly ListNetworkRow[]): Map<string, NetworkSummary> {
+/**
+ * Distinct countries and ASNs of each target's current public IPs. Rows must be
+ * grouped by target. With a context, currency follows the latest scan (see
+ * scanStatus); without one, the 24 h rule.
+ */
+export function summarizeNetworks(
+  rows: readonly ListNetworkRow[],
+  ctx?: ListScanContext,
+): Map<string, NetworkSummary> {
   const out = new Map<string, NetworkSummary>();
   const flush = (target: string, group: ListNetworkRow[]): void => {
-    const current = markCurrent(group);
+    const old = markCurrent(group);
+    const untracked = ctx?.untracked.has(target) ?? false;
+    const current = group.map((r, i) => {
+      const st = ctx ? scanStatus(r.last_seen, r.started_at ?? null, untracked, ctx.trackingStart) : 'none';
+      return st === 'none' ? old[i]! : st !== 'no';
+    });
     const countries = new Set<string>();
     const asns = new Set<string>();
     group.forEach((r, i) => {

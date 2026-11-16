@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { openDb } from '../src/lib/db.js';
-import { TARGET_NETWORK_SQL, TARGET_NETWORK_LIST_SQL, TARGET_SCAN_SQL, TARGET_ANSWERED_SQL, TARGET_ANSWERED_DNS_SQL, DNS_TRACKING_SQL, markCurrent, scanStatus, shapeNetworkRows, summarizeNetworks, type NetworkDbRow } from '../src/lib/target-network.js';
+import { TARGET_NETWORK_SQL, TARGET_NETWORK_LIST_SQL, TARGET_SCAN_SQL, TARGET_ANSWERED_SQL, TARGET_ANSWERED_DNS_SQL, DNS_TRACKING_SQL, DNS_UNTRACKED_TARGETS_SQL, DNS_TRACKING_START_SQL, markCurrent, scanStatus, shapeNetworkRows, summarizeNetworks, type NetworkDbRow } from '../src/lib/target-network.js';
 
 const T0 = '2026-11-10T12:00:00.000Z';
 const hoursBefore = (h: number) => new Date(Date.parse(T0) - h * 3600_000).toISOString();
@@ -95,8 +95,8 @@ describe('shapeNetworkRows', () => {
   });
 });
 
-type ListRow = NetworkDbRow & { target: string };
-const lrow = (target: string, over: Partial<NetworkDbRow> = {}): ListRow => ({ target, ...row(over) });
+type ListRow = NetworkDbRow & { target: string; started_at: string | null };
+const lrow = (target: string, over: Partial<ListRow> = {}): ListRow => ({ target, started_at: null, ...row(over) });
 
 describe('TARGET_NETWORK_LIST_SQL', () => {
   it('reads every target in primary-key order', () => {
@@ -114,6 +114,86 @@ describe('TARGET_NETWORK_LIST_SQL', () => {
       'a.example 198.51.100.9',
       'b.example 192.0.2.1',
     ]);
+  });
+});
+
+describe('TARGET_NETWORK_LIST_SQL scan join', () => {
+  it('carries started_at of the done scan only, and null otherwise', () => {
+    const { raw } = openDb(':memory:');
+    const ins = raw.prepare(
+      `INSERT INTO target_network (target, ip, ip_version, ip_class, first_seen, last_seen)
+       VALUES (?, ?, 4, 'public', ?, ?)`,
+    );
+    for (const t of ['done.example', 'pending.example', 'none.example']) ins.run(t, '192.0.2.1', T0, T0);
+    const q = raw.prepare(`INSERT INTO scan_queue (target, status, queued_at, started_at) VALUES (?, ?, ?, ?)`);
+    q.run('done.example', 'done', T0, '2026-11-04T09:00:00.000Z');
+    q.run('pending.example', 'pending', T0, '2026-11-04T09:00:00.000Z');
+    const rows = raw.prepare(TARGET_NETWORK_LIST_SQL).all() as ListRow[];
+    expect(Object.fromEntries(rows.map((r) => [r.target, r.started_at]))).toEqual({
+      'done.example': '2026-11-04T09:00:00.000Z',
+      'pending.example': null,
+      'none.example': null,
+    });
+  });
+});
+
+describe('DNS list context SQL', () => {
+  it('lists targets with an untracked row, and the tracking start', () => {
+    const { raw } = openDb(':memory:');
+    const ins = raw.prepare(
+      `INSERT INTO dns_records (target, name, type, value, seen_at, last_seen) VALUES (?, ?, 'A', ?, ?, ?)`,
+    );
+    ins.run('old.example', 'old.example', '192.0.2.1', T0, null);
+    ins.run('new.example', 'new.example', '192.0.2.2', T0, '2026-11-16T00:00:00.000Z');
+    ins.run('new.example', 'new.example', '192.0.2.3', T0, '2026-11-17T00:00:00.000Z');
+    expect((raw.prepare(DNS_UNTRACKED_TARGETS_SQL).all() as { target: string }[]).map((r) => r.target)).toEqual(['old.example']);
+    expect((raw.prepare(DNS_TRACKING_START_SQL).get() as { tracking_start: string | null }).tracking_start).toBe('2026-11-16T00:00:00.000Z');
+  });
+});
+
+describe('summarizeNetworks with a scan context', () => {
+  const started = '2026-11-04T09:00:00.000Z';
+  const before = '2026-08-31T09:00:00.000Z';
+  const after = '2026-11-05T09:00:00.000Z';
+  const ctx = (untracked: string[], trackingStart: string | null) => ({ untracked: new Set(untracked), trackingStart });
+  const hu = { country_code: 'HU', asn: 'AS64496' };
+
+  it('keeps an ip seen in the latest scan (yes) and drops one it did not see (no)', () => {
+    const m = summarizeNetworks(
+      [
+        lrow('a.example', { ip: '192.0.2.1', ...hu, started_at: started, last_seen: after }),
+        lrow('a.example', { ip: '192.0.2.2', country_code: 'DE', asn: 'AS64511', started_at: started, last_seen: before }),
+      ],
+      ctx([], '2026-11-01T00:00:00.000Z'),
+    );
+    expect(m.get('a.example')).toEqual({ countries: ['HU'], asns: ['AS64496'] });
+  });
+
+  it('keeps an old ip as unknown when DNS rows predate tracking and the scan predates it too', () => {
+    const m = summarizeNetworks(
+      [lrow('a.example', { ip: '192.0.2.1', ...hu, started_at: started, last_seen: before })],
+      ctx(['a.example'], '2026-11-16T00:00:00.000Z'),
+    );
+    expect(m.get('a.example')).toEqual({ countries: ['HU'], asns: ['AS64496'] });
+  });
+
+  it('drops an old ip when the target has untracked rows but the scan is after tracking began', () => {
+    const m = summarizeNetworks(
+      [lrow('a.example', { ip: '192.0.2.1', ...hu, started_at: started, last_seen: before })],
+      ctx(['a.example'], '2026-11-01T00:00:00.000Z'),
+    );
+    expect(m.get('a.example')).toEqual({ countries: [], asns: [] });
+  });
+
+  it('applies the 24 h rule to a target with no done scan', () => {
+    const m = summarizeNetworks(
+      [
+        lrow('a.example', { ip: '192.0.2.1', ...hu, started_at: null }),
+        lrow('a.example', { ip: '192.0.2.2', country_code: 'DE', asn: 'AS64511', started_at: null, last_seen: hoursBefore(25) }),
+      ],
+      ctx([], null),
+    );
+    expect(m.get('a.example')).toEqual({ countries: ['HU'], asns: ['AS64496'] });
   });
 });
 

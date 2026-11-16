@@ -26,6 +26,9 @@ import {
   TARGET_ANSWERED_DNS_NO_LAST_SEEN_SQL,
   DNS_TRACKING_SQL,
   summarizeNetworks,
+  DNS_UNTRACKED_TARGETS_SQL,
+  DNS_TRACKING_START_SQL,
+  type ListScanContext,
   type ListNetworkRow,
   type NetworkDbRow,
 } from './lib/target-network.js';
@@ -187,6 +190,14 @@ interface TargetRow {
   countries: string[];
   asns: string[];
 }
+function listScanContext(): ListScanContext {
+  if (!tableExists(scan, 'dns_records')) return { untracked: new Set(), trackingStart: null };
+  const untracked = new Set(
+    (scan.prepare(DNS_UNTRACKED_TARGETS_SQL).all() as { target: string }[]).map((r) => r.target),
+  );
+  const t = scan.prepare(DNS_TRACKING_START_SQL).get() as { tracking_start: string | null };
+  return { untracked, trackingStart: t.tracking_start };
+}
 let targetsCache: { rows: TargetRow[]; at: number } | null = null;
 function targetRows(): TargetRow[] {
   const now = Date.now();
@@ -195,7 +206,7 @@ function targetRows(): TargetRow[] {
     .prepare(TARGET_ROWS_SQL)
     .all() as TargetRow[];
   const nets = tableExists(scan, 'target_network')
-    ? summarizeNetworks(scan.prepare(TARGET_NETWORK_LIST_SQL).all() as ListNetworkRow[])
+    ? summarizeNetworks(scan.prepare(TARGET_NETWORK_LIST_SQL).all() as ListNetworkRow[], listScanContext())
     : new Map();
   for (const r of rows) {
     const n = nets.get(r.target);

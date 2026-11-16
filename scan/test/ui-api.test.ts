@@ -118,6 +118,51 @@ describe('GET /api/targets country and asn', () => {
   }, 40_000);
 });
 
+function seedLatestScan(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ui-api-'));
+  dirs.push(dir);
+  const file = path.join(dir, 'scan.db');
+  const { raw } = openDb(file);
+  const ins = raw.prepare(
+    `INSERT INTO target_network (target, ip, ip_version, ip_class, asn, country_code, from_ports, from_dns, first_seen, last_seen)
+     VALUES (?, ?, 4, 'public', ?, ?, ?, ?, ?, ?)`,
+  );
+  const q = raw.prepare(`INSERT INTO scan_queue (target, status, queued_at, started_at, finished_at) VALUES (?, 'done', ?, ?, ?)`);
+  const dns = raw.prepare(`INSERT INTO dns_records (target, name, type, value, seen_at, last_seen) VALUES (?, ?, 'A', ?, ?, ?)`);
+  const risk = raw.prepare('INSERT INTO risk_latest (target, score, created_at, updated_at) VALUES (?, ?, ?, ?)');
+  const scanStart = '2026-11-04T09:00:00.000Z';
+  const scanEnd = '2026-11-04T09:30:00.000Z';
+  // fileshare-shaped: port seen 2026-08-31, scanned 2026-11-04 without an answer.
+  ins.run('fileshare.example', '192.0.2.50', 'AS64496', 'HU', 1, 0, '2026-08-31T08:00:00.000Z', '2026-08-31T08:00:00.000Z');
+  q.run('fileshare.example', '2026-11-04T08:00:00.000Z', scanStart, scanEnd);
+  dns.run('fileshare.example', 'fileshare.example', '192.0.2.50', '2026-08-31T08:00:00.000Z', '2026-11-04T09:10:00.000Z');
+  // DNS-only, scanned before DNS tracking began, with an old untracked row.
+  ins.run('dnsonly.example', '192.0.2.60', 'AS64511', 'DE', 0, 1, '2026-08-31T08:00:00.000Z', '2026-08-31T08:00:00.000Z');
+  q.run('dnsonly.example', '2026-11-04T08:00:00.000Z', scanStart, scanEnd);
+  dns.run('dnsonly.example', 'dnsonly.example', '192.0.2.60', '2026-08-31T08:00:00.000Z', null);
+  for (const t of ['fileshare.example', 'dnsonly.example']) risk.run(t, 10, scanEnd, scanEnd);
+  raw.close();
+  return file;
+}
+
+describe('GET /api/targets uses the latest scan', () => {
+  it('drops an ip not seen in the latest scan from the facets and filters, keeps unknown', async () => {
+    const base = await startUi(seedLatestScan());
+    const all = (await (await fetch(`${base}/api/targets?limit=100`)).json()) as any;
+    const byT = Object.fromEntries(all.rows.map((r: any) => [r.target, r]));
+    expect(byT['fileshare.example']).toMatchObject({ countries: [], asns: [] });
+    expect(byT['dnsonly.example']).toMatchObject({ countries: ['DE'], asns: ['AS64511'] });
+    expect(all.countries).toEqual([{ value: 'DE', c: 1 }]);
+    expect(all.asns).toEqual([{ value: 'AS64511', c: 1 }]);
+    const hu = (await (await fetch(`${base}/api/targets?limit=100&country=HU`)).json()) as any;
+    expect(hu.rows).toEqual([]);
+    const asn = (await (await fetch(`${base}/api/targets?limit=100&asn=AS64496`)).json()) as any;
+    expect(asn.rows).toEqual([]);
+    const de = (await (await fetch(`${base}/api/targets?limit=100&country=DE`)).json()) as any;
+    expect(de.rows.map((x: any) => x.target)).toEqual(['dnsonly.example']);
+  }, 40_000);
+});
+
 function seedScan(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ui-api-'));
   dirs.push(dir);
