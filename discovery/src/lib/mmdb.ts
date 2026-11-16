@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
@@ -26,11 +27,11 @@ export async function mmdbBuildDate(file: string): Promise<Date> {
   return (await maxmind.open(file)).metadata.buildEpoch;
 }
 
-/** Downloads the MMDB to `<file>.tmp`, then renames it over `file` only if it checks out. */
+/** Downloads the MMDB to a temp file beside it, then renames it over `file` only if it checks out. */
 export async function syncMmdb(opts: SyncOpts): Promise<SyncResult> {
   const fetchFn = opts.fetchFn ?? ((url, init) => fetch(url, init));
   const validate = opts.validate ?? opensAsMmdb;
-  const tmp = `${opts.file}.tmp`;
+  const tmp = `${opts.file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
   try {
     const res = await fetchFn(MMDB_URL, { redirect: 'follow' });
     if (!res.ok || !res.body) throw new Error(`download failed: HTTP ${res.status}`);

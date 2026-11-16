@@ -30,6 +30,7 @@ scan/scan.db
 # Third-party binaries and large data blobs.
 *.deb
 *.mmdb
+*.mmdb.*.tmp
 *.pcap
 *.pcapng
 

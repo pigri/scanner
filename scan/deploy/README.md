@@ -202,12 +202,13 @@ Both use `Persistent=true`, so a run missed while the box was off fires on next 
 for u in scan-feed.service scan-feed.timer scan-rescan.service scan-rescan.timer \
          nuclei-update-templates.service nuclei-update-templates.timer \
          nvd-sync.service nvd-sync.timer \
-         version-match-sweep.service version-match-sweep.timer; do
+         version-match-sweep.service version-match-sweep.timer \
+         geoip-sync.service geoip-sync.timer; do
   ln -sf ~/gen0sec/redteam/scan/deploy/$u ~/.config/systemd/user/$u
 done
 systemctl --user daemon-reload
 systemctl --user enable --now scan-feed.timer scan-rescan.timer nuclei-update-templates.timer nvd-sync.timer \
-  version-match-sweep.timer
+  version-match-sweep.timer geoip-sync.timer
 
 # inspect
 systemctl --user list-timers                 # next fire times
