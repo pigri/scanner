@@ -19,6 +19,7 @@ export interface TargetRowLike {
   active: number; // 0 = archived (host_state), 1 = active
   countries: string[]; // distinct countries of the current IPs
   asns: string[]; // distinct ASNs of the current IPs
+  unreachableSince?: string | null; // start of the latest scan when it reached none of the IPs
 }
 
 export const SEVERITIES: readonly string[] = ['critical', 'high', 'medium', 'low', 'info'];
@@ -44,6 +45,7 @@ export interface TargetFilterParams {
   org?: string; // exact-match on the cert Organization; '' = any
   country?: string; // any current IP in this country; '' = any
   asn?: string; // any current IP in this ASN; '' = any
+  reachable?: string; // '' = any, 'reachable' or 'unreachable'
   archived?: string; // '' = active only (default), '1' = archived only, 'all' = both
   sort?: string;
   offset?: number;
@@ -97,6 +99,7 @@ export function filterAndFacet<T extends TargetRowLike>(
   const country = (p.country ?? '').trim();
   const asn = (p.asn ?? '').trim();
   const archived = (p.archived ?? '').trim();
+  const reachable = (p.reachable ?? '').trim();
   const sort = p.sort || 'score';
   const offset = p.offset ?? 0;
   const limit = p.limit ?? 100;
@@ -108,6 +111,8 @@ export function filterAndFacet<T extends TargetRowLike>(
     if (cve === '0' && r.cves > 0) return false;
     if (hasMin && r.score < minScore) return false;
     if (hasMax && r.score > maxScore) return false;
+    if (reachable === 'unreachable' && !r.unreachableSince) return false;
+    if (reachable === 'reachable' && r.unreachableSince) return false;
     return true;
   });
 
@@ -147,9 +152,11 @@ export function filterAndFacet<T extends TargetRowLike>(
     return true;
   });
 
+  // At the same score an unreachable target sorts below a reachable one.
+  const byReach = (a: T, b: T): number => (a.unreachableSince ? 1 : 0) - (b.unreachableSince ? 1 : 0);
   const cmp = (a: T, b: T): number => {
     const byNum = (k: keyof TargetRowLike) =>
-      (b[k] as number) - (a[k] as number) || b.score - a.score || a.target.localeCompare(b.target);
+      (b[k] as number) - (a[k] as number) || b.score - a.score || byReach(a, b) || a.target.localeCompare(b.target);
     switch (sort) {
       case 'critical':
         return byNum('critical');
@@ -162,13 +169,13 @@ export function filterAndFacet<T extends TargetRowLike>(
       case 'versionMatch':
         return byNum('versionMatch');
       case 'updated':
-        return (b.updated_at || '').localeCompare(a.updated_at || '') || a.target.localeCompare(b.target);
+        return (b.updated_at || '').localeCompare(a.updated_at || '') || byReach(a, b) || a.target.localeCompare(b.target);
       case 'created':
-        return (b.created_at || '').localeCompare(a.created_at || '') || a.target.localeCompare(b.target);
+        return (b.created_at || '').localeCompare(a.created_at || '') || byReach(a, b) || a.target.localeCompare(b.target);
       case 'target':
         return a.target.localeCompare(b.target);
       default:
-        return b.score - a.score || a.target.localeCompare(b.target);
+        return b.score - a.score || byReach(a, b) || a.target.localeCompare(b.target);
     }
   };
   filtered.sort(cmp);

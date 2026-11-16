@@ -19,6 +19,7 @@ function row(o: Partial<TargetRowLike> & { target: string }): TargetRowLike {
     active: o.active ?? 1,
     countries: o.countries ?? [],
     asns: o.asns ?? [],
+    unreachableSince: o.unreachableSince ?? null,
   };
 }
 
@@ -220,5 +221,36 @@ describe('filterAndFacet', () => {
       expect(r.asns).toHaveLength(300);
       expect(r.countries).toEqual([]);
     });
+  });
+});
+
+describe('filterAndFacet reachable', () => {
+  const U = '2026-11-04T09:00:00.000Z';
+  const set = [
+    row({ target: 'a.example', score: 50, unreachableSince: U }),
+    row({ target: 'b.example', score: 50 }),
+    row({ target: 'c.example', score: 50, unreachableSince: U }),
+    row({ target: 'd.example', score: 60, unreachableSince: U }),
+    row({ target: 'e.example', score: 10 }),
+  ];
+  it('sorts an unreachable target below a reachable one with the same score, and keeps score first', () => {
+    expect(filterAndFacet(set, {}).rows.map((r) => r.target)).toEqual(['d.example', 'b.example', 'a.example', 'c.example', 'e.example']);
+  });
+  it('breaks an updated or created tie by reach, then by name', () => {
+    const T = '2026-11-05T00:00:00.000Z';
+    const tie = [
+      row({ target: 'a.example', updated_at: T, created_at: T, unreachableSince: U }),
+      row({ target: 'b.example', updated_at: T, created_at: T }),
+      row({ target: 'c.example', updated_at: T, created_at: T }),
+    ];
+    for (const sort of ['updated', 'created']) {
+      expect(filterAndFacet(tie, { sort }).rows.map((r) => r.target)).toEqual(['b.example', 'c.example', 'a.example']);
+    }
+  });
+  it('reachable and unreachable filter, all is the default', () => {
+    expect(filterAndFacet(set, { reachable: 'reachable' }).rows.map((r) => r.target)).toEqual(['b.example', 'e.example']);
+    expect(filterAndFacet(set, { reachable: 'unreachable' }).rows.map((r) => r.target)).toEqual(['d.example', 'a.example', 'c.example']);
+    expect(filterAndFacet(set, { reachable: '' }).total).toBe(5);
+    expect(filterAndFacet(set, { reachable: 'bogus' }).total).toBe(5);
   });
 });

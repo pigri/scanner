@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { openDb } from '../src/lib/db.js';
-import { TARGET_NETWORK_SQL, TARGET_NETWORK_LIST_SQL, TARGET_SCAN_SQL, TARGET_ANSWERED_SQL, TARGET_ANSWERED_DNS_SQL, DNS_TRACKING_SQL, DNS_UNTRACKED_TARGETS_SQL, DNS_TRACKING_START_SQL, markCurrent, historyText, scanStatus, shapeNetworkRows, summarizeNetworks, type NetworkDbRow } from '../src/lib/target-network.js';
+import { TARGET_NETWORK_SQL, TARGET_NETWORK_LIST_SQL, TARGET_SCAN_SQL, TARGET_ANSWERED_SQL, TARGET_ANSWERED_DNS_SQL, DNS_TRACKING_SQL, DNS_UNTRACKED_TARGETS_SQL, DNS_TRACKING_START_SQL, markCurrent, historyText, scanStatus, unreachableSince, noIpScanSql, shapeNetworkRows, summarizeNetworks, type NetworkDbRow } from '../src/lib/target-network.js';
 
 const T0 = '2026-11-10T12:00:00.000Z';
 const hoursBefore = (h: number) => new Date(Date.parse(T0) - h * 3600_000).toISOString();
@@ -168,7 +168,7 @@ describe('summarizeNetworks with a scan context', () => {
       ],
       ctx([], '2026-11-01T00:00:00.000Z'),
     );
-    expect(m.get('a.example')).toEqual({ countries: ['HU'], asns: ['AS64496'] });
+    expect(m.get('a.example')).toEqual({ countries: ['HU'], asns: ['AS64496'], unreachableSince: null });
   });
 
   it('keeps an old ip as unknown when DNS rows predate tracking and the scan predates it too', () => {
@@ -176,7 +176,7 @@ describe('summarizeNetworks with a scan context', () => {
       [lrow('a.example', { ip: '192.0.2.1', ...hu, started_at: started, last_seen: before })],
       ctx(['a.example'], '2026-11-16T00:00:00.000Z'),
     );
-    expect(m.get('a.example')).toEqual({ countries: ['HU'], asns: ['AS64496'] });
+    expect(m.get('a.example')).toEqual({ countries: ['HU'], asns: ['AS64496'], unreachableSince: null });
   });
 
   it('drops an old ip when the target has untracked rows but the scan is after tracking began', () => {
@@ -184,7 +184,7 @@ describe('summarizeNetworks with a scan context', () => {
       [lrow('a.example', { ip: '192.0.2.1', ...hu, started_at: started, last_seen: before })],
       ctx(['a.example'], '2026-11-01T00:00:00.000Z'),
     );
-    expect(m.get('a.example')).toEqual({ countries: [], asns: [] });
+    expect(m.get('a.example')).toEqual({ countries: [], asns: [], unreachableSince: started });
   });
 
   it('applies the 24 h rule to a target with no done scan', () => {
@@ -195,7 +195,7 @@ describe('summarizeNetworks with a scan context', () => {
       ],
       ctx([], null),
     );
-    expect(m.get('a.example')).toEqual({ countries: ['HU'], asns: ['AS64496'] });
+    expect(m.get('a.example')).toEqual({ countries: ['HU'], asns: ['AS64496'], unreachableSince: null });
   });
 });
 
@@ -205,7 +205,7 @@ describe('summarizeNetworks', () => {
       lrow('a.example', { ip: '192.0.2.1', country_code: 'HU', asn: 'AS64496' }),
       lrow('a.example', { ip: '192.0.2.2', country_code: 'DE', asn: 'AS64511', last_seen: hoursBefore(25) }),
     ]);
-    expect(m.get('a.example')).toEqual({ countries: ['HU'], asns: ['AS64496'] });
+    expect(m.get('a.example')).toEqual({ countries: ['HU'], asns: ['AS64496'], unreachableSince: null });
   });
 
   it('computes currency per target, with distinct sorted values', () => {
@@ -215,8 +215,8 @@ describe('summarizeNetworks', () => {
       lrow('a.example', { ip: '192.0.2.3', country_code: 'HU', asn: 'AS64496' }),
       lrow('b.example', { ip: '198.51.100.1', country_code: 'US', asn: 'AS64500', last_seen: hoursBefore(100) }),
     ]);
-    expect(m.get('a.example')).toEqual({ countries: ['DE', 'HU'], asns: ['AS64496', 'AS64511'] });
-    expect(m.get('b.example')).toEqual({ countries: ['US'], asns: ['AS64500'] });
+    expect(m.get('a.example')).toEqual({ countries: ['DE', 'HU'], asns: ['AS64496', 'AS64511'], unreachableSince: null });
+    expect(m.get('b.example')).toEqual({ countries: ['US'], asns: ['AS64500'], unreachableSince: null });
   });
 
   it('skips null and empty values', () => {
@@ -224,7 +224,7 @@ describe('summarizeNetworks', () => {
       lrow('a.example', { ip: '192.0.2.1', country_code: null, asn: '' }),
       lrow('a.example', { ip: '192.0.2.2', country_code: 'HU', asn: null }),
     ]);
-    expect(m.get('a.example')).toEqual({ countries: ['HU'], asns: [] });
+    expect(m.get('a.example')).toEqual({ countries: ['HU'], asns: [], unreachableSince: null });
   });
 
   it('takes the country from country_code only, never the name', () => {
@@ -232,15 +232,15 @@ describe('summarizeNetworks', () => {
       lrow('a.example', { ip: '192.0.2.1', country_code: null, country: 'Exampleland' }),
       lrow('b.example', { ip: '192.0.2.2', country_code: 'HU', country: 'Hungary' }),
     ]);
-    expect(m.get('a.example')).toEqual({ countries: [], asns: [] });
-    expect(m.get('b.example')).toEqual({ countries: ['HU'], asns: [] });
+    expect(m.get('a.example')).toEqual({ countries: [], asns: [], unreachableSince: null });
+    expect(m.get('b.example')).toEqual({ countries: ['HU'], asns: [], unreachableSince: null });
   });
 
   it('ignores non-public rows', () => {
     const m = summarizeNetworks([
       lrow('a.example', { ip: '198.51.100.1', ip_class: 'private', country_code: 'HU', asn: 'AS64496' }),
     ]);
-    expect(m.get('a.example') ?? { countries: [], asns: [] }).toEqual({ countries: [], asns: [] });
+    expect(m.get('a.example') ?? { countries: [], asns: [] }).toEqual({ countries: [], asns: [], unreachableSince: null });
   });
 });
 
@@ -356,5 +356,118 @@ describe('historyText', () => {
       .toBe('geo changed: country HU → DE, ASN AS64496 → AS64497');
     expect(historyText({ kind: 'geo_changed', source: 'scan', old_country_code: 'HU', new_country_code: null, old_asn: 'AS64496', new_asn: 'AS64496' }))
       .toBe('geo changed: country HU → none');
+  });
+});
+
+describe('unreachableSince', () => {
+  const S = '2026-11-04T09:00:00.000Z';
+  it('is the scan start when no ip was seen in it', () => {
+    expect(unreachableSince(['no'], S)).toBe(S);
+    expect(unreachableSince(['no', 'no'], S)).toBe(S);
+  });
+  it('is null when any ip is yes or unknown', () => {
+    expect(unreachableSince(['no', 'yes'], S)).toBeNull();
+    expect(unreachableSince(['no', 'unknown'], S)).toBeNull();
+  });
+  it('is null without a done scan, whatever the statuses', () => {
+    expect(unreachableSince(['none'], null)).toBeNull();
+    expect(unreachableSince(['no'], null)).toBeNull();
+  });
+  it('is null for a target with no ips at all', () => {
+    expect(unreachableSince([], S)).toBeNull();
+  });
+});
+
+describe('summarizeNetworks unreachableSince', () => {
+  const S = '2026-11-04T09:00:00.000Z';
+  const lr = (target: string, ip: string, last: string, started: string | null) => ({
+    target, ip, asn: null, country_code: null, country: null, last_seen: last, ip_class: 'public', started_at: started,
+  });
+  const ctx = { untracked: new Set<string>(['d.example']), trackingStart: '2026-11-16T00:00:00.000Z' };
+  it('flags a target whose ips all missed the latest scan, not one with yes, unknown or no scan', () => {
+    const m = summarizeNetworks(
+      [
+        lr('a.example', '192.0.2.1', '2026-08-31T00:00:00.000Z', S),
+        lr('b.example', '192.0.2.2', '2026-08-31T00:00:00.000Z', S),
+        lr('b.example', '192.0.2.3', '2026-11-04T09:00:00.000Z', S),
+        lr('c.example', '192.0.2.4', '2026-08-31T00:00:00.000Z', null),
+        lr('d.example', '192.0.2.5', '2026-08-31T00:00:00.000Z', S),
+      ],
+      ctx,
+    );
+    expect(m.get('a.example')!.unreachableSince).toBe(S);
+    expect(m.get('b.example')!.unreachableSince).toBeNull();
+    expect(m.get('c.example')!.unreachableSince).toBeNull();
+    expect(m.get('d.example')!.unreachableSince).toBeNull();
+  });
+  it('is null everywhere without a context', () => {
+    const m = summarizeNetworks([lr('a.example', '192.0.2.1', '2026-08-31T00:00:00.000Z', S)]);
+    expect(m.get('a.example')!.unreachableSince).toBeNull();
+  });
+});
+
+describe('unreachableSince with no ips', () => {
+  const S = '2026-11-04T09:00:00.000Z';
+  it('flags a target with no ips when nothing answered its scan', () => {
+    expect(unreachableSince([], S, false)).toBe(S);
+  });
+  it('does not flag it when something answered, when there is no scan, or when unknown', () => {
+    expect(unreachableSince([], S, true)).toBeNull();
+    expect(unreachableSince([], null, false)).toBeNull();
+    expect(unreachableSince([], S)).toBeNull();
+  });
+  it('ignores the answered flag when the target has ips', () => {
+    expect(unreachableSince(['no'], S, true)).toBe(S);
+    expect(unreachableSince(['yes'], S, false)).toBeNull();
+  });
+});
+
+describe('noIpScanSql', () => {
+  const S = '2026-11-04T09:00:00.000Z';
+  const setup = () => {
+    const { raw } = openDb(':memory:');
+    const q = raw.prepare(`INSERT INTO scan_queue (target, status, queued_at, started_at) VALUES (?, ?, ?, ?)`);
+    for (const t of ['silent', 'old', 'port', 'http', 'withip']) q.run(`${t}.example`, 'done', S, S);
+    q.run('pending.example', 'pending', S, null);
+    const port = raw.prepare(`INSERT INTO ports (target, ip, port, protocol, seen_at) VALUES (?, '192.0.2.1', 80, 'tcp', ?)`);
+    port.run('old.example', '2026-08-31T00:00:00.000Z');
+    port.run('port.example', '2026-11-04T09:05:00.000Z');
+    const h = raw.prepare(`INSERT INTO http_probes (target, url, seen_at) VALUES (?, ?, ?)`);
+    h.run('http.example', 'http://http.example/', '2026-11-04T09:05:00.000Z');
+    raw.prepare(`INSERT INTO target_network (target, ip, ip_version, ip_class, first_seen, last_seen) VALUES ('withip.example', '192.0.2.2', 4, 'public', ?, ?)`).run(S, S);
+    return raw;
+  };
+  it('lists done targets with no target_network rows and whether a port or http row is from the scan', () => {
+    const rows = setup().prepare(noIpScanSql(true, true, false)).all() as { target: string; started_at: string; answered: number }[];
+    expect(Object.fromEntries(rows.map((r) => [r.target, r.answered]))).toEqual({
+      'silent.example': 0, 'old.example': 0, 'port.example': 1, 'http.example': 1,
+    });
+  });
+  it('narrows to one target', () => {
+    const rows = setup().prepare(noIpScanSql(true, true, true)).all('silent.example');
+    expect(rows).toHaveLength(1);
+  });
+  it('treats a missing ports or http_probes table as no rows', () => {
+    const raw = setup();
+    const rows = raw.prepare(noIpScanSql(false, true, false)).all() as { target: string; answered: number }[];
+    expect(Object.fromEntries(rows.map((r) => [r.target, r.answered]))).toMatchObject({ 'port.example': 0, 'http.example': 1 });
+    const none = raw.prepare(noIpScanSql(false, false, false)).all() as { answered: number }[];
+    expect(none.every((r) => r.answered === 0)).toBe(true);
+  });
+  it('counts a port or http row seen exactly at the scan start as answered', () => {
+    const raw = setup();
+    raw.prepare(`INSERT INTO scan_queue (target, status, queued_at, started_at) VALUES ('edgeport.example', 'done', ?, ?)`).run(S, S);
+    raw.prepare(`INSERT INTO scan_queue (target, status, queued_at, started_at) VALUES ('edgehttp.example', 'done', ?, ?)`).run(S, S);
+    raw.prepare(`INSERT INTO ports (target, ip, port, protocol, seen_at) VALUES ('edgeport.example', '192.0.2.3', 80, 'tcp', ?)`).run(S);
+    raw.prepare(`INSERT INTO http_probes (target, url, seen_at) VALUES ('edgehttp.example', 'http://edgehttp.example/', ?)`).run(S);
+    const rows = raw.prepare(noIpScanSql(true, true, false)).all() as { target: string; answered: number }[];
+    const by = Object.fromEntries(rows.map((r) => [r.target, r.answered]));
+    expect(by['edgeport.example']).toBe(1);
+    expect(by['edgehttp.example']).toBe(1);
+  });
+  it('uses the per-target indexes', () => {
+    const plan = setup().prepare('EXPLAIN QUERY PLAN ' + noIpScanSql(true, true, false)).all().map((r: any) => r.detail).join('\n');
+    expect(plan).toMatch(/idx_ports_target/);
+    expect(plan).toMatch(/idx_http_target/);
   });
 });

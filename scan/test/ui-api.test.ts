@@ -388,3 +388,135 @@ describe('GET /api/target history', () => {
     expect(((await r.json()) as any).history).toEqual([]);
   }, 40_000);
 });
+
+describe('unreachable flag', () => {
+  const S = '2026-11-04T09:00:00.000Z';
+  function seedReach(mutate?: (raw: ReturnType<typeof openDb>['raw']) => void): string {
+    return seedLatestScan((raw) => {
+      const ins = raw.prepare(
+        `INSERT INTO target_network (target, ip, ip_version, ip_class, asn, country_code, from_ports, from_dns, first_seen, last_seen)
+         VALUES (?, ?, 4, 'public', 'AS64500', 'DE', 1, 0, ?, ?)`,
+      );
+      const q = raw.prepare(`INSERT INTO scan_queue (target, status, queued_at, started_at, finished_at) VALUES (?, ?, ?, ?, ?)`);
+      const risk = raw.prepare('INSERT INTO risk_latest (target, score, created_at, updated_at) VALUES (?, ?, ?, ?)');
+      // Answered in its latest scan.
+      ins.run('alive.example', '192.0.2.70', '2026-08-31T08:00:00.000Z', '2026-11-04T09:10:00.000Z');
+      q.run('alive.example', 'done', '2026-11-04T08:00:00.000Z', S, '2026-11-04T09:30:00.000Z');
+      risk.run('alive.example', 10, '2026-11-04T09:30:00.000Z', '2026-11-04T09:30:00.000Z');
+      // Not scanned yet: pending is not unreachable.
+      ins.run('pending.example', '192.0.2.71', '2026-08-31T08:00:00.000Z', '2026-08-31T08:00:00.000Z');
+      q.run('pending.example', 'pending', '2026-11-04T08:00:00.000Z', null, null);
+      risk.run('pending.example', 10, '2026-11-04T09:30:00.000Z', '2026-11-04T09:30:00.000Z');
+      mutate?.(raw);
+    });
+  }
+  const list = async (base: string, qs = '') => ((await (await fetch(`${base}/api/targets?limit=100${qs}`)).json()) as any);
+
+  it('flags the fileshare-shaped target with its scan date and leaves its score', async () => {
+    const base = await startUi(seedReach());
+    const d = await list(base);
+    const by = Object.fromEntries(d.rows.map((r: any) => [r.target, r]));
+    expect(by['fileshare.example']).toMatchObject({ unreachableSince: S, score: 10 });
+    expect(by['dnsonly.example'].unreachableSince).toBeNull();
+    expect(by['alive.example'].unreachableSince).toBeNull();
+    expect(by['pending.example'].unreachableSince).toBeNull();
+    const t = (await (await fetch(`${base}/api/target?t=fileshare.example`)).json()) as any;
+    expect(t.unreachableSince).toBe(S);
+    const ok = (await (await fetch(`${base}/api/target?t=alive.example`)).json()) as any;
+    expect(ok.unreachableSince).toBeNull();
+  }, 40_000);
+
+  it('filters by reachable and sorts unreachable below reachable at the same score', async () => {
+    const base = await startUi(seedReach());
+    const all = await list(base);
+    expect(all.rows.map((r: any) => r.target)).toEqual(['alive.example', 'dnsonly.example', 'pending.example', 'fileshare.example']);
+    expect((await list(base, '&reachable=unreachable')).rows.map((r: any) => r.target)).toEqual(['fileshare.example']);
+    expect((await list(base, '&reachable=reachable')).rows.map((r: any) => r.target)).toEqual(['alive.example', 'dnsonly.example', 'pending.example']);
+  }, 40_000);
+
+  it('answers 200 with no flag on a DB without scan_queue, target_network or dns_records', async () => {
+    for (const drop of ['scan_queue', 'target_network', 'dns_records']) {
+      const base = await startUi(seedReach((raw) => raw.exec(`DROP TABLE ${drop}`)));
+      const r = await fetch(`${base}/api/targets?limit=100`);
+      expect(r.status).toBe(200);
+      const d = (await r.json()) as any;
+      if (drop !== 'dns_records') expect(d.rows.every((x: any) => x.unreachableSince === null)).toBe(true);
+      const t = await fetch(`${base}/api/target?t=fileshare.example`);
+      expect(t.status).toBe(200);
+      const td = (await t.json()) as any;
+      if (drop !== 'dns_records') expect(td.unreachableSince).toBeNull();
+    }
+  }, 120_000);
+
+  describe('target with no ips', () => {
+    const noIp = (raw: ReturnType<typeof openDb>['raw']) => {
+      const q = raw.prepare(`INSERT INTO scan_queue (target, status, queued_at, started_at, finished_at) VALUES (?, ?, ?, ?, ?)`);
+      const risk = raw.prepare('INSERT INTO risk_latest (target, score, created_at, updated_at) VALUES (?, ?, ?, ?)');
+      for (const t of ['silent', 'oldrows', 'portrow', 'httprow']) {
+        q.run(`${t}.example`, 'done', '2026-11-04T08:00:00.000Z', S, '2026-11-04T09:30:00.000Z');
+        risk.run(`${t}.example`, 7, '2026-11-04T09:30:00.000Z', '2026-11-04T09:30:00.000Z');
+      }
+      q.run('queued2.example', 'pending', '2026-11-04T08:00:00.000Z', null, null);
+      risk.run('queued2.example', 7, '2026-11-04T09:30:00.000Z', '2026-11-04T09:30:00.000Z');
+      raw.prepare(`INSERT INTO ports (target, ip, port, protocol, seen_at) VALUES (?, '192.0.2.80', 80, 'tcp', ?)`).run('oldrows.example', '2026-08-31T08:00:00.000Z');
+      raw.prepare(`INSERT INTO ports (target, ip, port, protocol, seen_at) VALUES (?, '192.0.2.81', 80, 'tcp', ?)`).run('portrow.example', '2026-11-04T09:10:00.000Z');
+      raw.prepare(`INSERT INTO http_probes (target, url, seen_at) VALUES (?, ?, ?)`).run('httprow.example', 'http://httprow.example/', '2026-11-04T09:10:00.000Z');
+    };
+    it('flags it only when nothing answered the scan, in the list and on the page', async () => {
+      const base = await startUi(seedReach(noIp));
+      const by = Object.fromEntries((await list(base)).rows.map((r: any) => [r.target, r]));
+      expect(by['silent.example']).toMatchObject({ unreachableSince: S, score: 7 });
+      expect(by['oldrows.example'].unreachableSince).toBe(S);
+      expect(by['portrow.example'].unreachableSince).toBeNull();
+      expect(by['httprow.example'].unreachableSince).toBeNull();
+      expect(by['queued2.example'].unreachableSince).toBeNull();
+      for (const [t, want] of [['silent', S], ['oldrows', S], ['portrow', null], ['httprow', null], ['queued2', null]] as const) {
+        const d = (await (await fetch(`${base}/api/target?t=${t}.example`)).json()) as any;
+        expect(d.unreachableSince).toBe(want);
+      }
+    }, 40_000);
+
+    it('does not flag a port or http row seen exactly at the scan start', async () => {
+      const base = await startUi(seedReach((raw) => {
+        const q = raw.prepare(`INSERT INTO scan_queue (target, status, queued_at, started_at, finished_at) VALUES (?, 'done', ?, ?, ?)`);
+        const risk = raw.prepare('INSERT INTO risk_latest (target, score, created_at, updated_at) VALUES (?, ?, ?, ?)');
+        for (const t of ['edgeport', 'edgehttp']) {
+          q.run(`${t}.example`, '2026-11-04T08:00:00.000Z', S, '2026-11-04T09:30:00.000Z');
+          risk.run(`${t}.example`, 7, '2026-11-04T09:30:00.000Z', '2026-11-04T09:30:00.000Z');
+        }
+        raw.prepare(`INSERT INTO ports (target, ip, port, protocol, seen_at) VALUES ('edgeport.example', '192.0.2.82', 80, 'tcp', ?)`).run(S);
+        raw.prepare(`INSERT INTO http_probes (target, url, seen_at) VALUES ('edgehttp.example', 'http://edgehttp.example/', ?)`).run(S);
+      }));
+      const by = Object.fromEntries((await list(base)).rows.map((r: any) => [r.target, r]));
+      expect(by['edgeport.example'].unreachableSince).toBeNull();
+      expect(by['edgehttp.example'].unreachableSince).toBeNull();
+      for (const t of ['edgeport', 'edgehttp']) {
+        const d = (await (await fetch(`${base}/api/target?t=${t}.example`)).json()) as any;
+        expect(d.unreachableSince).toBeNull();
+      }
+    }, 40_000);
+
+    it('answers /api/targets with 200 and the flag when the per-target indexes are missing', async () => {
+      const base = await startUi(seedReach((raw) => {
+        noIp(raw);
+        raw.exec('DROP INDEX idx_ports_target; DROP INDEX idx_http_target');
+      }));
+      const r = await fetch(`${base}/api/targets?limit=100`);
+      expect(r.status).toBe(200);
+      const by = Object.fromEntries(((await r.json()) as any).rows.map((x: any) => [x.target, x]));
+      expect(by['silent.example'].unreachableSince).toBe(S);
+      expect(by['portrow.example'].unreachableSince).toBeNull();
+      expect(by['httprow.example'].unreachableSince).toBeNull();
+    }, 40_000);
+
+    it('answers /api/targets with 200 when ports or http_probes is missing', async () => {
+      for (const drop of ['ports', 'http_probes']) {
+        const base = await startUi(seedReach((raw) => { noIp(raw); raw.exec(`DROP TABLE ${drop}`); }));
+        const r = await fetch(`${base}/api/targets?limit=100`);
+        expect(r.status).toBe(200);
+        const by = Object.fromEntries(((await r.json()) as any).rows.map((x: any) => [x.target, x]));
+        expect(by['silent.example'].unreachableSince).toBe(S);
+      }
+    }, 120_000);
+  });
+});

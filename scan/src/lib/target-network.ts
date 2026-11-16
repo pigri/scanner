@@ -130,6 +130,39 @@ export function scanStatus(
   return !Number.isFinite(track) || s < track ? 'unknown' : 'no';
 }
 
+/**
+ * `scanStart` when the target has a done scan and none of its IPs was 'yes' or
+ * 'unknown' in it. A target with no IPs has nothing to compare, so it counts
+ * only when `answered` is false: no port or HTTP row came from that scan.
+ * An undefined `answered` means unknown, which does not flag.
+ */
+export function unreachableSince(
+  statuses: readonly ScanStatus[],
+  scanStart: string | null,
+  answered?: boolean,
+): string | null {
+  if (scanStart === null) return null;
+  if (statuses.length === 0) return answered === false ? scanStart : null;
+  return statuses.every((st) => st === 'no') ? scanStart : null;
+}
+
+/**
+ * Done scans of targets that have no target_network row, with whether a port or
+ * HTTP row was seen at or after the scan start. Pass false for a table the DB
+ * lacks. With byTarget, bind one target; else it lists every such target.
+ */
+export function noIpScanSql(hasPorts: boolean, hasHttp: boolean, byTarget: boolean): string {
+  const ex = (table: string): string =>
+    `EXISTS(SELECT 1 FROM ${table} x WHERE x.target = q.target AND x.seen_at >= q.started_at)`;
+  const answered = [hasPorts ? ex('ports') : '', hasHttp ? ex('http_probes') : '']
+    .filter(Boolean)
+    .join(' OR ');
+  return `SELECT q.target, q.started_at, ${answered ? `(${answered})` : '0'} AS answered
+  FROM scan_queue q
+  WHERE q.status = 'done' AND q.started_at IS NOT NULL
+    AND NOT EXISTS(SELECT 1 FROM target_network tn WHERE tn.target = q.target)${byTarget ? ' AND q.target = ?' : ''}`;
+}
+
 function parsePtr(json: string | null): string[] | null {
   if (json === null) return null;
   try {
@@ -189,6 +222,8 @@ export interface ListScanContext {
 export interface NetworkSummary {
   countries: string[];
   asns: string[];
+  /** Start of the latest done scan when it reached none of the target's IPs, else null. */
+  unreachableSince: string | null;
 }
 
 /**
@@ -204,10 +239,10 @@ export function summarizeNetworks(
   const flush = (target: string, group: ListNetworkRow[]): void => {
     const old = markCurrent(group);
     const untracked = ctx?.untracked.has(target) ?? false;
-    const current = group.map((r, i) => {
-      const st = ctx ? scanStatus(r.last_seen, r.started_at ?? null, untracked, ctx.trackingStart) : 'none';
-      return st === 'none' ? old[i]! : st !== 'no';
-    });
+    const statuses = group.map((r) =>
+      ctx ? scanStatus(r.last_seen, r.started_at ?? null, untracked, ctx.trackingStart) : ('none' as const),
+    );
+    const current = group.map((_, i) => (statuses[i] === 'none' ? old[i]! : statuses[i] !== 'no'));
     const countries = new Set<string>();
     const asns = new Set<string>();
     group.forEach((r, i) => {
@@ -216,7 +251,11 @@ export function summarizeNetworks(
       if (c) countries.add(c);
       if (r.asn) asns.add(r.asn);
     });
-    out.set(target, { countries: [...countries].sort(), asns: [...asns].sort() });
+    out.set(target, {
+      countries: [...countries].sort(),
+      asns: [...asns].sort(),
+      unreachableSince: unreachableSince(statuses, group[0]!.started_at ?? null),
+    });
   };
   let group: ListNetworkRow[] = [];
   for (const r of rows) {
