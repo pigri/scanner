@@ -307,3 +307,84 @@ describe('a DB whose target_network predates from_http', () => {
     expect(d.network.every((n: any) => !n.seenVia.includes('http'))).toBe(true);
   }, 40_000);
 });
+
+type EventSeed = { ip: string; kind: string; at: string; source?: string; oc?: string | null; nc?: string | null; oa?: string | null; na?: string | null };
+
+function seedHistory(events: EventSeed[], dropTable = false): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ui-api-'));
+  dirs.push(dir);
+  const file = path.join(dir, 'scan.db');
+  const { raw } = openDb(file);
+  const ins = raw.prepare(
+    `INSERT INTO target_network_events (target, ip, kind, at, old_country_code, new_country_code, old_asn, new_asn, source)
+     VALUES ('files.example', @ip, @kind, @at, @oc, @nc, @oa, @na, @source)`,
+  );
+  for (const e of events) ins.run({ oc: null, nc: null, oa: null, na: null, source: 'scan', ...e });
+  ins.run({ ip: '198.51.100.99', kind: 'ip_added', at: '2026-01-01T00:00:00.000Z', oc: null, nc: null, oa: null, na: null, source: 'scan' });
+  raw.prepare(`UPDATE target_network_events SET target = 'other.example' WHERE ip = '198.51.100.99'`).run();
+  if (dropTable) raw.exec('DROP TABLE target_network_events');
+  raw.close();
+  return file;
+}
+
+describe('GET /api/target history', () => {
+  it('returns every event kind newest first, with old and new geo values, for this target only', async () => {
+    const base = await startUi(seedHistory([
+      { ip: '192.0.2.10', kind: 'ip_added', at: '2026-08-31T10:00:00.000Z' },
+      { ip: '192.0.2.10', kind: 'geo_changed', at: '2026-10-01T00:00:00.000Z', oc: 'HU', nc: 'DE', oa: 'AS64496', na: 'AS64497' },
+      { ip: '192.0.2.10', kind: 'ip_gone', at: '2026-11-04T09:00:00.000Z' },
+      { ip: '192.0.2.10', kind: 'ip_back', at: '2026-11-08T09:00:00.000Z' },
+    ]));
+    const d = (await (await fetch(`${base}/api/target?t=files.example`)).json()) as any;
+    expect(d.history.map((e: any) => e.kind)).toEqual(['ip_back', 'ip_gone', 'geo_changed', 'ip_added']);
+    expect(d.history.every((e: any) => e.ip === '192.0.2.10')).toBe(true);
+    expect(d.history[2]).toMatchObject({ old_country_code: 'HU', new_country_code: 'DE', old_asn: 'AS64496', new_asn: 'AS64497', inferred: false });
+    expect(d.history[2].text).toBe('geo changed: country HU → DE, ASN AS64496 → AS64497');
+    expect(d.history[3].text).toBe('added');
+  }, 40_000);
+
+  it('caps the list at 200 and keeps the newest', async () => {
+    const events: EventSeed[] = [];
+    for (let i = 0; i < 205; i++) {
+      events.push({ ip: `192.0.2.${i % 200}`, kind: 'geo_changed', at: new Date(Date.parse('2026-01-01T00:00:00.000Z') + i * 60_000).toISOString(), oc: 'HU', nc: 'DE' });
+    }
+    const base = await startUi(seedHistory(events));
+    const d = (await (await fetch(`${base}/api/target?t=files.example`)).json()) as any;
+    expect(d.history).toHaveLength(200);
+    expect(d.history[0].at).toBe(new Date(Date.parse('2026-01-01T00:00:00.000Z') + 204 * 60_000).toISOString());
+    expect(d.history[199].at).toBe(new Date(Date.parse('2026-01-01T00:00:00.000Z') + 5 * 60_000).toISOString());
+  }, 40_000);
+
+  it('marks reconstructed events as inferred and scan events not', async () => {
+    const base = await startUi(seedHistory([
+      { ip: '192.0.2.10', kind: 'ip_added', at: '2026-08-31T10:00:00.000Z', source: 'reconstructed' },
+      { ip: '192.0.2.10', kind: 'ip_gone', at: '2026-11-04T09:00:00.000Z', source: 'reconstructed' },
+      { ip: '192.0.2.11', kind: 'ip_added', at: '2026-11-05T09:00:00.000Z', source: 'scan' },
+    ]));
+    const d = (await (await fetch(`${base}/api/target?t=files.example`)).json()) as any;
+    expect(d.history.map((e: any) => [e.kind, e.inferred, e.text])).toEqual([
+      ['ip_added', false, 'added'],
+      ['ip_gone', true, 'gone (inferred)'],
+      ['ip_added', true, 'added (inferred)'],
+    ]);
+  }, 40_000);
+
+  it('shows added and gone (inferred) for a fileshare-shaped target', async () => {
+    const base = await startUi(seedHistory([
+      { ip: '192.0.2.10', kind: 'ip_added', at: '2026-08-31T10:00:00.000Z', source: 'reconstructed' },
+      { ip: '192.0.2.10', kind: 'ip_gone', at: '2026-11-04T09:00:00.000Z', source: 'reconstructed' },
+    ]));
+    const d = (await (await fetch(`${base}/api/target?t=files.example`)).json()) as any;
+    expect(d.history.map((e: any) => `${e.text} ${e.at.slice(0, 10)}`).reverse()).toEqual([
+      'added (inferred) 2026-08-31',
+      'gone (inferred) 2026-11-04',
+    ]);
+  }, 40_000);
+
+  it('returns an empty history, not a 500, when the table is missing', async () => {
+    const base = await startUi(seedHistory([], true));
+    const r = await fetch(`${base}/api/target?t=files.example`);
+    expect(r.status).toBe(200);
+    expect(((await r.json()) as any).history).toEqual([]);
+  }, 40_000);
+});

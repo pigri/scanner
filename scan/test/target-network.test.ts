@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { openDb } from '../src/lib/db.js';
-import { TARGET_NETWORK_SQL, TARGET_NETWORK_LIST_SQL, TARGET_SCAN_SQL, TARGET_ANSWERED_SQL, TARGET_ANSWERED_DNS_SQL, DNS_TRACKING_SQL, DNS_UNTRACKED_TARGETS_SQL, DNS_TRACKING_START_SQL, markCurrent, scanStatus, shapeNetworkRows, summarizeNetworks, type NetworkDbRow } from '../src/lib/target-network.js';
+import { TARGET_NETWORK_SQL, TARGET_NETWORK_LIST_SQL, TARGET_SCAN_SQL, TARGET_ANSWERED_SQL, TARGET_ANSWERED_DNS_SQL, DNS_TRACKING_SQL, DNS_UNTRACKED_TARGETS_SQL, DNS_TRACKING_START_SQL, markCurrent, historyText, scanStatus, shapeNetworkRows, summarizeNetworks, type NetworkDbRow } from '../src/lib/target-network.js';
 
 const T0 = '2026-11-10T12:00:00.000Z';
 const hoursBefore = (h: number) => new Date(Date.parse(T0) - h * 3600_000).toISOString();
@@ -341,5 +341,20 @@ describe('scan SQL', () => {
     ins.run('b.example', 'b.example', '192.0.2.2', '2026-08-01T00:00:00.000Z', TRACK);
     expect(raw.prepare(DNS_TRACKING_SQL).get({ t: 'a.example' })).toEqual({ tracking_start: TRACK, untracked: 1 });
     expect(raw.prepare(DNS_TRACKING_SQL).get({ t: 'b.example' })).toEqual({ tracking_start: TRACK, untracked: 0 });
+  });
+});
+
+describe('historyText', () => {
+  const base = { old_country_code: null, new_country_code: null, old_asn: null, new_asn: null };
+  it('names each event kind and marks reconstructed ones', () => {
+    expect(historyText({ ...base, kind: 'ip_added', source: 'scan' })).toBe('added');
+    expect(historyText({ ...base, kind: 'ip_gone', source: 'reconstructed' })).toBe('gone (inferred)');
+    expect(historyText({ ...base, kind: 'ip_back', source: 'scan' })).toBe('back');
+  });
+  it('shows old to new for geo_changed and none for a missing side', () => {
+    expect(historyText({ kind: 'geo_changed', source: 'scan', old_country_code: 'HU', new_country_code: 'DE', old_asn: 'AS64496', new_asn: 'AS64497' }))
+      .toBe('geo changed: country HU → DE, ASN AS64496 → AS64497');
+    expect(historyText({ kind: 'geo_changed', source: 'scan', old_country_code: 'HU', new_country_code: null, old_asn: 'AS64496', new_asn: 'AS64496' }))
+      .toBe('geo changed: country HU → none');
   });
 });

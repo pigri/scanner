@@ -32,6 +32,9 @@ import {
   type ListScanContext,
   type ListNetworkRow,
   type NetworkDbRow,
+  type HistoryDbRow,
+  TARGET_HISTORY_SQL,
+  historyText,
 } from './lib/target-network.js';
 
 interface Opts {
@@ -569,6 +572,13 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
           trackingStart: tracking.tracking_start,
         })
       : [];
+    const history = tableExists(scan, 'target_network_events')
+      ? (scan.prepare(TARGET_HISTORY_SQL).all(t) as (HistoryDbRow & { id: number })[]).map((e) => ({
+          ...e,
+          inferred: e.source === 'reconstructed',
+          text: historyText(e),
+        }))
+      : [];
     return {
       target: t,
       created_at: span?.created_at ?? null,
@@ -584,6 +594,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
       certs,
       dns,
       network,
+      history,
       latestScan,
       lastAnswered,
       dnsTrackedSince: tracking.tracking_start,
@@ -1553,6 +1564,10 @@ async function renderTarget(t){
         el('span',{class:'mono muted'},isoSec(n.first_seen)),
         el('span',{class:'mono muted'},isoSec(n.last_seen))];
     })):''));
+  const hist=d.history||[];
+  if(hist.length)panels.push(el('div',{class:'panel'},el('h2',{},'Network history ('+hist.length+')'),
+    el('div',{class:'muted',style:'margin-bottom:8px'},'Newest first'+(hist.length>=200?', latest 200 only':'')+'. Inferred events are rebuilt from older scan evidence. Country history before the first recorded scan event cannot be rebuilt.'),
+    table(['Date','IP','Event'],hist.map(h=>[el('span',{class:'mono muted'},isoSec(h.at)),el('span',{class:'mono'},h.ip),el('span',{class:h.inferred?'muted':''},h.text)]))));
   if(d.ports.length)panels.push(el('div',{class:'panel'},el('h2',{},'Ports ('+d.ports.length+')'),
     table(['Port','Proto','Service','Product','Version','TLS','Found by'],d.ports.map(p=>[String(p.port),esc(p.protocol),esc(p.service),esc(p.product),esc(p.version),esc(p.tunnel),el('span',{class:'mono muted'},esc(p.tools||''))]))));
   if(d.http.length)panels.push(el('div',{class:'panel'},el('h2',{},'HTTP ('+d.http.length+')'),
