@@ -36,6 +36,31 @@ missing, `scan-worker-hu@` hangs forever in `start-pre` and every `.hu` target
 sits unclaimed in `scan_queue` — no new findings, and the UI News page shows
 nothing new.
 
+### Egress country check
+
+The netns check proves which namespace a worker is in, not where that
+namespace's traffic leaves. A tunnel that falls back to the wrong exit would
+pass it. So the workers also check the egress country:
+
+| Flag | Meaning |
+| ---- | ------- |
+| `--egress-country CC` | the egress country MUST equal `CC` (`scan-worker-hu@` uses `HU`) |
+| `--egress-not-country CC` | the egress country MUST NOT equal `CC` (`scan-worker@` and `scan-worker` use `HU`) |
+| `--egress-echo-url URL` | IP-echo service, default `https://api.ipify.org` |
+| `--mmdb FILE` | country database, default `../discovery/ipinfo_lite.mmdb` |
+
+The check is off unless one of the two country flags is given. Before a claim
+the worker fetches its public IP from the echo service (10 s timeout) and looks
+the country up in the MMDB. While it passes, it runs at most once per 10
+minutes. After a failure it runs again on every attempt.
+
+It **fails closed**. A wrong country, a failed or timed out fetch, a reply that
+is not an IP address, or a missing or unreadable MMDB all stop the worker from
+claiming. It retries with the DNS backoff (up to 5 min). After a batch the
+check runs again, ungated. On a failure the worker releases the batch without
+counting an attempt and exits 75, as for a replaced namespace. The log holds the
+country code and the reason, never the IP address.
+
 These are **system** units (netns creation needs root), installed outside the
 repo tree:
 

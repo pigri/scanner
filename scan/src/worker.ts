@@ -11,7 +11,8 @@ import { openDb } from './lib/db.js';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
 import { createLogger, type Logger } from './lib/log.js';
 import { scanChildEnv, TUNED_SCAN_FLAGS } from './lib/scan-all-runner.js';
-import { preflightFromOpts, postBatchFromOpts, exitCodeFor } from './lib/egress-check.js';
+import { preflightFromOpts, postBatchFromOpts, exitCodeFor, normalizeCountryCode, DEFAULT_ECHO_URL } from './lib/egress-check.js';
+import { DEFAULT_MMDB } from './lib/geoip.js';
 import { runQueueLoop, type BatchOutcome } from './lib/queue-loop.js';
 
 interface Opts {
@@ -30,6 +31,10 @@ interface Opts {
   netns: string | null;
   dnsProbe: string;
   dnsTimeoutMs: number;
+  egressCountry: string | null;
+  egressNotCountry: string | null;
+  egressEchoUrl: string;
+  mmdb: string;
   help?: boolean;
 }
 
@@ -40,6 +45,7 @@ function parseArgs(argv: string[]): Opts {
     claimSuffixes: [], claimNotSuffixes: [], extraArgs: [],
     workerId: `${os.hostname()}:${process.pid}`,
     netns: null, dnsProbe: 'example.com', dnsTimeoutMs: 5000,
+    egressCountry: null, egressNotCountry: null, egressEchoUrl: DEFAULT_ECHO_URL, mmdb: DEFAULT_MMDB,
   };
   let passthrough = false;
   for (let i = 2; i < argv.length; i++) {
@@ -57,6 +63,10 @@ function parseArgs(argv: string[]): Opts {
     else if (a === '--netns') opts.netns = next();
     else if (a === '--dns-probe') opts.dnsProbe = next();
     else if (a === '--dns-timeout-ms') opts.dnsTimeoutMs = parseInt(next(), 10);
+    else if (a === '--egress-country') opts.egressCountry = normalizeCountryCode(next());
+    else if (a === '--egress-not-country') opts.egressNotCountry = normalizeCountryCode(next());
+    else if (a === '--egress-echo-url') opts.egressEchoUrl = next();
+    else if (a === '--mmdb') opts.mmdb = next();
     else if (a === '--watch') opts.watch = true;
     else if (a === '--poll-interval') opts.pollSec = parseInt(next(), 10);
     else if (a === '--claim-suffix') opts.claimSuffixes.push(next());
@@ -91,6 +101,15 @@ Options:
                          with backoff (up to 5 min). Off by default.
   --dns-probe <host>     name resolved by the DNS check (default: example.com)
   --dns-timeout-ms <ms>  DNS probe timeout (default: 5000)
+  --egress-country <CC>  before every claim (at most every 10 min while it
+                         passes) and after every batch, fetch the public IP and
+                         require its country to equal <CC>. Fails closed: a
+                         mismatch, fetch error, junk reply or missing MMDB
+                         pauses claiming with the DNS backoff; after a batch it
+                         releases the rows and exits 75. Off by default.
+  --egress-not-country <CC>  same check, but the country must NOT equal <CC>
+  --egress-echo-url <url>    IP-echo service (default: https://api.ipify.org)
+  --mmdb <file>          country database (default: ../discovery/ipinfo_lite.mmdb)
   --watch                daemon mode: when the queue drains, poll for new work
                          instead of exiting. Runs until SIGINT/SIGTERM.
   --poll-interval <sec>  seconds to sleep between polls in --watch (default: 10)
