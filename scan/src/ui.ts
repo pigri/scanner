@@ -16,6 +16,7 @@ import { filterAndFacet } from './lib/target-filter.js';
 import { buildNewsSql } from './lib/news-sql.js';
 import { TARGET_ROWS_SQL, riskLatestMissingMessage } from './lib/target-rows-sql.js';
 import { NO_URL, latestRiskRow } from './lib/risk-latest.js';
+import { TARGET_NETWORK_SQL, shapeNetworkRows, type NetworkDbRow } from './lib/target-network.js';
 
 interface Opts {
   scanDb: string;
@@ -457,6 +458,9 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
           .prepare(`SELECT type, value, ttl FROM dns_records WHERE target=? ORDER BY type`)
           .all(t)
       : [];
+    const network = tableExists(scan, 'target_network')
+      ? shapeNetworkRows(scan.prepare(TARGET_NETWORK_SQL).all(t) as NetworkDbRow[])
+      : [];
     return {
       target: t,
       created_at: span?.created_at ?? null,
@@ -471,6 +475,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
       cves,
       certs,
       dns,
+      network,
     };
   },
 
@@ -1034,7 +1039,10 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(opts.port, opts.host, () => {
-  console.log(`Operation Hussar UI  →  http://${opts.host}:${opts.port}`);
+  const bound = server.address();
+  const port = typeof bound === 'object' && bound ? bound.port : opts.port;
+  console.log(`Operation Hussar UI  →  http://${opts.host}:${port}`);
+  console.log(`listening on http://${opts.host}:${port}`);
   console.log(`  scan db :  ${path.resolve(opts.scanDb)}  (read-only)`);
   console.log(`  recon db:  ${opts.reconDb ? path.resolve(opts.reconDb) + '  (read-only)' : '(none)'}`);
 });
@@ -1408,6 +1416,23 @@ async function renderTarget(t){
       d.updated_at?el('div',{class:'muted'},'updated ',el('span',{class:'mono'},isoSec(d.updated_at))):'',
       d.risk&&d.risk.breakdown&&d.risk.breakdown.keywords&&d.risk.breakdown.keywords.length?el('div',{class:'muted'},'keywords: '+d.risk.breakdown.keywords.join(', ')):''));
   const panels=[head];
+  if(d.network&&d.network.length)panels.push(el('div',{class:'panel'},el('h2',{},'Network ('+d.network.length+')'),
+    table(['IP','v','ASN','AS name','AS domain','IP country','PTR','Seen via','First seen','Last seen'],d.network.map(n=>{
+      const pub=n.ipClass==='public';
+      const geoNote=n.geo==='none'?'pending':n.geo==='miss'?'no data':'';
+      const geoCell=f=>pub?(n.geo==='hit'?esc(f):el('span',{class:'muted'},geoNote)):'';
+      return [
+        el('span',{class:'mono'},n.ip,n.current?'':el('span',{class:'pill muted',style:'margin-left:6px',title:'not seen in the latest scan'},'previous')),
+        String(n.ipVersion),
+        pub?geoCell(n.asn):el('span',{class:'pill muted'},n.ipClass),
+        geoCell(n.as_name),
+        geoCell(n.as_domain),
+        pub?(n.geo==='hit'?el('span',{title:esc(n.country)},esc(n.country_code)):el('span',{class:'muted'},geoNote)):'',
+        n.ptr===null?el('span',{class:'muted',title:'not looked up'},'–'):n.ptr.length?el('span',{class:'mono'},n.ptr.join(', ')):el('span',{class:'muted'},'none'),
+        esc(n.seenVia.join(' + ')),
+        el('span',{class:'mono muted'},isoSec(n.first_seen)),
+        el('span',{class:'mono muted'},isoSec(n.last_seen))];
+    }))));
   if(d.ports.length)panels.push(el('div',{class:'panel'},el('h2',{},'Ports ('+d.ports.length+')'),
     table(['Port','Proto','Service','Product','Version','TLS','Found by'],d.ports.map(p=>[String(p.port),esc(p.protocol),esc(p.service),esc(p.product),esc(p.version),esc(p.tunnel),el('span',{class:'mono muted'},esc(p.tools||''))]))));
   if(d.http.length)panels.push(el('div',{class:'panel'},el('h2',{},'HTTP ('+d.http.length+')'),
