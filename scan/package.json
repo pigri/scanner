@@ -67,6 +67,7 @@
   "dependencies": {
     "better-sqlite3": "^13.0.3",
     "fast-xml-parser": "^5.0.0",
+    "maxmind": "^5.0.7",
     "puppeteer-core": "^25.8.0"
   },
   "devDependencies": {
