@@ -229,3 +229,30 @@ export function summarizeNetworks(
   if (group.length) flush(group[0]!.target, group);
   return out;
 }
+
+/** Newest first, capped. The UI never writes: this is the only read of target_network_events. Bind a target. */
+export const TARGET_HISTORY_LIMIT = 200;
+export const TARGET_HISTORY_SQL = `SELECT id, ip, kind, at, old_country_code, new_country_code, old_asn, new_asn, source
+  FROM target_network_events WHERE target = ? ORDER BY at DESC, id DESC LIMIT ${TARGET_HISTORY_LIMIT}`;
+
+export interface HistoryDbRow {
+  kind: string;
+  source: string;
+  old_country_code: string | null;
+  new_country_code: string | null;
+  old_asn: string | null;
+  new_asn: string | null;
+}
+
+/** One line for the panel. Reconstructed events are inferred from older evidence, so they say so. */
+export function historyText(e: HistoryDbRow): string {
+  const inferred = e.source === 'reconstructed' ? ' (inferred)' : '';
+  if (e.kind === 'geo_changed') {
+    const parts: string[] = [];
+    if (e.old_country_code !== e.new_country_code) parts.push(`country ${e.old_country_code ?? 'none'} → ${e.new_country_code ?? 'none'}`);
+    if (e.old_asn !== e.new_asn) parts.push(`ASN ${e.old_asn ?? 'none'} → ${e.new_asn ?? 'none'}`);
+    return `geo changed: ${parts.join(', ')}${inferred}`;
+  }
+  const label = e.kind === 'ip_added' ? 'added' : e.kind === 'ip_gone' ? 'gone' : e.kind === 'ip_back' ? 'back' : e.kind;
+  return `${label}${inferred}`;
+}
