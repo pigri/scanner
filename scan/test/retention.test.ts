@@ -23,10 +23,16 @@ const count = (raw: Database.Database, table: string, where = '1=1'): number =>
 const runIds = (raw: Database.Database): number[] =>
   (raw.prepare('SELECT id FROM runs ORDER BY id').all() as { id: number }[]).map((r) => r.id);
 
+const mk = (db: Db, tool: string, at: string, finished = true): number => {
+  const id = db.startRun(tool, {}, at);
+  if (finished) db.finishRun(id, { targetsCount: 1, findingsCount: 0, at });
+  return id;
+};
+
 describe('runRetention (per-target rule)', () => {
   it('keeps every row of a target whose runs are all old', () => {
     const db = openDb(':memory:');
-    const r = db.startRun('nmap', {}, OLD);
+    const r = mk(db, 'nmap', OLD);
     port(db, 'only-old.example.com', r, OLD);
     probe(db.raw, 'only-old.example.com', r);
     finding(db.raw, 'only-old.example.com', r);
@@ -42,8 +48,8 @@ describe('runRetention (per-target rule)', () => {
 
   it('prunes a superseded old row and keeps the newer one', () => {
     const db = openDb(':memory:');
-    const r1 = db.startRun('nmap', {}, OLD);
-    const r2 = db.startRun('nmap', {}, RECENT);
+    const r1 = mk(db, 'nmap', OLD);
+    const r2 = mk(db, 'nmap', RECENT);
     port(db, 'a.example.com', r1, OLD);
     port(db, 'a.example.com', r2, RECENT);
     runRetention(db.raw, opts());
@@ -53,8 +59,8 @@ describe('runRetention (per-target rule)', () => {
 
   it('prunes in all four tables', () => {
     const db = openDb(':memory:');
-    const r1 = db.startRun('nmap', {}, OLD);
-    const r2 = db.startRun('nmap', {}, RECENT);
+    const r1 = mk(db, 'nmap', OLD);
+    const r2 = mk(db, 'nmap', RECENT);
     for (const r of [r1, r2]) {
       port(db, 'a.example.com', r, OLD);
       probe(db.raw, 'a.example.com', r);
@@ -69,8 +75,8 @@ describe('runRetention (per-target rule)', () => {
 
   it('keeps the newest old row when the newer run is also old (it is still the latest)', () => {
     const db = openDb(':memory:');
-    const r1 = db.startRun('nmap', {}, OLD);
-    const r2 = db.startRun('nmap', {}, OLD2);
+    const r1 = mk(db, 'nmap', OLD);
+    const r2 = mk(db, 'nmap', OLD2);
     port(db, 'a.example.com', r1, OLD);
     port(db, 'a.example.com', r2, OLD2);
     runRetention(db.raw, opts());
@@ -79,8 +85,8 @@ describe('runRetention (per-target rule)', () => {
 
   it('only a newer run of the same tool supersedes', () => {
     const db = openDb(':memory:');
-    const r1 = db.startRun('nmap', {}, OLD);
-    const r2 = db.startRun('httpx', {}, RECENT);
+    const r1 = mk(db, 'nmap', OLD);
+    const r2 = mk(db, 'httpx', RECENT);
     port(db, 'a.example.com', r1, OLD);
     probe(db.raw, 'a.example.com', r2);
     runRetention(db.raw, opts());
@@ -90,8 +96,8 @@ describe('runRetention (per-target rule)', () => {
 
   it('keeps another target of the same old run, and removes the run only once empty', () => {
     const db = openDb(':memory:');
-    const r1 = db.startRun('nmap', {}, OLD);
-    const r2 = db.startRun('nmap', {}, RECENT);
+    const r1 = mk(db, 'nmap', OLD);
+    const r2 = mk(db, 'nmap', RECENT);
     port(db, 'rescanned.example.com', r1, OLD);
     port(db, 'stale.example.com', r1, OLD);
     port(db, 'rescanned.example.com', r2, RECENT);
@@ -104,10 +110,63 @@ describe('runRetention (per-target rule)', () => {
     ]);
   });
 
+  it('an unfinished newer run does not supersede older complete evidence', () => {
+    const db = openDb(':memory:');
+    const r1 = mk(db, 'nmap', OLD);
+    const r2 = mk(db, 'nmap', RECENT, false);
+    port(db, 'a.example.com', r1, OLD);
+    port(db, 'a.example.com', r2, RECENT);
+    const res = runRetention(db.raw, opts());
+    expect(res.rows.ports).toBe(0);
+    expect(count(db.raw, 'ports')).toBe(2);
+    expect(runIds(db.raw)).toEqual([r1, r2]);
+  });
+
+  it('a finished run still supersedes when an even newer run is unfinished', () => {
+    const db = openDb(':memory:');
+    const r1 = mk(db, 'nmap', OLD);
+    const r2 = mk(db, 'nmap', OLD2);
+    const r3 = mk(db, 'nmap', RECENT, false);
+    port(db, 'a.example.com', r1, OLD);
+    port(db, 'a.example.com', r2, OLD2);
+    port(db, 'a.example.com', r3, RECENT);
+    runRetention(db.raw, opts());
+    expect(db.raw.prepare('SELECT run_id FROM ports ORDER BY id').all()).toEqual([{ run_id: r2 }, { run_id: r3 }]);
+  });
+
+  it('a newer run with rows only in ports does not prune the other tables', () => {
+    const db = openDb(':memory:');
+    const r1 = mk(db, 'nmap', OLD);
+    const r2 = mk(db, 'nmap', RECENT);
+    port(db, 'a.example.com', r1, OLD);
+    probe(db.raw, 'a.example.com', r1);
+    finding(db.raw, 'a.example.com', r1);
+    shot(db.raw, 'a.example.com', r1);
+    port(db, 'a.example.com', r2, RECENT);
+    const res = runRetention(db.raw, opts());
+    expect(res.rows).toEqual({ findings: 0, ports: 1, http_probes: 0, screenshots: 0 });
+    expect(count(db.raw, 'http_probes')).toBe(1);
+    expect(count(db.raw, 'findings')).toBe(1);
+    expect(count(db.raw, 'screenshots')).toBe(1);
+    expect(runIds(db.raw)).toEqual([r1, r2]);
+  });
+
+  it('an unparsable started_at neither aborts the run nor supersedes or gets pruned', () => {
+    const db = openDb(':memory:');
+    const r1 = mk(db, 'nmap', OLD);
+    const bad = mk(db, 'nmap', 'not-a-date');
+    port(db, 'a.example.com', r1, OLD);
+    port(db, 'a.example.com', bad, OLD);
+    port(db, 'b.example.com', bad, OLD);
+    const res = runRetention(db.raw, opts());
+    expect(res.rows.ports).toBe(0);
+    expect(count(db.raw, 'ports')).toBe(3);
+  });
+
   it('breaks a started_at tie by run id', () => {
     const db = openDb(':memory:');
-    const r1 = db.startRun('nmap', {}, OLD);
-    const r2 = db.startRun('nmap', {}, OLD);
+    const r1 = mk(db, 'nmap', OLD);
+    const r2 = mk(db, 'nmap', OLD);
     port(db, 'a.example.com', r1, OLD);
     port(db, 'a.example.com', r2, OLD);
     runRetention(db.raw, opts());
@@ -116,8 +175,8 @@ describe('runRetention (per-target rule)', () => {
 
   it('keeps old rows when their newer run is younger than the cutoff only for other targets', () => {
     const db = openDb(':memory:');
-    const r1 = db.startRun('nmap', {}, OLD);
-    const r2 = db.startRun('nmap', {}, RECENT);
+    const r1 = mk(db, 'nmap', OLD);
+    const r2 = mk(db, 'nmap', RECENT);
     port(db, 'a.example.com', r1, OLD);
     port(db, 'b.example.com', r2, RECENT);
     runRetention(db.raw, opts());
@@ -126,8 +185,8 @@ describe('runRetention (per-target rule)', () => {
 
   it('never prunes a row younger than the cutoff, even if superseded', () => {
     const db = openDb(':memory:');
-    const r1 = db.startRun('nmap', {}, RECENT);
-    const r2 = db.startRun('nmap', {}, '2026-08-25T00:00:00Z');
+    const r1 = mk(db, 'nmap', RECENT);
+    const r2 = mk(db, 'nmap', '2026-08-25T00:00:00Z');
     port(db, 'a.example.com', r1, RECENT);
     port(db, 'a.example.com', r2, '2026-08-25T00:00:00Z');
     runRetention(db.raw, opts());
@@ -136,7 +195,7 @@ describe('runRetention (per-target rule)', () => {
 
   it('keeps rows with no run', () => {
     const db = openDb(':memory:');
-    const r2 = db.startRun('nmap', {}, RECENT);
+    const r2 = mk(db, 'nmap', RECENT);
     probe(db.raw, 'a.example.com', null);
     port(db, 'a.example.com', r2, RECENT);
     runRetention(db.raw, opts());
@@ -153,8 +212,8 @@ describe('runRetention (per-target rule)', () => {
   ];
   it.each(referencing)('keeps a run that %s still references, and leaves that table alone', (table, insert) => {
     const db = openDb(':memory:');
-    const r1 = db.startRun('nmap', {}, OLD);
-    const r2 = db.startRun('nmap', {}, RECENT);
+    const r1 = mk(db, 'nmap', OLD);
+    const r2 = mk(db, 'nmap', RECENT);
     port(db, 'a.example.com', r1, OLD);
     port(db, 'a.example.com', r2, RECENT);
     insert(db.raw, r1);
@@ -167,7 +226,7 @@ describe('runRetention (per-target rule)', () => {
 
   it('does not touch runs that never had prunable rows (empty marker runs)', () => {
     const db = openDb(':memory:');
-    const marker = db.startRun('version-match-sweep', { snapshotAt: 'x' }, OLD);
+    const marker = mk(db, 'version-match-sweep', OLD);
     const res = runRetention(db.raw, opts());
     expect(res.runs).toEqual([]);
     expect(runIds(db.raw)).toEqual([marker]);
@@ -176,8 +235,8 @@ describe('runRetention (per-target rule)', () => {
   it('dry-run changes nothing but reports the same plan as apply', () => {
     const build = () => {
       const db = openDb(':memory:');
-      const r1 = db.startRun('nmap', {}, OLD);
-      const r2 = db.startRun('nmap', {}, RECENT);
+      const r1 = mk(db, 'nmap', OLD);
+      const r2 = mk(db, 'nmap', RECENT);
       port(db, 'a.example.com', r1, OLD);
       port(db, 'a.example.com', r2, RECENT);
       finding(db.raw, 'a.example.com', r1);
@@ -198,8 +257,8 @@ describe('runRetention (per-target rule)', () => {
 
   it('deletes in bounded chunks and still reaches every row', () => {
     const db = openDb(':memory:');
-    const r1 = db.startRun('nmap', {}, OLD);
-    const r2 = db.startRun('nmap', {}, RECENT);
+    const r1 = mk(db, 'nmap', OLD);
+    const r2 = mk(db, 'nmap', RECENT);
     for (let i = 0; i < 7; i++) port(db, 'a.example.com', r1, OLD, 1000 + i);
     port(db, 'a.example.com', r2, RECENT);
     const res = runRetention(db.raw, opts({ chunkSize: 2 }));

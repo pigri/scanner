@@ -56,7 +56,7 @@ function usage(): void {
 
 Prune superseded rows of findings, ports, http_probes and screenshots. A row is
 pruned only when its run is older than --older-than days AND the same target has
-a newer run of the same tool. A target's latest evidence per tool is never
+a newer, finished run of the same tool with rows in the same table. A target's latest evidence per tool is never
 pruned, however old. A run and its output directory are removed only once no
 row in any table references the run. Other tables are never touched.
 
@@ -86,26 +86,29 @@ function planRows(raw: Database.Database, cutoffIso: string): void {
   raw.exec(`
     DROP TABLE IF EXISTS temp.ret_latest;
     DROP TABLE IF EXISTS temp.ret_rows;
-    CREATE TEMP TABLE ret_latest(target TEXT NOT NULL, tool TEXT NOT NULL, ts REAL NOT NULL, run_id INTEGER NOT NULL, PRIMARY KEY(target, tool)) WITHOUT ROWID;
+    CREATE TEMP TABLE ret_latest(tbl TEXT NOT NULL, target TEXT NOT NULL, tool TEXT NOT NULL, ts REAL NOT NULL, run_id INTEGER NOT NULL, PRIMARY KEY(tbl, target, tool)) WITHOUT ROWID;
     CREATE TEMP TABLE ret_rows(tbl TEXT NOT NULL, id INTEGER NOT NULL, run_id INTEGER NOT NULL, PRIMARY KEY(tbl, id)) WITHOUT ROWID;
   `);
-  const pairs = PRUNABLE_TABLES.map((t) => `SELECT DISTINCT target, run_id FROM ${t} WHERE run_id IS NOT NULL`).join(' UNION ');
-  // Latest run per (target, tool) over the evidence tables; newer = later started_at, then higher id.
-  raw.exec(`
-    INSERT INTO temp.ret_latest(target, tool, ts, run_id)
-    SELECT target, tool, ts, run_id FROM (
-      SELECT x.target AS target, r.tool AS tool, ${jd('r.started_at')} AS ts, r.id AS run_id,
-             ROW_NUMBER() OVER (PARTITION BY x.target, r.tool ORDER BY ${jd('r.started_at')} DESC, r.id DESC) AS rn
-      FROM (${pairs}) x JOIN runs r ON r.id = x.run_id
-    ) WHERE rn = 1
-  `);
+  // Latest superseding run per (table, target, tool): newer = later started_at, then higher id.
+  // Only a finished run with a parseable started_at may supersede, so a worker killed
+  // mid-run never displaces the last complete evidence.
   for (const t of PRUNABLE_TABLES) {
+    raw.exec(`
+      INSERT INTO temp.ret_latest(tbl, target, tool, ts, run_id)
+      SELECT '${t}', target, tool, ts, run_id FROM (
+        SELECT x.target AS target, r.tool AS tool, ${jd('r.started_at')} AS ts, r.id AS run_id,
+               ROW_NUMBER() OVER (PARTITION BY x.target, r.tool ORDER BY ${jd('r.started_at')} DESC, r.id DESC) AS rn
+        FROM (SELECT DISTINCT target, run_id FROM ${t} WHERE run_id IS NOT NULL) x
+        JOIN runs r ON r.id = x.run_id
+        WHERE r.finished_at IS NOT NULL AND ${jd('r.started_at')} IS NOT NULL
+      ) WHERE rn = 1
+    `);
     raw.prepare(`
       INSERT INTO temp.ret_rows(tbl, id, run_id)
       SELECT '${t}', t.id, t.run_id
       FROM ${t} t
       JOIN runs r ON r.id = t.run_id
-      JOIN temp.ret_latest l ON l.target = t.target AND l.tool = r.tool
+      JOIN temp.ret_latest l ON l.tbl = '${t}' AND l.target = t.target AND l.tool = r.tool
       WHERE ${jd('r.started_at')} < ${jd('?')}
         AND (${jd('r.started_at')}, r.id) < (l.ts, l.run_id)
     `).run(cutoffIso);
@@ -187,7 +190,7 @@ function main(): void {
   db.raw.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
   const result = runRetention(db.raw, { olderThanDays: opts.olderThanDays, now: new Date().toISOString(), apply: !opts.dryRun });
 
-  console.error(`rows ${opts.dryRun ? 'to prune' : 'pruned'} (run older than ${opts.olderThanDays}d, target has a newer run of the same tool):`);
+  console.error(`rows ${opts.dryRun ? 'to prune' : 'pruned'} (run older than ${opts.olderThanDays}d, target has a newer finished run of the same tool and table):`);
   for (const t of PRUNABLE_TABLES) console.error(`  ${t.padEnd(12)} ${result.rows[t]}`);
   console.error(`runs left empty: ${result.runs.length}`);
   let removed = 0;

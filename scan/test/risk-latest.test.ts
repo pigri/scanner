@@ -275,6 +275,7 @@ describe('runRetention in WAL with a competing writer', () => {
     const db = openDb(file);
     const r1 = db.startRun('nmap', {}, '2026-01-01T00:00:00Z');
     const r2 = db.startRun('nmap', {}, '2026-01-02T00:00:00Z');
+    db.finishRun(r2, { targetsCount: 1, findingsCount: 0, at: '2026-01-02T00:00:01Z' });
     const port = { target: 'a.example.com', ip: null, port: 80, protocol: 'tcp', service: null, product: null, version: null, tunnel: null, extrainfo: null };
     db.insertPort(port, '2026-01-01T00:00:00Z', r1);
     db.insertPort(port, '2026-01-02T00:00:00Z', r2);

@@ -220,7 +220,7 @@ npm run retention -- --older-than 90 --apply   # delete
 - `--older-than N` — only rows of runs older than N days are candidates (default: 90)
 - `--apply` — actually delete (default is dry-run)
 
-A row of `findings`, `ports`, `http_probes` or `screenshots` is pruned only when its run is older than N days **and** the same target has a newer run of the same tool (later `started_at`, ties by run id). A target that was not rescanned keeps all its rows. Deletes run in transactions of 1000 rows with a 60 s busy timeout, so live workers are not blocked for long.
+A row of `findings`, `ports`, `http_probes` or `screenshots` is pruned only when its run is older than N days **and** the same target has a newer, finished run of the same tool with rows in the same table (later `started_at`, ties by run id). A target that was not rescanned keeps all its rows. Deletes run in transactions of 1000 rows with a 60 s busy timeout, so live workers are not blocked for long.
 
 A run row and its `runs/<id>/` directory are removed only when no row in any table that references `runs` is left (so `risk_scores`, `scan_queue`, `dns_records` and the others keep their runs alive). Those tables are never modified. `--keep-min` is gone: the per-target rule replaces it.
 

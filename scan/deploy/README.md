@@ -188,7 +188,7 @@ With the workers running as daemons, these **systemd timers** feed them:
   rollup fails the unit fails, and the next firing retries only the rollup.
 - **`retention.timer`** (weekly, Sun 05:00): `npm run retention -- --older-than 90
   --apply` prunes rows of `findings`, `ports`, `http_probes` and `screenshots`
-  whose run is older than 90 days AND whose target has a newer run of the same
+  whose run is older than 90 days AND whose target has a newer finished run of the same
   tool, so a target not rescanned in 90 days keeps its latest evidence. A run
   and its `runs/<id>/` dir go only when no table references it any more.
   **Dry-run first** and read the counts before enabling the timer:
