@@ -196,6 +196,43 @@ describe('netinfo events: ip_gone and ip_back (--targets in a worker batch)', ()
   });
 });
 
+describe('netinfo events: gone and back alongside reconstructed events', () => {
+  const recon = (db: Db, kind: string, at: string) =>
+    db.raw.prepare("INSERT INTO target_network_events (target, ip, kind, at, source) VALUES ('a.example', '192.0.2.10', ?, ?, 'reconstructed')").run(kind, at);
+
+  it('writes no second ip_gone when the latest event, from either source, is already a gone', () => {
+    const db = openDb(':memory:');
+    port(db, 'a.example', '192.0.2.10', T0);
+    runNetinfo({ db, targets: ['a.example'], geo: null, now: NOW });
+    recon(db, 'ip_gone', T1);
+    inProgress(db, 'a.example', T2);
+    runNetinfo({ db, targets: ['a.example'], geo: null, now: LATER });
+    expect(kinds(db)).toEqual([`ip_added@${T0}`, `ip_gone@${T1}`]);
+  });
+
+  it('writes ip_back when the latest event is a reconstructed gone and the ip is seen again', () => {
+    const db = openDb(':memory:');
+    port(db, 'a.example', '192.0.2.10', T0);
+    runNetinfo({ db, targets: ['a.example'], geo: null, now: NOW });
+    recon(db, 'ip_gone', T1);
+    port(db, 'a.example', '192.0.2.10', '2026-11-09T00:05:00.000Z');
+    inProgress(db, 'a.example', T2);
+    runNetinfo({ db, targets: ['a.example'], geo: null, now: LATER });
+    expect(kinds(db)).toEqual([`ip_added@${T0}`, `ip_gone@${T1}`, `ip_back@${T2}`]);
+  });
+
+  it('writes no ip_back when the latest event, from either source, is a present one', () => {
+    const db = openDb(':memory:');
+    port(db, 'a.example', '192.0.2.10', T0);
+    runNetinfo({ db, targets: ['a.example'], geo: null, now: NOW });
+    recon(db, 'ip_back', T1);
+    port(db, 'a.example', '192.0.2.10', '2026-11-09T00:05:00.000Z');
+    inProgress(db, 'a.example', T2);
+    runNetinfo({ db, targets: ['a.example'], geo: null, now: LATER });
+    expect(kinds(db)).toEqual([`ip_added@${T0}`, `ip_back@${T1}`]);
+  });
+});
+
 describe('netinfo events: writes', () => {
   it('writes events in the same transaction as the upsert', () => {
     const db = openDb(':memory:');

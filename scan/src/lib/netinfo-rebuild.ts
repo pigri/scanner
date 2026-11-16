@@ -73,8 +73,13 @@ const DNS_IPS_SQL = `SELECT value ip, seen_at f, COALESCE(last_seen, seen_at) l 
 const QUEUE_SQL = `SELECT started_at FROM scan_queue WHERE target = ? AND status = 'done' AND started_at IS NOT NULL`;
 const UNTRACKED_SQL = 'SELECT EXISTS(SELECT 1 FROM dns_records WHERE target = ? AND last_seen IS NULL) AS n';
 const GEO_SQL = 'SELECT ip, asn, country_code FROM target_network WHERE target = ?';
-const SCAN_FIRST_SQL = `SELECT ip, MIN(at) AS at FROM target_network_events
-  WHERE target = ? AND source = 'scan' AND kind IN ('ip_added', 'ip_gone', 'ip_back') GROUP BY ip`;
+const NULL_IP_SQL = `SELECT run_id FROM ports WHERE target = @t AND (ip IS NULL OR ip = '') AND run_id IS NOT NULL
+  UNION SELECT run_id FROM http_probes WHERE target = @t AND (ip IS NULL OR ip = '') AND run_id IS NOT NULL`;
+// The earliest scan presence event per ip; id breaks a tie on the same instant.
+const SCAN_FIRST_SQL = `SELECT ip, kind, at FROM target_network_events e
+  WHERE target = ? AND source = 'scan' AND kind IN ('ip_added', 'ip_gone', 'ip_back')
+  AND id = (SELECT id FROM target_network_events WHERE target = e.target AND ip = e.ip AND source = 'scan'
+            AND kind IN ('ip_added', 'ip_gone', 'ip_back') ORDER BY at, id LIMIT 1)`;
 const INSERT_SQL = `INSERT OR IGNORE INTO target_network_events
   (target, ip, kind, at, old_country_code, new_country_code, old_asn, new_asn, run_id, source)
   VALUES (@target, @ip, @kind, @at, NULL, @new_country_code, NULL, @new_asn, @run_id, 'reconstructed')`;
@@ -104,6 +109,7 @@ export function rebuildHistory(opts: RebuildOpts): RebuildResult {
   const queueStmt = db.raw.prepare(QUEUE_SQL);
   const untrackedStmt = db.raw.prepare(UNTRACKED_SQL);
   const geoStmt = db.raw.prepare(GEO_SQL);
+  const nullIpStmt = db.raw.prepare(NULL_IP_SQL);
   const scanFirst = db.raw.prepare(SCAN_FIRST_SQL);
   const insert = db.raw.prepare(INSERT_SQL);
   const trackingStart = (db.raw.prepare('SELECT MIN(last_seen) AS t FROM dns_records').get() as { t: string | null }).t;
@@ -116,16 +122,31 @@ export function rebuildHistory(opts: RebuildOpts): RebuildResult {
     const batch = pending;
     pending = [];
     db.raw.transaction(() => {
-      const firstScan = new Map<string, Map<string, number>>();
+      const firstScan = new Map<string, Map<string, { at: number; kind: string }>>();
+      const groups = new Map<string, Proposed[]>();
       for (const e of batch) {
         let m = firstScan.get(e.target);
         if (!m) {
-          m = new Map((scanFirst.all(e.target) as { ip: string; at: string }[]).map((r) => [r.ip, Date.parse(r.at)]));
+          m = new Map((scanFirst.all(e.target) as { ip: string; kind: string; at: string }[]).map((r) => [r.ip, { at: Date.parse(r.at), kind: r.kind }]));
           firstScan.set(e.target, m);
         }
         const cut = m.get(e.ip);
-        if (cut !== undefined && Date.parse(e.at) >= cut) continue;
-        result.inserted += insert.run({ ...e, run_id: runId }).changes;
+        if (cut !== undefined && Date.parse(e.at) >= cut.at) continue;
+        const key = `${e.target}\u0000${e.ip}`;
+        let g = groups.get(key);
+        if (!g) groups.set(key, (g = []));
+        g.push(e);
+      }
+      for (const g of groups.values()) {
+        // Keep the merged sequence alternating: drop trailing transitions the first scan event cannot follow.
+        const first = firstScan.get(g[0]!.target)!.get(g[0]!.ip);
+        if (first) {
+          // ip_gone needs the ip present before it, ip_back needs it absent. ip_added has no precondition.
+          const ok = (last: Proposed | undefined): boolean =>
+            first.kind === 'ip_gone' ? !last || last.kind !== 'ip_gone' : first.kind === 'ip_back' ? !!last && last.kind === 'ip_gone' : true;
+          while (g.length > 0 && !ok(g[g.length - 1])) g.pop();
+        }
+        for (const e of g) result.inserted += insert.run({ ...e, run_id: runId }).changes;
       }
     }).immediate();
   };
@@ -164,6 +185,13 @@ export function rebuildHistory(opts: RebuildOpts): RebuildResult {
     const self = normalizeIp(target);
     if (self) for (let i = 0; i < windows.length; i++) mark(self.ip, i);
 
+    // Windows that hold an answer with no ip: they may or may not have seen any ip.
+    const inconclusive = new Set<number>();
+    for (const r of nullIpStmt.all({ t: target }) as { run_id: number }[]) {
+      const w = byRun.get(r.run_id);
+      if (w !== undefined) inconclusive.add(w);
+    }
+
     const untracked = (untrackedStmt.get(target) as { n: number }).n === 1;
     const geo = new Map((geoStmt.all(target) as { ip: string; asn: string | null; country_code: string | null }[]).map((g) => [g.ip, g]));
 
@@ -180,7 +208,7 @@ export function rebuildHistory(opts: RebuildOpts): RebuildResult {
           if (state === 'never') push('ip_added');
           else if (state === 'gone') push('ip_back');
           state = 'present';
-        } else if (state === 'present' && scanStatus(NEVER, at, untracked, trackingStart) === 'no') {
+        } else if (state === 'present' && !inconclusive.has(i) && scanStatus(NEVER, at, untracked, trackingStart) === 'no') {
           push('ip_gone');
           state = 'gone';
         }
