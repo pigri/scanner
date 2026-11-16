@@ -360,3 +360,154 @@ describe('claim-ownership migration', () => {
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
 });
+
+describe('history events of a discarded batch', () => {
+  const T = (m: number) => `2026-08-19T12:${String(m).padStart(2, '0')}:00Z`;
+  const AT = T(1);
+  function ins(target: string, ip: string, kind: string, at: string, source = 'scan'): void {
+    db.raw.prepare(
+      'INSERT INTO target_network_events (target, ip, kind, at, source) VALUES (?, ?, ?, ?, ?)',
+    ).run(target, ip, kind, at, source);
+  }
+  const events = (): string[] =>
+    (db.raw.prepare('SELECT target, ip, kind, at, source FROM target_network_events ORDER BY id').all() as
+      { target: string; ip: string; kind: string; at: string; source: string }[])
+      .map((e) => `${e.target}|${e.ip}|${e.kind}|${e.at}|${e.source}`);
+
+  // Claimed row for example.com started at AT, with a mix of events around it.
+  function setup(): number {
+    db.enqueueMany([{ target: 'example.com', priority: 2 }, { target: 'example.org', priority: 1 }], T(0));
+    const [a] = db.scanQueue.claimBatch(1, AT, 'w1');
+    ins('example.com', '192.0.2.1', 'ip_gone', AT);
+    ins('example.com', '192.0.2.2', 'ip_back', AT);
+    ins('example.com', '192.0.2.3', 'ip_added', AT);
+    ins('example.com', '192.0.2.4', 'ip_gone', AT, 'reconstructed');
+    ins('example.com', '192.0.2.5', 'ip_gone', T(2));
+    ins('example.org', '198.51.100.1', 'ip_gone', AT);
+    return a!.id;
+  }
+  const kept = [
+    'example.com|192.0.2.3|ip_added|' + AT + '|scan',
+    'example.com|192.0.2.4|ip_gone|' + AT + '|reconstructed',
+    'example.com|192.0.2.5|ip_gone|' + T(2) + '|scan',
+    'example.org|198.51.100.1|ip_gone|' + AT + '|scan',
+  ];
+
+  it('release drops only the scan gone/back events at the batch start', () => {
+    const id = setup();
+    expect(db.scanQueue.release([id], 'w1')).toBe(1);
+    expect(events()).toEqual(kept);
+  });
+
+  it('markFailed drops them', () => {
+    const id = setup();
+    db.scanQueue.markFailed(id, 'boom', T(5), 'w1');
+    expect(events()).toEqual(kept);
+  });
+
+  it('reapStale drops them on the requeue path', () => {
+    setup();
+    const r = db.scanQueue.reapStale({ atIso: T(30), staleBeforeIso: T(15), legacyBeforeIso: T(0) });
+    expect(r).toEqual({ requeued: 1, failed: 0 });
+    expect(events()).toEqual(kept);
+  });
+
+  it('reapStale drops them on the fail path', () => {
+    setup();
+    const r = db.scanQueue.reapStale({ atIso: T(30), staleBeforeIso: T(15), legacyBeforeIso: T(0), maxAttempts: 1 });
+    expect(r).toEqual({ requeued: 0, failed: 1 });
+    expect(events()).toEqual(kept);
+  });
+
+  it('markDone keeps every event', () => {
+    const id = setup();
+    const before = events();
+    db.scanQueue.markDone(id, null, T(5), 'w1');
+    expect(events()).toEqual(before);
+  });
+
+  it('a release by another worker keeps every event', () => {
+    const id = setup();
+    const before = events();
+    expect(db.scanQueue.release([id], 'w2')).toBe(0);
+    expect(events()).toEqual(before);
+  });
+
+  it('a failed mark by another worker keeps every event', () => {
+    const id = setup();
+    const before = events();
+    db.scanQueue.markFailed(id, 'late', T(5), 'w2');
+    expect(events()).toEqual(before);
+  });
+
+  it('a release of a row that is not in progress keeps every event', () => {
+    const id = setup();
+    db.scanQueue.markDone(id, null, T(5), 'w1');
+    const before = events();
+    expect(db.scanQueue.release([id], 'w1')).toBe(0);
+    expect(events()).toEqual(before);
+  });
+
+  it('reapStale with an ownerId drops the events of every reaped row and only those', () => {
+    const OLD = T(2);
+    const FRESH = T(20);
+    db.enqueueMany([
+      { target: 'example.com', priority: 4 },
+      { target: 'example.net', priority: 3 },
+      { target: 'example.org', priority: 2 },
+      { target: 'example.edu', priority: 1 },
+    ], T(0));
+    db.scanQueue.claimBatch(1, FRESH, 'w1'); // owner, fresh heartbeat
+    db.scanQueue.claimBatch(1, FRESH, 'w2'); // other worker, fresh heartbeat
+    db.scanQueue.claimBatch(1, OLD, 'w3'); // stale
+    db.scanQueue.claimBatch(1, OLD, 'w2'); // stale
+    for (const [target, ip, at] of [
+      ['example.com', '192.0.2.1', FRESH],
+      ['example.net', '192.0.2.2', FRESH],
+      ['example.org', '192.0.2.3', OLD],
+      ['example.edu', '192.0.2.4', OLD],
+    ] as const) {
+      ins(target, ip, 'ip_gone', at);
+      ins(target, ip, 'ip_back', at);
+    }
+    const r = db.scanQueue.reapStale({ atIso: T(30), staleBeforeIso: T(15), legacyBeforeIso: T(0), ownerId: 'w1' });
+    expect(r).toEqual({ requeued: 3, failed: 0 });
+    expect(events()).toEqual([
+      'example.net|192.0.2.2|ip_gone|' + FRESH + '|scan',
+      'example.net|192.0.2.2|ip_back|' + FRESH + '|scan',
+    ]);
+  });
+
+  describe('a claim with no worker id', () => {
+    function setupNull(): number {
+      db.enqueueMany([{ target: 'example.com', priority: 1 }], T(0));
+      const [a] = db.scanQueue.claimBatch(1, AT);
+      expect(db.raw.prepare('SELECT claimed_by FROM scan_queue WHERE id=?').get(a!.id)).toEqual({ claimed_by: null });
+      ins('example.com', '192.0.2.1', 'ip_gone', AT);
+      ins('example.com', '192.0.2.2', 'ip_back', AT);
+      ins('example.com', '192.0.2.3', 'ip_added', AT);
+      return a!.id;
+    }
+    const keptNull = ['example.com|192.0.2.3|ip_added|' + AT + '|scan'];
+
+    it('markFailed drops the events', () => {
+      const id = setupNull();
+      db.scanQueue.markFailed(id, 'boom', T(5));
+      expect(events()).toEqual(keptNull);
+    });
+
+    it('release drops the events', () => {
+      const id = setupNull();
+      expect(db.scanQueue.release([id])).toBe(1);
+      expect(events()).toEqual(keptNull);
+    });
+  });
+
+  it('report_queue has no hook: release works and events stay', () => {
+    db.reportQueue.enqueueMany([{ target: 'example.com', priority: 1 }], T(0));
+    const [r] = db.reportQueue.claimBatch(1, AT, 'w1');
+    ins('example.com', '192.0.2.1', 'ip_gone', AT);
+    expect(db.reportQueue.release([r!.id], 'w1')).toBe(1);
+    expect(events()).toEqual(['example.com|192.0.2.1|ip_gone|' + AT + '|scan']);
+  });
+});

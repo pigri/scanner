@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { backfillRiskLatest } from './risk-latest.js';
 import { decideHostStates, type HostStateRow } from './host-state.js';
+import { retractBatchEvents } from './netinfo.js';
 import { makeQueue, type QueueEntry, type ClaimedRow, type QueueStats, type QueueOps, type QueueFilter } from './queue.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -301,7 +302,7 @@ export function openDb(dbPath: string, options: OpenDbOptions = {}): Db {
     "SELECT COALESCE(severity, 'unknown') AS severity, COUNT(*) AS n FROM findings GROUP BY severity ORDER BY n DESC"
   );
 
-  const scanQueue = makeQueue(raw, 'scan_queue', options.scanQueueFilter);
+  const scanQueue = makeQueue(raw, 'scan_queue', options.scanQueueFilter, { onDiscard: retractBatchEvents(raw) });
   const reportQueue = makeQueue(raw, 'report_queue');
 
   return {

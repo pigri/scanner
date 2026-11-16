@@ -1,3 +1,4 @@
+import type Database from 'better-sqlite3';
 import type { Db } from './db.js';
 import type { GeoLookup, GeoRow } from './geoip.js';
 import { classifyIp, normalizeIp, type IpClass } from './ip.js';
@@ -269,4 +270,15 @@ function write(opts: NetinfoOpts, out: NetRow[], result: NetinfoResult): void {
     }).immediate();
     result.rowsWritten += slice.length;
   }
+}
+
+/**
+ * Queue hook: the history events a batch wrote at its start are void once the batch
+ * is released, failed or reaped, because only done scans count.
+ */
+export function retractBatchEvents(raw: Database.Database): (rows: readonly { target: string; started_at: string }[]) => void {
+  const del = raw.prepare(
+    "DELETE FROM target_network_events WHERE target = ? AND at = ? AND source = 'scan' AND kind IN ('ip_gone', 'ip_back')",
+  );
+  return (rows) => { for (const r of rows) del.run(r.target, r.started_at); };
 }
