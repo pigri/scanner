@@ -130,6 +130,15 @@ export function scanStatus(
   return !Number.isFinite(track) || s < track ? 'unknown' : 'no';
 }
 
+/**
+ * `scanStart` when the target has a done scan and none of its IPs was 'yes' or
+ * 'unknown' in it. A target with no IPs at all has no evidence either way: null.
+ */
+export function unreachableSince(statuses: readonly ScanStatus[], scanStart: string | null): string | null {
+  if (scanStart === null || statuses.length === 0) return null;
+  return statuses.every((st) => st === 'no') ? scanStart : null;
+}
+
 function parsePtr(json: string | null): string[] | null {
   if (json === null) return null;
   try {
@@ -189,6 +198,8 @@ export interface ListScanContext {
 export interface NetworkSummary {
   countries: string[];
   asns: string[];
+  /** Start of the latest done scan when it reached none of the target's IPs, else null. */
+  unreachableSince: string | null;
 }
 
 /**
@@ -204,10 +215,10 @@ export function summarizeNetworks(
   const flush = (target: string, group: ListNetworkRow[]): void => {
     const old = markCurrent(group);
     const untracked = ctx?.untracked.has(target) ?? false;
-    const current = group.map((r, i) => {
-      const st = ctx ? scanStatus(r.last_seen, r.started_at ?? null, untracked, ctx.trackingStart) : 'none';
-      return st === 'none' ? old[i]! : st !== 'no';
-    });
+    const statuses = group.map((r) =>
+      ctx ? scanStatus(r.last_seen, r.started_at ?? null, untracked, ctx.trackingStart) : ('none' as const),
+    );
+    const current = group.map((_, i) => (statuses[i] === 'none' ? old[i]! : statuses[i] !== 'no'));
     const countries = new Set<string>();
     const asns = new Set<string>();
     group.forEach((r, i) => {
@@ -216,7 +227,11 @@ export function summarizeNetworks(
       if (c) countries.add(c);
       if (r.asn) asns.add(r.asn);
     });
-    out.set(target, { countries: [...countries].sort(), asns: [...asns].sort() });
+    out.set(target, {
+      countries: [...countries].sort(),
+      asns: [...asns].sort(),
+      unreachableSince: unreachableSince(statuses, group[0]!.started_at ?? null),
+    });
   };
   let group: ListNetworkRow[] = [];
   for (const r of rows) {

@@ -27,6 +27,7 @@ import {
   TARGET_ANSWERED_DNS_NO_LAST_SEEN_SQL,
   DNS_TRACKING_SQL,
   summarizeNetworks,
+  unreachableSince,
   DNS_UNTRACKED_TARGETS_SQL,
   DNS_TRACKING_START_SQL,
   type ListScanContext,
@@ -193,6 +194,7 @@ interface TargetRow {
   active: number;
   countries: string[];
   asns: string[];
+  unreachableSince: string | null;
 }
 function listScanContext(): ListScanContext {
   if (!tableExists(scan, 'dns_records')) return { untracked: new Set(), trackingStart: null };
@@ -226,6 +228,7 @@ function targetRows(): TargetRow[] {
     const n = nets.get(r.target);
     r.countries = n?.countries ?? [];
     r.asns = n?.asns ?? [];
+    r.unreachableSince = n?.unreachableSince ?? null;
   }
   targetsCache = { rows, at: now };
   return rows;
@@ -441,6 +444,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
       org: q.get('org') || '',
       country: q.get('country') || '',
       asn: q.get('asn') || '',
+      reachable: q.get('reachable') || '',
       archived: q.get('archived') || '',
       sort: q.get('sort') || 'score',
       offset: clampInt(q.get('offset'), 0, 0, 1e9),
@@ -572,6 +576,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
           trackingStart: tracking.tracking_start,
         })
       : [];
+    const unreachable = unreachableSince(network.map((n) => n.scanStatus), doneStart);
     const history = tableExists(scan, 'target_network_events')
       ? (scan.prepare(TARGET_HISTORY_SQL).all(t) as (HistoryDbRow & { id: number })[]).map((e) => ({
           ...e,
@@ -594,6 +599,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
       certs,
       dns,
       network,
+      unreachableSince: unreachable,
       history,
       latestScan,
       lastAnswered,
@@ -1485,10 +1491,10 @@ async function renderOverview(){
   overviewTimer=setTimeout(()=>{if(current==='overview'&&!document.hidden)renderOverview();},30000);
 }
 
-const T_DEFAULT={q:'',severities:[],cve:'',org:'',country:'',asn:'',archived:'',minScore:'',maxScore:'',sort:'score',offset:0,limit:100};
+const T_DEFAULT={q:'',severities:[],cve:'',org:'',country:'',asn:'',reachable:'',archived:'',minScore:'',maxScore:'',sort:'score',offset:0,limit:100};
 let tState={...T_DEFAULT};
 async function renderTargets(){
-  const d=await api('targets',{q:tState.q,severity:tState.severities.join(','),cve:tState.cve,org:tState.org,country:tState.country,asn:tState.asn,archived:tState.archived,minScore:tState.minScore,maxScore:tState.maxScore,sort:tState.sort,offset:tState.offset,limit:tState.limit});
+  const d=await api('targets',{q:tState.q,severity:tState.severities.join(','),cve:tState.cve,org:tState.org,country:tState.country,asn:tState.asn,reachable:tState.reachable,archived:tState.archived,minScore:tState.minScore,maxScore:tState.maxScore,sort:tState.sort,offset:tState.offset,limit:tState.limit});
   // severity facet chips — targets having ≥1 finding of that severity
   const sevChips=el('div',{class:'toolbar'},el('span',{class:'muted'},'hosts with:'),...SEV.map(s=>{
     const on=tState.severities.includes(s);
@@ -1505,6 +1511,7 @@ async function renderTargets(){
   const orgSel=fsel(tState.org,[{value:'',label:'org: any'},...(d.orgs||[]).map(o=>({value:o.org,label:o.org+' ('+num(o.c)+')'}))],v=>{tState.org=v;tState.offset=0;renderTargets();});
   const countrySel=fsel(tState.country,[{value:'',label:'country: any'},...(d.countries||[]).map(o=>({value:o.value,label:o.value+' ('+num(o.c)+')'}))],v=>{tState.country=v;tState.offset=0;renderTargets();});
   const asnSel=fsel(tState.asn,[{value:'',label:'ASN: any'},...(d.asns||[]).map(o=>({value:o.value,label:o.value+' ('+num(o.c)+')'}))],v=>{tState.asn=v;tState.offset=0;renderTargets();});
+  const reachSel=fsel(tState.reachable,[{value:'',label:'reach: any'},{value:'reachable',label:'reachable'},{value:'unreachable',label:'unreachable'}],v=>{tState.reachable=v;tState.offset=0;renderTargets();});
   const sortSel=fsel(tState.sort,[{value:'score',label:'sort: risk score'},{value:'critical',label:'sort: critical'},{value:'high',label:'sort: high'},{value:'findings',label:'sort: findings'},{value:'cves',label:'sort: CVEs'},{value:'versionMatch',label:'sort: version-match CVEs'},{value:'updated',label:'sort: updated'},{value:'created',label:'sort: created'},{value:'target',label:'sort: name'}],v=>{tState.sort=v;tState.offset=0;renderTargets();});
   const minS=el('input',{type:'number',min:'0',max:'100',placeholder:'min',value:tState.minScore,style:'width:70px',title:'min risk score'});
   minS.addEventListener('change',()=>{tState.minScore=minS.value;tState.offset=0;renderTargets();});
@@ -1512,10 +1519,10 @@ async function renderTargets(){
   maxS.addEventListener('change',()=>{tState.maxScore=maxS.value;tState.offset=0;renderTargets();});
   const search=el('input',{type:'search',placeholder:'filter target name…',value:tState.q});
   search.addEventListener('input',debounce(()=>{tState.q=search.value;tState.offset=0;renderTargets();},250));
-  const active=tState.severities.length||tState.cve||tState.org||tState.country||tState.asn||tState.archived||tState.minScore||tState.maxScore||tState.q||tState.sort!=='score';
+  const active=tState.severities.length||tState.cve||tState.org||tState.country||tState.asn||tState.reachable||tState.archived||tState.minScore||tState.maxScore||tState.q||tState.sort!=='score';
   const clear=el('button',{class:'pillbtn',onclick:()=>{tState={...T_DEFAULT,severities:[]};renderTargets();}},'clear'+(active?' ✕':''));
-  const filterRow=el('div',{class:'toolbar'},cveSel,orgSel,countrySel,asnSel,sortSel,el('span',{class:'muted'},'score'),minS,el('span',{class:'muted'},'–'),maxS,search,clear);
-  const rows=d.rows.map(r=>[el('span',{},link(r.target),r.active===0?el('span',{class:'pill muted',style:'margin-left:6px'},'archived'):''),el('span',{class:'mono muted'},esc(r.organization)),el('span',{class:'mono'},(r.countries||[]).join(', ')),el('span',{class:'mono'},(r.asns||[]).join(', ')),el('span',{class:'score'},r.score),
+  const filterRow=el('div',{class:'toolbar'},cveSel,orgSel,countrySel,asnSel,reachSel,sortSel,el('span',{class:'muted'},'score'),minS,el('span',{class:'muted'},'–'),maxS,search,clear);
+  const rows=d.rows.map(r=>[el('span',{},link(r.target),r.active===0?el('span',{class:'pill muted',style:'margin-left:6px'},'archived'):'',r.unreachableSince?el('span',{class:'pill muted',style:'margin-left:6px',title:'the latest scan reached none of its IPs; the score is unchanged'},'unreachable since '+r.unreachableSince.slice(0,10)):''),el('span',{class:'mono muted'},esc(r.organization)),el('span',{class:'mono'},(r.countries||[]).join(', ')),el('span',{class:'mono'},(r.asns||[]).join(', ')),el('span',{class:'score'},r.score),
     r.critical?el('span',{class:'pill sev-critical'},r.critical):'',
     r.high?el('span',{class:'pill sev-high'},r.high):'',
     r.medium?el('span',{class:'pill sev-medium'},r.medium):'',
@@ -1536,6 +1543,7 @@ async function renderTarget(t){
   const head=el('div',{class:'panel'},back,glink,el('h2',{},'Target'),el('code',{class:'big'},d.target),
     el('div',{class:'toolbar',style:'margin-top:12px'},
       d.risk?el('div',{},'Risk score ',el('b',{class:'score'},d.risk.score)):'',
+      d.unreachableSince?el('span',{class:'pill muted',title:'the latest scan reached none of its IPs; the score is unchanged'},'unreachable since '+d.unreachableSince.slice(0,10)):'',
       d.created_at?el('div',{class:'muted'},'created ',el('span',{class:'mono'},isoSec(d.created_at))):'',
       d.updated_at?el('div',{class:'muted'},'updated ',el('span',{class:'mono'},isoSec(d.updated_at))):'',
       d.risk&&d.risk.breakdown&&d.risk.breakdown.keywords&&d.risk.breakdown.keywords.length?el('div',{class:'muted'},'keywords: '+d.risk.breakdown.keywords.join(', ')):''));

@@ -388,3 +388,63 @@ describe('GET /api/target history', () => {
     expect(((await r.json()) as any).history).toEqual([]);
   }, 40_000);
 });
+
+describe('unreachable flag', () => {
+  const S = '2026-11-04T09:00:00.000Z';
+  function seedReach(mutate?: (raw: ReturnType<typeof openDb>['raw']) => void): string {
+    return seedLatestScan((raw) => {
+      const ins = raw.prepare(
+        `INSERT INTO target_network (target, ip, ip_version, ip_class, asn, country_code, from_ports, from_dns, first_seen, last_seen)
+         VALUES (?, ?, 4, 'public', 'AS64500', 'DE', 1, 0, ?, ?)`,
+      );
+      const q = raw.prepare(`INSERT INTO scan_queue (target, status, queued_at, started_at, finished_at) VALUES (?, ?, ?, ?, ?)`);
+      const risk = raw.prepare('INSERT INTO risk_latest (target, score, created_at, updated_at) VALUES (?, ?, ?, ?)');
+      // Answered in its latest scan.
+      ins.run('alive.example', '192.0.2.70', '2026-08-31T08:00:00.000Z', '2026-11-04T09:10:00.000Z');
+      q.run('alive.example', 'done', '2026-11-04T08:00:00.000Z', S, '2026-11-04T09:30:00.000Z');
+      risk.run('alive.example', 10, '2026-11-04T09:30:00.000Z', '2026-11-04T09:30:00.000Z');
+      // Not scanned yet: pending is not unreachable.
+      ins.run('pending.example', '192.0.2.71', '2026-08-31T08:00:00.000Z', '2026-08-31T08:00:00.000Z');
+      q.run('pending.example', 'pending', '2026-11-04T08:00:00.000Z', null, null);
+      risk.run('pending.example', 10, '2026-11-04T09:30:00.000Z', '2026-11-04T09:30:00.000Z');
+      mutate?.(raw);
+    });
+  }
+  const list = async (base: string, qs = '') => ((await (await fetch(`${base}/api/targets?limit=100${qs}`)).json()) as any);
+
+  it('flags the fileshare-shaped target with its scan date and leaves its score', async () => {
+    const base = await startUi(seedReach());
+    const d = await list(base);
+    const by = Object.fromEntries(d.rows.map((r: any) => [r.target, r]));
+    expect(by['fileshare.example']).toMatchObject({ unreachableSince: S, score: 10 });
+    expect(by['dnsonly.example'].unreachableSince).toBeNull();
+    expect(by['alive.example'].unreachableSince).toBeNull();
+    expect(by['pending.example'].unreachableSince).toBeNull();
+    const t = (await (await fetch(`${base}/api/target?t=fileshare.example`)).json()) as any;
+    expect(t.unreachableSince).toBe(S);
+    const ok = (await (await fetch(`${base}/api/target?t=alive.example`)).json()) as any;
+    expect(ok.unreachableSince).toBeNull();
+  }, 40_000);
+
+  it('filters by reachable and sorts unreachable below reachable at the same score', async () => {
+    const base = await startUi(seedReach());
+    const all = await list(base);
+    expect(all.rows.map((r: any) => r.target)).toEqual(['alive.example', 'dnsonly.example', 'pending.example', 'fileshare.example']);
+    expect((await list(base, '&reachable=unreachable')).rows.map((r: any) => r.target)).toEqual(['fileshare.example']);
+    expect((await list(base, '&reachable=reachable')).rows.map((r: any) => r.target)).toEqual(['alive.example', 'dnsonly.example', 'pending.example']);
+  }, 40_000);
+
+  it('answers 200 with no flag on a DB without scan_queue, target_network or dns_records', async () => {
+    for (const drop of ['scan_queue', 'target_network', 'dns_records']) {
+      const base = await startUi(seedReach((raw) => raw.exec(`DROP TABLE ${drop}`)));
+      const r = await fetch(`${base}/api/targets?limit=100`);
+      expect(r.status).toBe(200);
+      const d = (await r.json()) as any;
+      if (drop !== 'dns_records') expect(d.rows.every((x: any) => x.unreachableSince === null)).toBe(true);
+      const t = await fetch(`${base}/api/target?t=fileshare.example`);
+      expect(t.status).toBe(200);
+      const td = (await t.json()) as any;
+      if (drop !== 'dns_records') expect(td.unreachableSince).toBeNull();
+    }
+  }, 120_000);
+});
