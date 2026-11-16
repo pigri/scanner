@@ -67,6 +67,10 @@ export interface QueueLoopOpts {
   // Egress check run after every batch, before its rows are marked. A throw
   // counts as 'restart'.
   postBatchCheck?: () => PostBatchResult | Promise<PostBatchResult>;
+  // Called on SIGINT/SIGTERM while a batch is running. It must make processBatch
+  // return soon (forward the signal, kill after a grace period). The loop then
+  // releases the batch's rows to pending without counting an attempt and stops.
+  stopBatch?: (sig: NodeJS.Signals) => Promise<void>;
   // Replaces the interruptible sleep used for idling and backoff (tests).
   sleepFn?: (ms: number) => Promise<void>;
 }
@@ -99,14 +103,27 @@ export async function runQueueLoop(o: QueueLoopOpts): Promise<{ batches: number;
   };
 
   let interrupted = false;
+  let inBatch = false;
+  let stopSig: NodeJS.Signals | null = null;
+  let stopping: Promise<void> | null = null;
   let wake: (() => void) | null = null;
-  const onSig = (sig: string): void => {
+  const onSig = (sig: NodeJS.Signals): void => {
     interrupted = true;
+    if (inBatch && o.stopBatch) {
+      if (!stopSig) {
+        stopSig = sig;
+        log.warn(`${label}: received ${sig} during a batch; stopping it and releasing its rows`);
+        stopping = o.stopBatch(sig).catch((e: unknown) => { log.warn(`${label}: stopping the batch failed: ${e instanceof Error ? e.message : String(e)}`); });
+      }
+      return;
+    }
     log.warn(`${label}: received ${sig}; finishing current batch then stopping`);
     if (wake) wake();
   };
-  process.on('SIGINT', () => onSig('SIGINT'));
-  process.on('SIGTERM', () => onSig('SIGTERM'));
+  const onInt = (): void => onSig('SIGINT');
+  const onTerm = (): void => onSig('SIGTERM');
+  process.on('SIGINT', onInt);
+  process.on('SIGTERM', onTerm);
   const idleSleep = o.sleepFn ?? ((ms: number): Promise<void> => new Promise((res) => {
     const t = setTimeout(() => { wake = null; res(); }, ms);
     wake = () => { clearTimeout(t); wake = null; res(); };
@@ -170,6 +187,7 @@ export async function runQueueLoop(o: QueueLoopOpts): Promise<{ batches: number;
       }
       catch (e) { log.warn(`${label}: heartbeat failed: ${e instanceof Error ? e.message : String(e)}`); }
     }, heartbeatMs);
+    inBatch = true;
     try {
       outcome = await o.processBatch(claimed, batchN);
     } catch (e) {
@@ -177,6 +195,16 @@ export async function runQueueLoop(o: QueueLoopOpts): Promise<{ batches: number;
     } finally {
       clearIntervalFn(beat);
     }
+    if (stopSig) {
+      await stopping;
+      let released = 0;
+      try { released = queue.release(ids, o.workerId); }
+      catch (e) { log.error(`${label}: release failed: ${e instanceof Error ? e.message : String(e)}`); }
+      log.warn(`${label}: batch ${batchN}: stopped by ${stopSig}; released ${released} of ${ids.length} row(s) to pending without counting an attempt`);
+      inBatch = false;
+      break;
+    }
+    inBatch = false;
     if (o.postBatchCheck) {
       let pb: PostBatchResult;
       try { pb = await o.postBatchCheck(); }
@@ -205,5 +233,7 @@ export async function runQueueLoop(o: QueueLoopOpts): Promise<{ batches: number;
     log.info(`${label}: queue after batch ${batchN}: pending=${s.pending} in_progress=${s.in_progress} done=${s.done} failed=${s.failed}`);
   }
 
+  process.off('SIGINT', onInt);
+  process.off('SIGTERM', onTerm);
   return restart === undefined ? { batches: batchN } : { batches: batchN, restart };
 }
