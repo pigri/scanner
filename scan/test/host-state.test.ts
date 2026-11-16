@@ -175,18 +175,33 @@ describe('dnsxRecords', () => {
     expect(dnsxRecords('null')).toEqual([]);
     expect(dnsxRecords('not json')).toEqual([]);
   });
-  it('stores a well-formed row as before', () => {
-    const rows = dnsxRecords(JSON.stringify({
-      host: 'x.example', ttl: 300, a: ['192.0.2.1'], aaaa: ['2001:db8::1'], cname: ['y.example'],
-      mx: ['mx.example'], soa: [{ ns: 'ns.example', mailbox: 'h.example' }, 'ns2.example'],
-    }));
-    expect(rows).toEqual([
-      { target: 'x.example', name: 'x.example', type: 'A', value: '192.0.2.1', ttl: 300 },
-      { target: 'x.example', name: 'x.example', type: 'AAAA', value: '2001:db8::1', ttl: 300 },
-      { target: 'x.example', name: 'x.example', type: 'CNAME', value: 'y.example', ttl: 300 },
-      { target: 'x.example', name: 'x.example', type: 'MX', value: 'mx.example', ttl: 300 },
-      { target: 'x.example', name: 'x.example', type: 'SOA', value: 'ns.example', ttl: 300 },
-      { target: 'x.example', name: 'x.example', type: 'SOA', value: 'ns2.example', ttl: 300 },
-    ]);
+  const ALL = {
+    host: 'x.example', a: ['192.0.2.1'], aaaa: ['2001:db8::1'], cname: ['y.example'],
+    mx: ['mx.example'], ns: ['ns1.example'], txt: ['v=spf1 -all'], ptr: ['p.example'],
+    srv: ['0 5 5060 sip.example'], caa: ['0 issue "ca.example"'],
+    soa: [{ ns: 'ns.example', mailbox: 'h.example' }, 'ns2.example'],
+  };
+  const withTtl = (ttl?: number) => [
+    ['A', '192.0.2.1'], ['AAAA', '2001:db8::1'], ['CNAME', 'y.example'], ['MX', 'mx.example'],
+    ['NS', 'ns1.example'], ['TXT', 'v=spf1 -all'], ['PTR', 'p.example'],
+    ['SRV', '0 5 5060 sip.example'], ['CAA', '0 issue "ca.example"'],
+    ['SOA', 'ns.example'], ['SOA', 'ns2.example'],
+  ].map(([type, value]) => ({ target: 'x.example', name: 'x.example', type, value, ...(ttl === undefined ? {} : { ttl }) }));
+
+  it('stores a well-formed row as before, every field in order', () => {
+    expect(dnsxRecords(JSON.stringify({ ...ALL, ttl: 300 }))).toEqual(withTtl(300));
+  });
+  it('stores records with no ttl key and sets no ttl', () => {
+    const rows = dnsxRecords(JSON.stringify(ALL));
+    expect(rows).toEqual(withTtl());
+    expect(rows.every((r) => !('ttl' in r))).toBe(true);
+  });
+  it('keeps the records but drops a string ttl', () => {
+    const rows = dnsxRecords(JSON.stringify({ ...ALL, ttl: '300' }));
+    expect(rows).toEqual(withTtl());
+    expect(rows.every((r) => !('ttl' in r))).toBe(true);
+  });
+  it('stores a ttl of 0 as 0', () => {
+    expect(dnsxRecords(JSON.stringify({ ...ALL, ttl: 0 }))).toEqual(withTtl(0));
   });
 });
