@@ -145,6 +145,15 @@ describe('summarizeNetworks', () => {
     expect(m.get('a.example')).toEqual({ countries: ['HU'], asns: [] });
   });
 
+  it('takes the country from country_code only, never the name', () => {
+    const m = summarizeNetworks([
+      lrow('a.example', { ip: '192.0.2.1', country_code: null, country: 'Exampleland' }),
+      lrow('b.example', { ip: '192.0.2.2', country_code: 'HU', country: 'Hungary' }),
+    ]);
+    expect(m.get('a.example')).toEqual({ countries: [], asns: [] });
+    expect(m.get('b.example')).toEqual({ countries: ['HU'], asns: [] });
+  });
+
   it('ignores non-public rows', () => {
     const m = summarizeNetworks([
       lrow('a.example', { ip: '198.51.100.1', ip_class: 'private', country_code: 'HU', asn: 'AS64496' }),

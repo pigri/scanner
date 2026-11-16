@@ -2,8 +2,8 @@ export const TARGET_NETWORK_SQL = `SELECT ip, ip_version, ip_class, asn, as_name
   geo_checked_at, ptr_json, from_ports, from_dns, first_seen, last_seen
   FROM target_network WHERE target = ? ORDER BY ip LIMIT 500`;
 
-export const TARGET_NETWORK_LIST_SQL = `SELECT target, ip, asn, as_name, country_code, country,
-  last_seen, geo_checked_at, ip_class FROM target_network ORDER BY target, ip`;
+export const TARGET_NETWORK_LIST_SQL = `SELECT target, ip, asn, country_code, country,
+  last_seen, ip_class FROM target_network ORDER BY target, ip`;
 
 export interface NetworkDbRow {
   ip: string;
@@ -107,7 +107,7 @@ export function summarizeNetworks(rows: readonly ListNetworkRow[]): Map<string, 
     const asns = new Set<string>();
     group.forEach((r, i) => {
       if (!current[i] || r.ip_class !== 'public') return;
-      const c = r.country_code || r.country;
+      const c = r.country_code;
       if (c) countries.add(c);
       if (r.asn) asns.add(r.asn);
     });
