@@ -1416,6 +1416,23 @@ async function renderTarget(t){
       d.updated_at?el('div',{class:'muted'},'updated ',el('span',{class:'mono'},isoSec(d.updated_at))):'',
       d.risk&&d.risk.breakdown&&d.risk.breakdown.keywords&&d.risk.breakdown.keywords.length?el('div',{class:'muted'},'keywords: '+d.risk.breakdown.keywords.join(', ')):''));
   const panels=[head];
+  if(d.network&&d.network.length)panels.push(el('div',{class:'panel'},el('h2',{},'Network ('+d.network.length+')'),
+    table(['IP','v','ASN','AS name','AS domain','IP country','PTR','Seen via','First seen','Last seen'],d.network.map(n=>{
+      const pub=n.ipClass==='public';
+      const geoNote=n.geo==='none'?'pending':n.geo==='miss'?'no data':'';
+      const geoCell=f=>pub?(n.geo==='hit'?esc(f):el('span',{class:'muted'},geoNote)):'';
+      return [
+        el('span',{class:'mono'},n.ip,n.current?'':el('span',{class:'pill muted',style:'margin-left:6px',title:'not seen in the latest scan'},'previous')),
+        String(n.ipVersion),
+        pub?geoCell(n.asn):el('span',{class:'pill muted'},n.ipClass),
+        geoCell(n.as_name),
+        geoCell(n.as_domain),
+        pub?(n.geo==='hit'?el('span',{title:esc(n.country)},esc(n.country_code)):el('span',{class:'muted'},geoNote)):'',
+        n.ptr===null?el('span',{class:'muted',title:'not looked up'},'–'):n.ptr.length?el('span',{class:'mono'},n.ptr.join(', ')):el('span',{class:'muted'},'none'),
+        esc(n.seenVia.join(' + ')),
+        el('span',{class:'mono muted'},isoSec(n.first_seen)),
+        el('span',{class:'mono muted'},isoSec(n.last_seen))];
+    }))));
   if(d.ports.length)panels.push(el('div',{class:'panel'},el('h2',{},'Ports ('+d.ports.length+')'),
     table(['Port','Proto','Service','Product','Version','TLS','Found by'],d.ports.map(p=>[String(p.port),esc(p.protocol),esc(p.service),esc(p.product),esc(p.version),esc(p.tunnel),el('span',{class:'mono muted'},esc(p.tools||''))]))));
   if(d.http.length)panels.push(el('div',{class:'panel'},el('h2',{},'HTTP ('+d.http.length+')'),
