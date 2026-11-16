@@ -32,7 +32,8 @@ services:
       # writer may be updating. The UI opens every connection with an app-layer
       # guard that allows only SELECT-class statements, so DB *content* is never
       # mutated — the rw mount only permits WAL reader coordination.
-      - /storage/gen0sec-scan:/data/scan:rw
+      # The host directory comes from SCAN_DATA_DIR (set it in .env).
+      - ${SCAN_DATA_DIR:-/storage/gen0sec-scan}:/data/scan:rw
       # recon.db is a read-only seed; the container copies it to a writable path
       # at start (a WAL DB needs a writable directory for its -shm index).
       - ./discovery/recon.db:/seed/recon.db:ro

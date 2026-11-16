@@ -253,7 +253,7 @@ A small self-contained web dashboard over `scan.db` (and `../discovery/recon.db`
 
 ```
 npm run ui                                              # scan.db + ../discovery/recon.db, http://127.0.0.1:8787
-npm run ui -- --sqlite /storage/gen0sec-scan/scan.db --recon-db ../discovery/recon.db --port 8787
+npm run ui -- --sqlite "${SCAN_DATA_DIR:-/storage/gen0sec-scan}/scan.db" --recon-db ../discovery/recon.db --port 8787
 ```
 
 The UI reads target scores from the `risk_latest` table. Any scan tool creates and fills it the first time it opens the DB; the UI cannot (it opens the DB read-only), so it exits at startup if the table is missing. Open the DB once with a scan tool, then restart the UI.
@@ -280,7 +280,7 @@ docker compose logs -f ui
 docker compose down
 ```
 
-`scan.db` is bind-mounted from `/storage/gen0sec-scan` (read-write, so SQLite can keep the WAL index; the statement guard still blocks all writes). `recon.db` is bind-mounted read-only as a seed and copied to a writable path inside the container at start (a WAL DB needs a writable directory for its `-shm`). The port is published on `127.0.0.1` only — reach it at `http://127.0.0.1:8787` (note the port; a bare host/IP hits port 80 and won't load). `10.52.0.10` is routable only from this host; use an SSH tunnel for remote access.
+`scan.db` is bind-mounted from `$SCAN_DATA_DIR` (default `/storage/gen0sec-scan`; set `SCAN_DATA_DIR` in a `.env` next to `docker-compose.yml` to change it; read-write, so SQLite can keep the WAL index; the statement guard still blocks all writes). `recon.db` is bind-mounted read-only as a seed and copied to a writable path inside the container at start (a WAL DB needs a writable directory for its `-shm`). The port is published on `127.0.0.1` only — reach it at `http://127.0.0.1:8787` (note the port; a bare host/IP hits port 80 and won't load). `10.52.0.10` is routable only from this host; use an SSH tunnel for remote access.
 
 ## Tools
 
@@ -364,7 +364,7 @@ Runs `nuclei -tags takeover -rate-limit 100`. Cheap subdomain-takeover check. Fi
 ```
 npm run scan-all -- --targets hosts.txt --scope scope.txt --sqlite scan.db
 ```
-Orchestrates the full pipeline in order: **httpx → nmap → nuclei → takeover → testssl → wpscan (only WordPress hosts from httpx) → gowitness.** After stage 2 (httpx and port scans populated) and before the stage-3 `cve-rollup`, `version-match` compares detected service/product versions against the offline NVD mirror (`/storage/gen0sec-scan/nvd.db`) and writes `tool='version-match'` CVE findings; a missing mirror is a no-op. The mirror is refreshed nightly (01:30) by the `nvd-sync.timer` unit (see `deploy/README.md`); `npm run nvd-sync` and `npm run version-match` run them by hand. A nightly sweep (`version-match-sweep.timer`, 02:00; `npm run version-match:all`) re-matches `scan.db` evidence from the last `--window` days (default 30) against each new mirror snapshot, once per snapshot, and then refreshes the rollup, so new CVEs light up without a rescan.
+Orchestrates the full pipeline in order: **httpx → nmap → nuclei → takeover → testssl → wpscan (only WordPress hosts from httpx) → gowitness.** After stage 2 (httpx and port scans populated) and before the stage-3 `cve-rollup`, `version-match` compares detected service/product versions against the offline NVD mirror (`$SCAN_DATA_DIR/nvd.db`, default `/storage/gen0sec-scan/nvd.db`) and writes `tool='version-match'` CVE findings; a missing mirror is a no-op. The mirror is refreshed nightly (01:30) by the `nvd-sync.timer` unit (see `deploy/README.md`); `npm run nvd-sync` and `npm run version-match` run them by hand. A nightly sweep (`version-match-sweep.timer`, 02:00; `npm run version-match:all`) re-matches `scan.db` evidence from the last `--window` days (default 30) against each new mirror snapshot, once per snapshot, and then refreshes the rollup, so new CVEs light up without a rescan.
 
 Skip stages with `SKIP=<name,name>`:
 ```

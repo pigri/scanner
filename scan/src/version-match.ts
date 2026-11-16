@@ -16,7 +16,12 @@ import {
   type Evidence, type CveMatch,
 } from './lib/version-match.js';
 
-export const DEFAULT_NVD_DB = '/storage/gen0sec-scan/nvd.db';
+/** nvd.db lives in SCAN_DATA_DIR when set, else the historical data directory. */
+export function defaultNvdDb(env: NodeJS.ProcessEnv = process.env): string {
+  const dir = env.SCAN_DATA_DIR || '/storage/gen0sec-scan';
+  return `${dir.replace(/\/+$/, '')}/nvd.db`;
+}
+export const DEFAULT_NVD_DB = defaultNvdDb();
 const DAY_MS = 24 * 3600 * 1000;
 /** `runs.tool` of the --all sweep marker row; args_json.snapshotAt keys idempotency. */
 export const SWEEP_TOOL = 'version-match-sweep';
