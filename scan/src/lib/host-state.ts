@@ -51,6 +51,9 @@ export function decideHostStates(
   return out;
 }
 
+const hasAddress = (v: unknown): boolean =>
+  Array.isArray(v) && v.some((x) => typeof x === 'string' && x !== '');
+
 // Reads dnsx -j output. `rows` counts parsed rows with a host, so a caller can
 // tell an empty output (crash, timeout) from a run that answered.
 export function parseDnsxResolved(jsonl: string): { rows: number; resolved: Set<string> } {
@@ -60,10 +63,10 @@ export function parseDnsxResolved(jsonl: string): { rows: number; resolved: Set<
     const t = line.trim();
     if (!t) continue;
     try {
-      const row = JSON.parse(t) as { host?: string; a?: string[]; aaaa?: string[] };
-      if (!row.host) continue;
+      const row = JSON.parse(t) as { host?: unknown; a?: unknown; aaaa?: unknown } | null;
+      if (!row || typeof row.host !== 'string' || !row.host) continue;
       rows++;
-      if ((row.a?.length ?? 0) > 0 || (row.aaaa?.length ?? 0) > 0) resolved.add(row.host);
+      if (hasAddress(row.a) || hasAddress(row.aaaa)) resolved.add(row.host);
     } catch { /* ignore */ }
   }
   return { rows, resolved };

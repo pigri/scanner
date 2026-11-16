@@ -107,6 +107,41 @@ describe('parseDnsxResolved', () => {
     expect(r.rows).toBe(1);
   });
 
+  it('does not count a row whose host is not a non-empty string', () => {
+    const text = [JSON.stringify({ host: 5, a: ['192.0.2.1'] }), JSON.stringify({ host: '', a: ['192.0.2.1'] }), JSON.stringify({ host: ['a.example'], a: ['192.0.2.1'] })].join('\n');
+    const r = parseDnsxResolved(text);
+    expect(r.rows).toBe(0);
+    expect(r.resolved.size).toBe(0);
+  });
+
+  it('does not resolve a host whose a is a string rather than a list', () => {
+    const r = parseDnsxResolved(JSON.stringify({ host: 'x.example', a: 'nonempty' }));
+    expect(r.rows).toBe(1);
+    expect(r.resolved.size).toBe(0);
+  });
+
+  it('does not resolve a host whose list holds no non-empty string', () => {
+    const text = [
+      JSON.stringify({ host: 'a.example', a: [42] }),
+      JSON.stringify({ host: 'b.example', a: [''], aaaa: [null] }),
+    ].join('\n');
+    const r = parseDnsxResolved(text);
+    expect(r.rows).toBe(2);
+    expect(r.resolved.size).toBe(0);
+  });
+
+  it('resolves on aaaa when a is an empty list', () => {
+    const r = parseDnsxResolved(JSON.stringify({ host: 'x.example', a: [], aaaa: ['2001:db8::1'] }));
+    expect([...r.resolved]).toEqual(['x.example']);
+  });
+
+  it('skips null, array and scalar lines', () => {
+    const text = ['null', '[]', '5', '"x"', JSON.stringify({ host: 'a.example', a: ['192.0.2.1'] })].join('\n');
+    const r = parseDnsxResolved(text);
+    expect([...r.resolved]).toEqual(['a.example']);
+    expect(r.rows).toBe(1);
+  });
+
   it('reports zero rows for empty output', () => {
     expect(parseDnsxResolved('')).toEqual({ rows: 0, resolved: new Set() });
   });
