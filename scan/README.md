@@ -372,6 +372,8 @@ SKIP=wpscan,testssl npm run scan-all -- ...
 ```
 `SKIP=version-match` turns the version-to-CVE matching off.
 
+Stage 3 also runs `netinfo`, which fills `target_network` (target, IP, port and DNS flags, offline MMDB geo/ASN) from the Stage 2 evidence. It makes no network calls. `SKIP=netinfo` turns it off; `NETINFO_FLAGS="--mmdb <file>"` points it at another MMDB. A missing MMDB still writes the rows, without geo.
+
 `--sqlite` flows down to every stage automatically.
 
 ### db-init
