@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { openDb } from '../src/lib/db.js';
-import { TARGET_NETWORK_SQL, TARGET_NETWORK_LIST_SQL, markCurrent, shapeNetworkRows, summarizeNetworks, type NetworkDbRow } from '../src/lib/target-network.js';
+import { TARGET_NETWORK_SQL, TARGET_NETWORK_LIST_SQL, TARGET_SCAN_SQL, TARGET_ANSWERED_SQL, TARGET_ANSWERED_DNS_SQL, DNS_TRACKING_SQL, markCurrent, scanStatus, shapeNetworkRows, summarizeNetworks, type NetworkDbRow } from '../src/lib/target-network.js';
 
 const T0 = '2026-11-10T12:00:00.000Z';
 const hoursBefore = (h: number) => new Date(Date.parse(T0) - h * 3600_000).toISOString();
@@ -159,5 +159,105 @@ describe('summarizeNetworks', () => {
       lrow('a.example', { ip: '198.51.100.1', ip_class: 'private', country_code: 'HU', asn: 'AS64496' }),
     ]);
     expect(m.get('a.example') ?? { countries: [], asns: [] }).toEqual({ countries: [], asns: [] });
+  });
+});
+
+const S = '2026-11-04T09:00:00.000Z';
+const TRACK = '2026-11-16T00:00:00.000Z';
+
+describe('scanStatus', () => {
+  it('is yes when the ip was seen at or after the scan start, boundary included', () => {
+    expect(scanStatus(S, S, false, null)).toBe('yes');
+    expect(scanStatus('2026-11-04T09:00:01.000Z', S, false, null)).toBe('yes');
+  });
+  it('is no when the ip was last seen before the scan and DNS has no untracked rows', () => {
+    expect(scanStatus('2026-11-04T08:59:59.999Z', S, false, TRACK)).toBe('no');
+  });
+  it('is unknown when untracked DNS rows exist and the scan predates tracking', () => {
+    expect(scanStatus('2026-08-31T00:00:00.000Z', S, true, TRACK)).toBe('unknown');
+    expect(scanStatus('2026-08-31T00:00:00.000Z', S, true, null)).toBe('unknown');
+  });
+  it('is no when the scan started at or after the tracking start, even with untracked rows', () => {
+    expect(scanStatus('2026-08-31T00:00:00.000Z', TRACK, true, TRACK)).toBe('no');
+  });
+  it('is none when the target has no done scan', () => {
+    expect(scanStatus(S, null, true, TRACK)).toBe('none');
+  });
+  it('compares parsed dates, not strings', () => {
+    expect(scanStatus('2026-11-04T10:00:00+02:00', S, false, null)).toBe('no');
+    expect(scanStatus('2026-11-04T11:00:00+02:00', S, false, null)).toBe('yes');
+  });
+  it('treats an unparsable time as current (yes)', () => {
+    expect(scanStatus('garbage', S, false, null)).toBe('yes');
+    expect(scanStatus(S, 'garbage', false, null)).toBe('yes');
+  });
+  it('treats an unparsable tracking start as no tracking at all', () => {
+    expect(scanStatus('2026-08-31T00:00:00.000Z', S, true, 'garbage')).toBe('unknown');
+  });
+});
+
+describe('shapeNetworkRows with a scan context', () => {
+  const ctx = (over = {}) => ({ startedAt: S, dnsUntracked: false, trackingStart: TRACK, ...over });
+  it('sets scanStatus and derives current from it, not from the 24h rule', () => {
+    const out = shapeNetworkRows(
+      [row({ ip: '192.0.2.1', last_seen: S }), row({ ip: '192.0.2.2', last_seen: '2026-10-01T00:00:00.000Z' })],
+      ctx(),
+    );
+    expect(out.map((r) => [r.scanStatus, r.current])).toEqual([['yes', true], ['no', false]]);
+  });
+  it('keeps unknown rows current', () => {
+    const [r] = shapeNetworkRows([row({ last_seen: '2026-08-31T00:00:00.000Z' })], ctx({ dnsUntracked: true }));
+    expect(r).toMatchObject({ scanStatus: 'unknown', current: true });
+  });
+  it('falls back to the 24h rule with status none when the target has no done scan', () => {
+    const rows = [row({ last_seen: T0 }), row({ ip: '192.0.2.2', last_seen: hoursBefore(48) })];
+    const out = shapeNetworkRows(rows, ctx({ startedAt: null }));
+    expect(out.map((r) => [r.scanStatus, r.current])).toEqual([['none', true], ['none', false]]);
+  });
+  it('reports none without a context', () => {
+    expect(shapeNetworkRows([row()])[0]!.scanStatus).toBe('none');
+  });
+});
+
+describe('scan SQL', () => {
+  function db() {
+    const { raw } = openDb(':memory:');
+    return raw;
+  }
+  it('TARGET_SCAN_SQL returns the queue row of the target', () => {
+    const raw = db();
+    raw.prepare(`INSERT INTO scan_queue (target, status, queued_at, started_at, finished_at) VALUES (?, ?, ?, ?, ?)`).run('a.example', 'done', S, S, S);
+    raw.prepare(`INSERT INTO scan_queue (target, status, queued_at) VALUES (?, 'pending', ?)`).run('b.example', S);
+    expect(raw.prepare(TARGET_SCAN_SQL).get('a.example')).toMatchObject({ status: 'done', started_at: S });
+    expect(raw.prepare(TARGET_SCAN_SQL).get('b.example')).toMatchObject({ status: 'pending', started_at: null });
+    expect(raw.prepare(TARGET_SCAN_SQL).get('c.example')).toBeUndefined();
+  });
+  it('TARGET_ANSWERED_SQL reports newest time and counts since the scan start per source', () => {
+    const raw = db();
+    const port = raw.prepare(`INSERT INTO ports (target, port, protocol, seen_at) VALUES (?, ?, 'tcp', ?)`);
+    port.run('a.example', 80, '2026-08-31T00:00:00.000Z');
+    port.run('a.example', 80, S);
+    port.run('a.example', 443, '2026-11-05T00:00:00.000Z');
+    port.run('b.example', 22, S);
+    raw.prepare(`INSERT INTO http_probes (target, url, seen_at) VALUES (?, ?, ?)`).run('a.example', 'http://a.example/', '2026-09-04T22:01:00.000Z');
+    const rows = raw.prepare(TARGET_ANSWERED_SQL).all({ t: 'a.example', s: S }) as { source: string; at: string | null; n: number }[];
+    const by = Object.fromEntries(rows.map((r) => [r.source, r]));
+    expect(by.port).toMatchObject({ at: '2026-11-05T00:00:00.000Z', n: 2 });
+    expect(by.http).toMatchObject({ at: '2026-09-04T22:01:00.000Z', n: 0 });
+  });
+  it('TARGET_ANSWERED_DNS_SQL uses last_seen, falling back to seen_at', () => {
+    const raw = db();
+    const ins = raw.prepare(`INSERT INTO dns_records (target, name, type, value, seen_at, last_seen) VALUES (?, ?, 'A', ?, ?, ?)`);
+    ins.run('a.example', 'a.example', '192.0.2.1', '2026-08-31T00:00:00.000Z', null);
+    ins.run('a.example', 'a.example', '192.0.2.2', '2026-08-01T00:00:00.000Z', '2026-11-05T00:00:00.000Z');
+    expect(raw.prepare(TARGET_ANSWERED_DNS_SQL).get({ t: 'a.example', s: S })).toMatchObject({ source: 'dns', at: '2026-11-05T00:00:00.000Z', n: 1 });
+  });
+  it('DNS_TRACKING_SQL gives the tracking start and whether the target has untracked rows', () => {
+    const raw = db();
+    const ins = raw.prepare(`INSERT INTO dns_records (target, name, type, value, seen_at, last_seen) VALUES (?, ?, 'A', ?, ?, ?)`);
+    ins.run('a.example', 'a.example', '192.0.2.1', '2026-08-31T00:00:00.000Z', null);
+    ins.run('b.example', 'b.example', '192.0.2.2', '2026-08-01T00:00:00.000Z', TRACK);
+    expect(raw.prepare(DNS_TRACKING_SQL).get({ t: 'a.example' })).toEqual({ tracking_start: TRACK, untracked: 1 });
+    expect(raw.prepare(DNS_TRACKING_SQL).get({ t: 'b.example' })).toEqual({ tracking_start: TRACK, untracked: 0 });
   });
 });

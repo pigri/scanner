@@ -5,6 +5,38 @@ export const TARGET_NETWORK_SQL = `SELECT ip, ip_version, ip_class, asn, as_name
 export const TARGET_NETWORK_LIST_SQL = `SELECT target, ip, asn, country_code, country,
   last_seen, ip_class FROM target_network ORDER BY target, ip`;
 
+/** The target's queue row (target is UNIQUE there). Only a `done` row is a latest scan. */
+export const TARGET_SCAN_SQL = `SELECT status, started_at, finished_at FROM scan_queue WHERE target = ?`;
+
+/** Newest evidence time and the count seen at or after @s, for ports and HTTP probes. Bind @t and @s. */
+export const TARGET_ANSWERED_SQL = `SELECT 'port' AS source, MAX(seen_at) AS at,
+    COUNT(DISTINCT CASE WHEN seen_at >= @s THEN port || '/' || protocol END) AS n
+  FROM ports WHERE target = @t
+  UNION ALL
+  SELECT 'http', MAX(seen_at), COUNT(DISTINCT CASE WHEN seen_at >= @s THEN url END)
+  FROM http_probes WHERE target = @t`;
+
+/** Same for DNS records, which carry last_seen only since it was added. Bind @t and @s. */
+export const TARGET_ANSWERED_DNS_SQL = `SELECT 'dns' AS source, MAX(COALESCE(last_seen, seen_at)) AS at,
+    COUNT(CASE WHEN COALESCE(last_seen, seen_at) >= @s THEN 1 END) AS n
+  FROM dns_records WHERE target = @t`;
+
+/** When DNS per-scan tracking began, and whether @t has rows from before it. Bind @t. */
+export const DNS_TRACKING_SQL = `SELECT MIN(last_seen) AS tracking_start,
+    EXISTS(SELECT 1 FROM dns_records WHERE target = @t AND last_seen IS NULL) AS untracked
+  FROM dns_records`;
+
+export type ScanStatus = 'yes' | 'no' | 'unknown' | 'none';
+
+export interface ScanContext {
+  /** `started_at` of the target's latest done scan; null when it has none. */
+  startedAt: string | null;
+  /** The target has dns_records rows with NULL last_seen. */
+  dnsUntracked: boolean;
+  /** MIN(dns_records.last_seen); null when nothing is tracked yet. */
+  trackingStart: string | null;
+}
+
 export interface NetworkDbRow {
   ip: string;
   ip_version: number;
@@ -38,6 +70,7 @@ export interface NetworkRow {
   seenVia: ('ports' | 'dns')[];
   first_seen: string;
   last_seen: string;
+  scanStatus: ScanStatus;
   current: boolean;
 }
 
@@ -52,6 +85,28 @@ export function markCurrent(rows: readonly Pick<NetworkDbRow, 'last_seen'>[]): b
   return times.map((t) => !Number.isFinite(t) || newest - t <= CURRENT_WINDOW_MS);
 }
 
+/**
+ * Whether an IP was seen in the target's latest done scan. `scanStart` is null
+ * when there is none ('none': the caller applies the 24 h rule). An unparsable
+ * IP or scan time counts as current ('yes'); an unparsable tracking start counts
+ * as no tracking at all, so every scan predates it.
+ */
+export function scanStatus(
+  ipLastSeen: string,
+  scanStart: string | null,
+  dnsUntracked: boolean,
+  trackingStart: string | null,
+): ScanStatus {
+  if (scanStart === null) return 'none';
+  const seen = Date.parse(ipLastSeen);
+  const s = Date.parse(scanStart);
+  if (!Number.isFinite(seen) || !Number.isFinite(s)) return 'yes';
+  if (seen >= s) return 'yes';
+  if (!dnsUntracked) return 'no';
+  const track = trackingStart === null ? NaN : Date.parse(trackingStart);
+  return !Number.isFinite(track) || s < track ? 'unknown' : 'no';
+}
+
 function parsePtr(json: string | null): string[] | null {
   if (json === null) return null;
   try {
@@ -63,8 +118,12 @@ function parsePtr(json: string | null): string[] | null {
   }
 }
 
-export function shapeNetworkRows(rows: readonly NetworkDbRow[]): NetworkRow[] {
-  const current = markCurrent(rows);
+export function shapeNetworkRows(rows: readonly NetworkDbRow[], scanCtx?: ScanContext): NetworkRow[] {
+  const status = rows.map((r) =>
+    scanCtx ? scanStatus(r.last_seen, scanCtx.startedAt, scanCtx.dnsUntracked, scanCtx.trackingStart) : 'none',
+  );
+  const old = markCurrent(rows);
+  const current = rows.map((_, i) => (status[i] === 'none' ? old[i]! : status[i] !== 'no'));
   return rows.map((r, i) => ({
     ip: r.ip,
     ipVersion: r.ip_version,
@@ -79,6 +138,7 @@ export function shapeNetworkRows(rows: readonly NetworkDbRow[]): NetworkRow[] {
     seenVia: [...(r.from_ports ? ['ports' as const] : []), ...(r.from_dns ? ['dns' as const] : [])],
     first_seen: r.first_seen,
     last_seen: r.last_seen,
+    scanStatus: status[i]!,
     current: current[i]!,
   }));
 }
