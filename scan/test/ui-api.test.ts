@@ -447,4 +447,43 @@ describe('unreachable flag', () => {
       if (drop !== 'dns_records') expect(td.unreachableSince).toBeNull();
     }
   }, 120_000);
+
+  describe('target with no ips', () => {
+    const noIp = (raw: ReturnType<typeof openDb>['raw']) => {
+      const q = raw.prepare(`INSERT INTO scan_queue (target, status, queued_at, started_at, finished_at) VALUES (?, ?, ?, ?, ?)`);
+      const risk = raw.prepare('INSERT INTO risk_latest (target, score, created_at, updated_at) VALUES (?, ?, ?, ?)');
+      for (const t of ['silent', 'oldrows', 'portrow', 'httprow']) {
+        q.run(`${t}.example`, 'done', '2026-11-04T08:00:00.000Z', S, '2026-11-04T09:30:00.000Z');
+        risk.run(`${t}.example`, 7, '2026-11-04T09:30:00.000Z', '2026-11-04T09:30:00.000Z');
+      }
+      q.run('queued2.example', 'pending', '2026-11-04T08:00:00.000Z', null, null);
+      risk.run('queued2.example', 7, '2026-11-04T09:30:00.000Z', '2026-11-04T09:30:00.000Z');
+      raw.prepare(`INSERT INTO ports (target, ip, port, protocol, seen_at) VALUES (?, '192.0.2.80', 80, 'tcp', ?)`).run('oldrows.example', '2026-08-31T08:00:00.000Z');
+      raw.prepare(`INSERT INTO ports (target, ip, port, protocol, seen_at) VALUES (?, '192.0.2.81', 80, 'tcp', ?)`).run('portrow.example', '2026-11-04T09:10:00.000Z');
+      raw.prepare(`INSERT INTO http_probes (target, url, seen_at) VALUES (?, ?, ?)`).run('httprow.example', 'http://httprow.example/', '2026-11-04T09:10:00.000Z');
+    };
+    it('flags it only when nothing answered the scan, in the list and on the page', async () => {
+      const base = await startUi(seedReach(noIp));
+      const by = Object.fromEntries((await list(base)).rows.map((r: any) => [r.target, r]));
+      expect(by['silent.example']).toMatchObject({ unreachableSince: S, score: 7 });
+      expect(by['oldrows.example'].unreachableSince).toBe(S);
+      expect(by['portrow.example'].unreachableSince).toBeNull();
+      expect(by['httprow.example'].unreachableSince).toBeNull();
+      expect(by['queued2.example'].unreachableSince).toBeNull();
+      for (const [t, want] of [['silent', S], ['oldrows', S], ['portrow', null], ['httprow', null], ['queued2', null]] as const) {
+        const d = (await (await fetch(`${base}/api/target?t=${t}.example`)).json()) as any;
+        expect(d.unreachableSince).toBe(want);
+      }
+    }, 40_000);
+
+    it('answers /api/targets with 200 when ports or http_probes is missing', async () => {
+      for (const drop of ['ports', 'http_probes']) {
+        const base = await startUi(seedReach((raw) => { noIp(raw); raw.exec(`DROP TABLE ${drop}`); }));
+        const r = await fetch(`${base}/api/targets?limit=100`);
+        expect(r.status).toBe(200);
+        const by = Object.fromEntries(((await r.json()) as any).rows.map((x: any) => [x.target, x]));
+        expect(by['silent.example'].unreachableSince).toBe(S);
+      }
+    }, 120_000);
+  });
 });

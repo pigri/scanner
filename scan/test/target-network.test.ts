@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { openDb } from '../src/lib/db.js';
-import { TARGET_NETWORK_SQL, TARGET_NETWORK_LIST_SQL, TARGET_SCAN_SQL, TARGET_ANSWERED_SQL, TARGET_ANSWERED_DNS_SQL, DNS_TRACKING_SQL, DNS_UNTRACKED_TARGETS_SQL, DNS_TRACKING_START_SQL, markCurrent, historyText, scanStatus, unreachableSince, shapeNetworkRows, summarizeNetworks, type NetworkDbRow } from '../src/lib/target-network.js';
+import { TARGET_NETWORK_SQL, TARGET_NETWORK_LIST_SQL, TARGET_SCAN_SQL, TARGET_ANSWERED_SQL, TARGET_ANSWERED_DNS_SQL, DNS_TRACKING_SQL, DNS_UNTRACKED_TARGETS_SQL, DNS_TRACKING_START_SQL, markCurrent, historyText, scanStatus, unreachableSince, noIpScanSql, shapeNetworkRows, summarizeNetworks, type NetworkDbRow } from '../src/lib/target-network.js';
 
 const T0 = '2026-11-10T12:00:00.000Z';
 const hoursBefore = (h: number) => new Date(Date.parse(T0) - h * 3600_000).toISOString();
@@ -403,5 +403,60 @@ describe('summarizeNetworks unreachableSince', () => {
   it('is null everywhere without a context', () => {
     const m = summarizeNetworks([lr('a.example', '192.0.2.1', '2026-08-31T00:00:00.000Z', S)]);
     expect(m.get('a.example')!.unreachableSince).toBeNull();
+  });
+});
+
+describe('unreachableSince with no ips', () => {
+  const S = '2026-11-04T09:00:00.000Z';
+  it('flags a target with no ips when nothing answered its scan', () => {
+    expect(unreachableSince([], S, false)).toBe(S);
+  });
+  it('does not flag it when something answered, when there is no scan, or when unknown', () => {
+    expect(unreachableSince([], S, true)).toBeNull();
+    expect(unreachableSince([], null, false)).toBeNull();
+    expect(unreachableSince([], S)).toBeNull();
+  });
+  it('ignores the answered flag when the target has ips', () => {
+    expect(unreachableSince(['no'], S, true)).toBe(S);
+    expect(unreachableSince(['yes'], S, false)).toBeNull();
+  });
+});
+
+describe('noIpScanSql', () => {
+  const S = '2026-11-04T09:00:00.000Z';
+  const setup = () => {
+    const { raw } = openDb(':memory:');
+    const q = raw.prepare(`INSERT INTO scan_queue (target, status, queued_at, started_at) VALUES (?, ?, ?, ?)`);
+    for (const t of ['silent', 'old', 'port', 'http', 'withip']) q.run(`${t}.example`, 'done', S, S);
+    q.run('pending.example', 'pending', S, null);
+    const port = raw.prepare(`INSERT INTO ports (target, ip, port, protocol, seen_at) VALUES (?, '192.0.2.1', 80, 'tcp', ?)`);
+    port.run('old.example', '2026-08-31T00:00:00.000Z');
+    port.run('port.example', '2026-11-04T09:05:00.000Z');
+    const h = raw.prepare(`INSERT INTO http_probes (target, url, seen_at) VALUES (?, ?, ?)`);
+    h.run('http.example', 'http://http.example/', '2026-11-04T09:05:00.000Z');
+    raw.prepare(`INSERT INTO target_network (target, ip, ip_version, ip_class, first_seen, last_seen) VALUES ('withip.example', '192.0.2.2', 4, 'public', ?, ?)`).run(S, S);
+    return raw;
+  };
+  it('lists done targets with no target_network rows and whether a port or http row is from the scan', () => {
+    const rows = setup().prepare(noIpScanSql(true, true, false)).all() as { target: string; started_at: string; answered: number }[];
+    expect(Object.fromEntries(rows.map((r) => [r.target, r.answered]))).toEqual({
+      'silent.example': 0, 'old.example': 0, 'port.example': 1, 'http.example': 1,
+    });
+  });
+  it('narrows to one target', () => {
+    const rows = setup().prepare(noIpScanSql(true, true, true)).all('silent.example');
+    expect(rows).toHaveLength(1);
+  });
+  it('treats a missing ports or http_probes table as no rows', () => {
+    const raw = setup();
+    const rows = raw.prepare(noIpScanSql(false, true, false)).all() as { target: string; answered: number }[];
+    expect(Object.fromEntries(rows.map((r) => [r.target, r.answered]))).toMatchObject({ 'port.example': 0, 'http.example': 1 });
+    const none = raw.prepare(noIpScanSql(false, false, false)).all() as { answered: number }[];
+    expect(none.every((r) => r.answered === 0)).toBe(true);
+  });
+  it('uses the per-target indexes', () => {
+    const plan = setup().prepare('EXPLAIN QUERY PLAN ' + noIpScanSql(true, true, false)).all().map((r: any) => r.detail).join('\n');
+    expect(plan).toMatch(/idx_ports_target/);
+    expect(plan).toMatch(/idx_http_target/);
   });
 });

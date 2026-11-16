@@ -28,6 +28,7 @@ import {
   DNS_TRACKING_SQL,
   summarizeNetworks,
   unreachableSince,
+  noIpScanSql,
   DNS_UNTRACKED_TARGETS_SQL,
   DNS_TRACKING_START_SQL,
   type ListScanContext,
@@ -224,11 +225,19 @@ function targetRows(): TargetRow[] {
       ? summarizeNetworks(scan.prepare(TARGET_NETWORK_LIST_SQL).all() as ListNetworkRow[], listScanContext())
       : summarizeNetworks(scan.prepare(TARGET_NETWORK_LIST_NO_QUEUE_SQL).all() as ListNetworkRow[])
     : new Map();
+  const noIp = new Map<string, string>();
+  if (tableExists(scan, 'target_network') && tableExists(scan, 'scan_queue')) {
+    const sql = noIpScanSql(tableExists(scan, 'ports'), tableExists(scan, 'http_probes'), false);
+    for (const q of scan.prepare(sql).all() as { target: string; started_at: string; answered: number }[]) {
+      const u = unreachableSince([], q.started_at, q.answered === 1);
+      if (u) noIp.set(q.target, u);
+    }
+  }
   for (const r of rows) {
     const n = nets.get(r.target);
     r.countries = n?.countries ?? [];
     r.asns = n?.asns ?? [];
-    r.unreachableSince = n?.unreachableSince ?? null;
+    r.unreachableSince = n?.unreachableSince ?? noIp.get(r.target) ?? null;
   }
   targetsCache = { rows, at: now };
   return rows;
@@ -576,7 +585,17 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
           trackingStart: tracking.tracking_start,
         })
       : [];
-    const unreachable = unreachableSince(network.map((n) => n.scanStatus), doneStart);
+    const noIpRow =
+      network.length === 0 && doneStart && tableExists(scan, 'target_network') && tableExists(scan, 'scan_queue')
+        ? (scan.prepare(noIpScanSql(tableExists(scan, 'ports'), tableExists(scan, 'http_probes'), true)).get(t) as
+            | { answered: number }
+            | undefined)
+        : undefined;
+    const unreachable = unreachableSince(
+      network.map((n) => n.scanStatus),
+      doneStart,
+      noIpRow ? noIpRow.answered === 1 : undefined,
+    );
     const history = tableExists(scan, 'target_network_events')
       ? (scan.prepare(TARGET_HISTORY_SQL).all(t) as (HistoryDbRow & { id: number })[]).map((e) => ({
           ...e,

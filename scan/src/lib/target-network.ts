@@ -132,11 +132,35 @@ export function scanStatus(
 
 /**
  * `scanStart` when the target has a done scan and none of its IPs was 'yes' or
- * 'unknown' in it. A target with no IPs at all has no evidence either way: null.
+ * 'unknown' in it. A target with no IPs has nothing to compare, so it counts
+ * only when `answered` is false: no port or HTTP row came from that scan.
+ * An undefined `answered` means unknown, which does not flag.
  */
-export function unreachableSince(statuses: readonly ScanStatus[], scanStart: string | null): string | null {
-  if (scanStart === null || statuses.length === 0) return null;
+export function unreachableSince(
+  statuses: readonly ScanStatus[],
+  scanStart: string | null,
+  answered?: boolean,
+): string | null {
+  if (scanStart === null) return null;
+  if (statuses.length === 0) return answered === false ? scanStart : null;
   return statuses.every((st) => st === 'no') ? scanStart : null;
+}
+
+/**
+ * Done scans of targets that have no target_network row, with whether a port or
+ * HTTP row was seen at or after the scan start. Pass false for a table the DB
+ * lacks. With byTarget, bind one target; else it lists every such target.
+ */
+export function noIpScanSql(hasPorts: boolean, hasHttp: boolean, byTarget: boolean): string {
+  const ex = (table: string, idx: string): string =>
+    `EXISTS(SELECT 1 FROM ${table} x INDEXED BY ${idx} WHERE x.target = q.target AND x.seen_at >= q.started_at)`;
+  const answered = [hasPorts ? ex('ports', 'idx_ports_target') : '', hasHttp ? ex('http_probes', 'idx_http_target') : '']
+    .filter(Boolean)
+    .join(' OR ');
+  return `SELECT q.target, q.started_at, ${answered ? `(${answered})` : '0'} AS answered
+  FROM scan_queue q
+  WHERE q.status = 'done' AND q.started_at IS NOT NULL
+    AND NOT EXISTS(SELECT 1 FROM target_network tn WHERE tn.target = q.target)${byTarget ? ' AND q.target = ?' : ''}`;
 }
 
 function parsePtr(json: string | null): string[] | null {
