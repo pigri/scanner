@@ -171,13 +171,17 @@ With the workers running as daemons, these **systemd timers** feed them:
   (`cd ~/gen0sec/redteam/discovery && npm run geoip-sync`) and link and enable
   it like the other timers (`geoip-sync.service`, `geoip-sync.timer`).
 - **`nvd-sync.timer`** (daily 01:30): `nvd-sync` incrementally refreshes the
-  offline NVD mirror `/storage/gen0sec-scan/nvd.db` (full build when the db does
+  offline NVD mirror `$SCAN_DATA_DIR/nvd.db` (default `/storage/gen0sec-scan`; full build when the db does
   not exist yet) that `version-match` reads during `scan-all`. Runs before the
   template refresh and `scan-feed` so the day's scans see a fresh mirror.
   `NVD_API_KEY` is read from `.env.scan`. The first build is a full pull
   (~100 min keyed, longer unauthenticated); the timer allows 4 h for it, but on
   a slow link you can bootstrap it once by hand before enabling the timer:
-  `cd ~/gen0sec/redteam/scan && set -a && . .env.scan && set +a && npm run nvd-sync -- --full --nvd-db /storage/gen0sec-scan/nvd.db`.
+  `cd ~/gen0sec/redteam/scan && set -a && . .env.scan && set +a && npm run nvd-sync -- --full --nvd-db "${SCAN_DATA_DIR:-/storage/gen0sec-scan}/nvd.db"`.
+  The units default `SCAN_DATA_DIR` to `/storage/gen0sec-scan`. To use another
+  directory, add a drop-in without editing the tracked unit:
+  `systemctl --user edit nvd-sync.service` (likewise `version-match-sweep.service`)
+  and set `[Service]` / `Environment=SCAN_DATA_DIR=/path/to/dir`.
 - **`version-match-sweep.timer`** (daily 02:00, after `nvd-sync`): `version-match
   --all` re-matches the version evidence already in `scan.db` (http_probes /
   ports seen in the last 30 days) against the fresh mirror, so CVEs published
