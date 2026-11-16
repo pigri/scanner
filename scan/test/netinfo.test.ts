@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { openDb, type Db } from '../src/lib/db.js';
-import { runNetinfo } from '../src/lib/netinfo.js';
+import { runNetinfo, runNetinfoPtr } from '../src/lib/netinfo.js';
 import type { GeoLookup, GeoRow } from '../src/lib/geoip.js';
 
 const T0 = '2026-11-01T00:00:00.000Z';
@@ -255,5 +255,98 @@ describe('runNetinfo --all', () => {
       ['192.0.2.32', '192.0.2.32', T0, T0],
       ['a.example', '192.0.2.10', T0, T0],
     ]);
+  });
+});
+
+describe('runNetinfoPtr', () => {
+  type Lookup = NonNullable<Parameters<typeof runNetinfoPtr>[0]['ptr']['lookup']>;
+  const fakeLookup = (table: Record<string, string[] | null>): Lookup & { calls: string[][] } => {
+    const calls: string[][] = [];
+    const fn: Lookup = async (ips) => {
+      calls.push([...ips]);
+      return new Map(ips.map((ip) => [ip, table[ip] ?? null]));
+    };
+    return Object.assign(fn, { calls });
+  };
+  const ptrOf = (db: Db, ip: string) => (db.raw.prepare('SELECT ptr_json FROM target_network WHERE ip = ?').get(ip) as { ptr_json: string | null }).ptr_json;
+
+  it('stores names as JSON and [] for no ptr, with counts', async () => {
+    const db = openDb(':memory:');
+    port(db, 'a.example', '192.0.2.10', T0);
+    port(db, 'a.example', '192.0.2.11', T0);
+    port(db, 'a.example', '192.0.2.12', T0);
+    const lookup = fakeLookup({ '192.0.2.10': ['h.example'], '192.0.2.11': [] });
+
+    const r = await runNetinfoPtr({ db, targets: ['a.example'], geo: null, now: NOW, ptr: { budgetMs: 1000, lookup } });
+
+    expect(ptrOf(db, '192.0.2.10')).toBe('["h.example"]');
+    expect(ptrOf(db, '192.0.2.11')).toBe('[]');
+    expect(ptrOf(db, '192.0.2.12')).toBeNull();
+    expect(r.ptr).toEqual({ looked_up: 3, found: 1, empty: 1, failed: 1, skipped_budget: 0 });
+  });
+
+  it('does not overwrite stored names when a later lookup fails', async () => {
+    const db = openDb(':memory:');
+    port(db, 'a.example', '192.0.2.10', T0);
+    await runNetinfoPtr({ db, targets: ['a.example'], geo: null, now: NOW, ptr: { budgetMs: 1000, lookup: fakeLookup({ '192.0.2.10': ['h.example'] }) } });
+    await runNetinfoPtr({ db, targets: ['a.example'], geo: null, now: NOW, ptr: { budgetMs: 1000, lookup: fakeLookup({ '192.0.2.10': null }) } });
+    expect(ptrOf(db, '192.0.2.10')).toBe('["h.example"]');
+  });
+
+  it('a later [] replaces stored names', async () => {
+    const db = openDb(':memory:');
+    port(db, 'a.example', '192.0.2.10', T0);
+    await runNetinfoPtr({ db, targets: ['a.example'], geo: null, now: NOW, ptr: { budgetMs: 1000, lookup: fakeLookup({ '192.0.2.10': ['h.example'] }) } });
+    await runNetinfoPtr({ db, targets: ['a.example'], geo: null, now: NOW, ptr: { budgetMs: 1000, lookup: fakeLookup({ '192.0.2.10': [] }) } });
+    expect(ptrOf(db, '192.0.2.10')).toBe('[]');
+  });
+
+  it('passes only distinct public ips to the lookup', async () => {
+    const db = openDb(':memory:');
+    for (const ip of ['192.0.2.10', '10.0.0.1', '100.64.0.1', '127.0.0.1', '169.254.0.1', '224.0.0.1', '0.0.0.0', '2001:db8::10', 'fe80::1']) port(db, 'a.example', ip, T0);
+    port(db, 'b.example', '192.0.2.10', T0);
+    const lookup = fakeLookup({});
+
+    await runNetinfoPtr({ db, targets: ['a.example', 'b.example'], geo: null, now: NOW, ptr: { budgetMs: 1000, lookup } });
+
+    expect(lookup.calls).toHaveLength(1);
+    expect([...lookup.calls[0]!].sort()).toEqual(['192.0.2.10', '2001:db8::10']);
+    expect(rows(db).filter((x) => x.ip_class !== 'public').every((x) => x.ptr_json === null)).toBe(true);
+    expect(rows(db, "ip = '192.0.2.10'")).toHaveLength(2);
+  });
+
+  it('finishes the lookup before the first write', async () => {
+    const db = openDb(':memory:');
+    port(db, 'a.example', '192.0.2.10', T0);
+    let rowsDuringLookup = -1;
+    const lookup: Lookup = async (ips) => {
+      rowsDuringLookup = (db.raw.prepare('SELECT count(*) n FROM target_network').get() as { n: number }).n;
+      return new Map(ips.map((ip) => [ip, []]));
+    };
+    await runNetinfoPtr({ db, targets: ['a.example'], geo: null, now: NOW, ptr: { budgetMs: 1000, lookup } });
+    expect(rowsDuringLookup).toBe(0);
+  });
+
+  it('counts budget skips and forwards the budget', async () => {
+    const db = openDb(':memory:');
+    port(db, 'a.example', '192.0.2.10', T0);
+    port(db, 'a.example', '192.0.2.11', T0);
+    let seenBudget = 0;
+    const lookup: Lookup = async (ips, o) => {
+      seenBudget = o.budgetMs;
+      o.stats!.skippedByBudget = 1;
+      return new Map(ips.map((ip) => [ip, ip === '192.0.2.10' ? ['h.example'] : null]));
+    };
+    const r = await runNetinfoPtr({ db, targets: ['a.example'], geo: null, now: NOW, ptr: { budgetMs: 4321, lookup } });
+    expect(seenBudget).toBe(4321);
+    expect(r.ptr).toEqual({ looked_up: 2, found: 1, empty: 0, failed: 0, skipped_budget: 1 });
+  });
+
+  it('runNetinfo (ptr off) never calls a lookup and leaves ptr_json NULL', () => {
+    const db = openDb(':memory:');
+    port(db, 'a.example', '192.0.2.10', T0);
+    const r = runNetinfo({ db, targets: ['a.example'], geo: null, now: NOW });
+    expect(ptrOf(db, '192.0.2.10')).toBeNull();
+    expect(r.ptr).toEqual({ looked_up: 0, found: 0, empty: 0, failed: 0, skipped_budget: 0 });
   });
 });

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { openDb } from '../src/lib/db.js';
-import { mmdbAgeWarning, startNetinfoRun } from '../src/netinfo.js';
+import { mmdbAgeWarning, startNetinfoRun, splitOwnFlags } from '../src/netinfo.js';
 
 const scanDir = path.resolve(__dirname, '..');
 const tsx = path.join(scanDir, 'node_modules', '.bin', 'tsx');
@@ -86,6 +86,66 @@ describe('netinfo cli', () => {
     const r = await runCli(['--all', '--sqlite', s.db, '--mmdb', s.mmdb]);
     expect(r.code).toBe(0);
     expect(readBack(s.db).net.map((x) => x.ip)).toEqual(['192.0.2.11']);
+  });
+});
+
+// 10.0.0.5 is private, so a --ptr run has nothing to look up and sends no DNS.
+describe('netinfo cli ptr flags', () => {
+  const setupPrivate = () => {
+    const s = setup();
+    fs.writeFileSync(s.targets, '10.0.0.5\n');
+    return s;
+  };
+
+  it('is off by default', async () => {
+    const s = setupPrivate();
+    const r = await runCli(['--targets', s.targets, '--sqlite', s.db, '--mmdb', s.mmdb]);
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain('ptr: off');
+  });
+
+  it('--ptr turns it on and reports counts, before or after --', async () => {
+    for (const args of [['--ptr'], ['--', '--ptr', '--ptr-budget-sec', '5']]) {
+      const s = setupPrivate();
+      const r = await runCli(['--targets', s.targets, '--sqlite', s.db, '--mmdb', s.mmdb, ...args]);
+      expect(r.code).toBe(0);
+      expect(r.stderr).toMatch(/ptr: 0 looked up, 0 found, 0 empty, 0 failed, 0 skipped by budget/);
+    }
+  });
+
+  it('the later of --ptr and --no-ptr wins', async () => {
+    const s = setupPrivate();
+    const r = await runCli(['--targets', s.targets, '--sqlite', s.db, '--mmdb', s.mmdb, '--ptr', '--no-ptr']);
+    expect(r.stderr).toContain('ptr: off');
+  });
+
+  it('exits 2 on a bad budget', async () => {
+    const s = setupPrivate();
+    for (const bad of ['abc', '-1', '']) {
+      const r = await runCli(['--targets', s.targets, '--sqlite', s.db, '--mmdb', s.mmdb, '--ptr-budget-sec', bad]);
+      expect(r.code).toBe(2);
+    }
+  });
+});
+
+describe('splitOwnFlags', () => {
+  const base = ['node', 'netinfo.ts'];
+  it('defaults', () => {
+    expect(splitOwnFlags(base)).toMatchObject({ ptr: false, ptrBudgetSec: 60 });
+  });
+  it('last of --ptr / --no-ptr wins', () => {
+    expect(splitOwnFlags([...base, '--ptr', '--no-ptr']).ptr).toBe(false);
+    expect(splitOwnFlags([...base, '--no-ptr', '--ptr']).ptr).toBe(true);
+    expect(splitOwnFlags([...base, '--ptr', '--', '--no-ptr']).ptr).toBe(false);
+    expect(splitOwnFlags([...base, '--ptr', '--', '--no-ptr', '--ptr']).ptr).toBe(true);
+  });
+  it('takes the budget and keeps other args', () => {
+    const o = splitOwnFlags([...base, '--targets', 't.txt', '--ptr-budget-sec', '7.5']);
+    expect(o.ptrBudgetSec).toBe(7.5);
+    expect(o.rest).toEqual([...base, '--targets', 't.txt']);
+  });
+  it('marks an invalid budget as NaN', () => {
+    for (const bad of ['abc', '-1', '']) expect(Number.isNaN(splitOwnFlags([...base, '--ptr-budget-sec', bad]).ptrBudgetSec)).toBe(true);
   });
 });
 

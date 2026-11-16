@@ -58,4 +58,23 @@ describe('scan-all netinfo stage', () => {
       expect(tools).toEqual(['netinfo']);
     } finally { raw.close(); }
   }, 120_000);
+
+  // 10.0.0.5 is private: --ptr has nothing to look up, so no DNS is sent.
+  it.each([
+    ['passes --ptr by default', undefined, 'ptr: 0 looked up'],
+    ['lets NETINFO_FLAGS=--no-ptr switch it off', '--no-ptr', 'ptr: off'],
+  ])('%s', async (_name, extra, expected) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scan-all-netinfo-ptr-'));
+    dirs.push(dir);
+    const targets = path.join(dir, 'targets.txt');
+    fs.writeFileSync(targets, '10.0.0.5\n');
+    const flags = [`--mmdb ${path.join(dir, 'missing.mmdb')}`, extra].filter(Boolean).join(' ');
+    const r = await runScanAll(
+      { SKIP: otherStages().join(','), NETINFO_FLAGS: flags },
+      ['--targets', targets, '--sqlite', path.join(dir, 'scan.db')],
+    );
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain(`[netinfo] netinfo:`);
+    expect(r.stderr).toContain(expected);
+  }, 120_000);
 });

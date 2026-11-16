@@ -372,7 +372,7 @@ SKIP=wpscan,testssl npm run scan-all -- ...
 ```
 `SKIP=version-match` turns the version-to-CVE matching off.
 
-Stage 3 also runs `netinfo`, which fills `target_network` (target, IP, port and DNS flags, offline MMDB geo/ASN) from the Stage 2 evidence. It makes no network calls. `SKIP=netinfo` turns it off; `NETINFO_FLAGS="--mmdb <file>"` points it at another MMDB. A missing MMDB still writes the rows, without geo.
+Stage 3 also runs `netinfo`, which fills `target_network` (target, IP, port and DNS flags, offline MMDB geo/ASN) from the Stage 2 evidence. The only network I/O is PTR: the stage runs with `--ptr` and reverse-resolves the distinct public IPs through c-ares, so it uses the resolver of the namespace the scan runs in (`ptr_json` is NULL when not looked up, `[]` when there is no PTR). Lookups time out after 3 s, run 10 at a time and stop starting after `--ptr-budget-sec` (default 60); an IP that failed or was cut off keeps its stored names and is retried next run. `SKIP=netinfo` turns the stage off; `NETINFO_FLAGS=--no-ptr` turns only the PTR lookups off (the later of `--ptr` and `--no-ptr` wins); `NETINFO_FLAGS="--mmdb <file>"` points it at another MMDB. A missing MMDB still writes the rows, without geo. Run by hand, `npm run netinfo -- --targets t.txt --ptr` or `-- --all --ptr --ptr-budget-sec 600`.
 
 `--sqlite` flows down to every stage automatically.
 

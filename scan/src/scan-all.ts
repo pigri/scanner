@@ -50,7 +50,8 @@ Dependency graph:
                         sslyze (modern TLS audit: Heartbleed/ROBOT/CCS/SSLv3/TLS1.x),
                         cve-rollup (aggregate findings.cve → cves table),
                         netinfo (target → IP evidence from ports/dns_records, plus
-                        offline MMDB geo/ASN → target_network; needs Stage 2;
+                        offline MMDB geo/ASN, plus PTR names via the namespace
+                        resolver → target_network; needs Stage 2;
                         a missing MMDB still writes the rows, minus geo),
                         cname-takeover (dangling-CNAME check vs 29 providers),
                         enum4linux-ng + smbmap + rpcclient (--live-only, gated on
@@ -62,7 +63,8 @@ Each stage inherits --scope / --strict / --targets / --sqlite.
 
 Env vars:
   SKIP=wpscan,gowitness,smb skip these stages ("smb" skips all three SMB tools)
-  NETINFO_FLAGS="--mmdb F"  extra flags for the netinfo stage (like <TOOL>_FLAGS)
+  NETINFO_FLAGS="--mmdb F"  extra flags for the netinfo stage (like <TOOL>_FLAGS);
+                            "--no-ptr" turns its reverse-DNS lookups off
   RUN_TESTSSL=1            run the testssl stage (off by default — sslyze covers
                            TLS/certs; testssl hangs on many hosts)
   SEQUENTIAL=1              fall back to strict sequential (legacy behaviour)
@@ -218,8 +220,9 @@ Env vars:
   if (runOne('cve-rollup')) stage3.push(['cve-rollup', ['tsx', 'src/cve-rollup.ts', '--sqlite', opts.sqlite ?? 'scan.db']]);
   // netinfo — derives target_network rows from the ports and dns_records
   // evidence Stage 2 wrote (httpx, the port scanners, dnsx), so it stays in
-  // Stage 3. Offline only. SKIP=netinfo skips; NETINFO_FLAGS passes --mmdb etc.
-  if (runOne('netinfo')) stage3.push(['netinfo', cmd('netinfo')]);
+  // Stage 3. Offline except for PTR: --ptr comes first and NETINFO_FLAGS lands
+  // after it (behind `--`), so NETINFO_FLAGS=--no-ptr wins. SKIP=netinfo skips.
+  if (runOne('netinfo')) stage3.push(['netinfo', cmd('netinfo', ['--ptr'])]);
   // cname-takeover — cross-joins dns_records.CNAME against the takeover
   // provider list. Sweeps the whole DB (not just the batch) so newly-added
   // providers get retested against historical CNAMEs.
