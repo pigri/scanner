@@ -1,4 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import Database from 'better-sqlite3';
+import { openDb } from '../src/lib/db.js';
 import { runQueueLoop, type QueueLoopOpts } from '../src/lib/queue-loop.js';
 import type { QueueOps, ClaimedRow } from '../src/lib/queue.js';
 import type { Logger } from '../src/lib/log.js';
@@ -402,5 +407,185 @@ describe('runQueueLoop stop during a batch', () => {
     await runQueueLoop(base(f, { maxBatches: 1, stopBatch: async () => {} }));
     expect(f.done).toEqual([1]);
     expect(f.released).toEqual([]);
+  });
+});
+
+describe('runQueueLoop when the database is locked', () => {
+  const busyErr = (): Error => Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
+  // Makes `method` throw SQLITE_BUSY for its next `n` calls, then behave normally.
+  const busyFor = (f: Fake, method: 'claimBatch' | 'markDone' | 'markFailed' | 'stats', n: number): { calls: () => number } => {
+    const orig = f.queue[method] as (...a: unknown[]) => unknown;
+    let left = n;
+    let calls = 0;
+    (f.queue as unknown as Record<string, unknown>)[method] = (...a: unknown[]) => {
+      calls++;
+      if (left-- > 0) throw busyErr();
+      return orig(...a);
+    };
+    return { calls: () => calls };
+  };
+  const sleeps = (): { fn: (ms: number) => Promise<void>; ms: number[] } => {
+    const ms: number[] = [];
+    return { ms, fn: async (d) => { ms.push(d); if (ms.length > 1000) throw new Error('retried without limit'); } };
+  };
+
+  it('waits and claims on the next pass when the claim is busy', async () => {
+    const f = fakeQueue([[row(1)]]);
+    busyFor(f, 'claimBatch', 1);
+    const s = sleeps();
+    const warn = vi.fn();
+    const res = await runQueueLoop(base(f, { maxBatches: 1, sleepFn: s.fn, log: { ...log, warn } as unknown as Logger }));
+    expect(s.ms).toEqual([1000]);
+    expect(f.done).toEqual([1]);
+    expect(res.batches).toBe(1);
+    expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).toContain('database busy, not claiming; retrying in 1s');
+  });
+
+  it('doubles the claim wait while the database stays busy', async () => {
+    const f = fakeQueue([[row(1)]]);
+    busyFor(f, 'claimBatch', 3);
+    const s = sleeps();
+    await runQueueLoop(base(f, { maxBatches: 1, sleepFn: s.fn }));
+    expect(s.ms).toEqual([1000, 2000, 4000]);
+  });
+
+  it('still throws a non-busy error from the claim', async () => {
+    const f = fakeQueue([[row(1)]]);
+    f.queue.claimBatch = () => { throw Object.assign(new Error('disk I/O error'), { code: 'SQLITE_IOERR' }); };
+    await expect(runQueueLoop(base(f, { sleepFn: sleeps().fn }))).rejects.toThrow('disk I/O error');
+  });
+
+  it('marks each row done exactly once after a busy mark', async () => {
+    const f = fakeQueue([[row(1), row(2)]]);
+    busyFor(f, 'markDone', 2);
+    const s = sleeps();
+    const res = await runQueueLoop(base(f, { maxBatches: 1, sleepFn: s.fn }));
+    expect(s.ms).toEqual([1000, 2000]);
+    expect(f.done).toEqual([1, 2]);
+    expect(f.failed).toEqual([]);
+    expect(res.restart).toBeUndefined();
+  });
+
+  it('gives up marking after about five minutes, leaves the rows, and asks for a restart', async () => {
+    const f = fakeQueue([[row(1), row(2)], [row(3)]]);
+    const m = busyFor(f, 'markDone', Infinity);
+    const s = sleeps();
+    const error = vi.fn();
+    const res = await runQueueLoop(base(f, { watch: true, sleepFn: s.fn, log: { ...log, error } as unknown as Logger }));
+    const waited = s.ms.reduce((a, b) => a + b, 0);
+    expect(waited).toBeGreaterThanOrEqual(300_000);
+    expect(waited).toBeLessThan(340_000);
+    expect(Math.max(...s.ms)).toBe(30_000);
+    expect(m.calls()).toBe(s.ms.length + 1);
+    expect(f.done).toEqual([]);
+    expect(f.failed).toEqual([]);
+    expect(f.released).toEqual([]);
+    expect(f.claims).toHaveLength(1);
+    expect(res.restart).toMatch(/database is locked/);
+    expect(error.mock.calls.map((c) => String(c[0])).join('\n')).toContain('left in_progress');
+  });
+
+  it('counts only the unmarked rows when marking gives up partway through a batch', async () => {
+    const f = fakeQueue([[row(1), row(2), row(3)]]);
+    const orig = f.queue.markDone.bind(f.queue);
+    let n = 0;
+    f.queue.markDone = (...a: Parameters<typeof orig>) => { if (n++ >= 1) throw busyErr(); return orig(...a); };
+    const error = vi.fn();
+    const res = await runQueueLoop(base(f, { maxBatches: 1, sleepFn: sleeps().fn, log: { ...log, error } as unknown as Logger }));
+    expect(f.done).toEqual([1]);
+    expect(res.restart).toMatch(/database is locked/);
+    expect(error.mock.calls.map((c) => String(c[0])).join('\n')).toContain('2 of 3 row(s) left in_progress');
+  });
+
+  it('marks a failed batch failed once after a busy mark', async () => {
+    const f = fakeQueue([[row(1)]]);
+    busyFor(f, 'markFailed', 1);
+    const s = sleeps();
+    const res = await runQueueLoop(base(f, { maxBatches: 1, sleepFn: s.fn, processBatch: async () => ({ ok: false, error: 'x' }) }));
+    expect(s.ms).toEqual([1000]);
+    expect(f.failed).toEqual([1]);
+    expect(f.done).toEqual([]);
+    expect(res.restart).toBeUndefined();
+  });
+
+  it('still throws a non-busy error from a mark', async () => {
+    const f = fakeQueue([[row(1)]]);
+    f.queue.markDone = () => { throw Object.assign(new Error('constraint'), { code: 'SQLITE_CONSTRAINT' }); };
+    await expect(runQueueLoop(base(f, { maxBatches: 1, sleepFn: sleeps().fn }))).rejects.toThrow('constraint');
+  });
+
+  it('warns and goes on when the hand-off is busy', async () => {
+    const f = fakeQueue([[row(1)], [row(2)]]);
+    const warn = vi.fn();
+    let n = 0;
+    const res = await runQueueLoop(base(f, {
+      maxBatches: 2, log: { ...log, warn } as unknown as Logger,
+      onBatchDone: () => { if (n++ === 0) throw busyErr(); },
+    }));
+    expect(res.batches).toBe(2);
+    expect(f.done).toEqual([1, 2]);
+    expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).toContain('hand-off');
+  });
+
+  it('still throws a non-busy error from the hand-off', async () => {
+    const f = fakeQueue([[row(1)]]);
+    await expect(runQueueLoop(base(f, { maxBatches: 1, onBatchDone: () => { throw new Error('boom'); } }))).rejects.toThrow('boom');
+  });
+
+  it('warns and goes on when the stats are busy, at start and after a batch', async () => {
+    const f = fakeQueue([[row(1)]]);
+    const m = busyFor(f, 'stats', 2);
+    const warn = vi.fn();
+    const res = await runQueueLoop(base(f, { maxBatches: 1, log: { ...log, warn } as unknown as Logger }));
+    expect(m.calls()).toBe(2);
+    expect(f.done).toEqual([1]);
+    expect(res.batches).toBe(1);
+    expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).toContain('stats');
+  });
+
+  it('stops promptly when a signal arrives during a claim wait', async () => {
+    const f = fakeQueue([[row(1)]]);
+    const m = busyFor(f, 'claimBatch', Infinity);
+    let n = 0;
+    const res = await runQueueLoop(base(f, { watch: true, sleepFn: async () => { if (++n === 2) process.emit('SIGTERM'); } }));
+    expect(m.calls()).toBe(2);
+    expect(res.restart).toBeUndefined();
+  });
+
+  it('stops retrying a mark when a signal arrives during the wait', async () => {
+    const f = fakeQueue([[row(1)]]);
+    const m = busyFor(f, 'markDone', Infinity);
+    const res = await runQueueLoop(base(f, { watch: true, sleepFn: async () => { process.emit('SIGTERM'); } }));
+    expect(m.calls()).toBe(1);
+    expect(f.done).toEqual([]);
+    expect(res.restart).toBeUndefined();
+  });
+
+  it('survives a real lock held by another connection and claims once it is released', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'queue-busy-'));
+    const file = path.join(dir, 'q.db');
+    const db = openDb(file);
+    let holder: Database.Database | undefined;
+    try {
+      db.raw.pragma('busy_timeout = 50');
+      db.scanQueue.enqueueMany([{ target: 'example.test', priority: 1 }], '2026-08-19T12:00:00.000Z');
+      holder = new Database(file);
+      holder.exec('BEGIN IMMEDIATE');
+      const seen: string[] = [];
+      let sleeps = 0;
+      const res = await runQueueLoop({
+        queue: db.scanQueue, label: 'scan', batchSize: 5, maxBatches: 1, watch: false, pollSec: 1, log, workerId: 'w1',
+        sleepFn: async () => { sleeps++; holder!.exec('COMMIT'); },
+        processBatch: async (claimed) => { seen.push(...claimed.map((c) => c.target)); return { ok: true }; },
+      });
+      expect(sleeps).toBe(1);
+      expect(seen).toEqual(['example.test']);
+      expect(res.batches).toBe(1);
+      expect(db.scanQueue.stats().done).toBe(1);
+    } finally {
+      holder?.close();
+      db.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
