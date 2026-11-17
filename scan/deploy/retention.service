@@ -5,6 +5,7 @@ Description=gen0sec scan retention (prune superseded per-target rows)
 Type=oneshot
 # Deletes only rows whose run is older than 90 days AND whose target has a
 # newer run of the same tool, in small transactions (see src/retention.ts).
+# risk_scores rows older than 30 days go too, except each target's latest.
 # Dry-run first: `npm run retention` without --apply (deploy/README.md).
-ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; cd %h/gen0sec/redteam/scan && mkdir -p logs && exec npm run retention -- --older-than 90 --apply >>logs/retention.log 2>&1'
+ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; cd %h/gen0sec/redteam/scan && mkdir -p logs && exec npm run retention -- --older-than 90 --risk-older-than 30 --apply >>logs/retention.log 2>&1'
 TimeoutStartSec=7200
