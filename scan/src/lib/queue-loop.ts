@@ -269,10 +269,12 @@ export async function runQueueLoop(o: QueueLoopOpts): Promise<{ batches: number;
     const doneIso = new Date().toISOString();
 
     let marked: 'ok' | 'exhausted' | 'interrupted' = 'ok';
+    let nMarked = 0;
     if (outcome.ok) {
       for (const c of claimed) {
         marked = await markWithRetry(() => queue.markDone(c.id, outcome.runId ?? null, doneIso, o.workerId));
         if (marked !== 'ok') break;
+        nMarked++;
         log.info(`  done  #${c.id} ${c.target} → run_id=${outcome.runId ?? '(none)'}`);
       }
       if (marked === 'ok') {
@@ -287,17 +289,18 @@ export async function runQueueLoop(o: QueueLoopOpts): Promise<{ batches: number;
       for (const c of claimed) {
         marked = await markWithRetry(() => queue.markFailed(c.id, outcome.error ?? 'unknown', doneIso, o.workerId));
         if (marked !== 'ok') break;
+        nMarked++;
         log.error(`  fail  #${c.id} ${c.target} → ${outcome.error ?? 'unknown'}`);
       }
       if (marked === 'ok') log.error(`${label}: batch ${batchN} FAILED in ${dt}s → ${claimed.length} row(s) marked failed`);
     }
     if (marked === 'exhausted') {
       restart = 'database is locked; could not record the batch result';
-      log.error(`${label}: batch ${batchN}: database stayed locked while marking; ${claimed.length} row(s) left in_progress for the startup reap, exiting so the supervisor restarts the worker`);
+      log.error(`${label}: batch ${batchN}: database stayed locked while marking; ${claimed.length - nMarked} of ${claimed.length} row(s) left in_progress for the startup reap, exiting so the supervisor restarts the worker`);
       break;
     }
     if (marked === 'interrupted') {
-      log.warn(`${label}: batch ${batchN}: stop requested while the database was locked; ${claimed.length} row(s) left in_progress for the startup reap`);
+      log.warn(`${label}: batch ${batchN}: stop requested while the database was locked; ${claimed.length - nMarked} of ${claimed.length} row(s) left in_progress for the startup reap`);
       break;
     }
     logStats(`queue after batch ${batchN}`);

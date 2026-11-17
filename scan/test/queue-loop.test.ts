@@ -485,6 +485,18 @@ describe('runQueueLoop when the database is locked', () => {
     expect(error.mock.calls.map((c) => String(c[0])).join('\n')).toContain('left in_progress');
   });
 
+  it('counts only the unmarked rows when marking gives up partway through a batch', async () => {
+    const f = fakeQueue([[row(1), row(2), row(3)]]);
+    const orig = f.queue.markDone.bind(f.queue);
+    let n = 0;
+    f.queue.markDone = (...a: Parameters<typeof orig>) => { if (n++ >= 1) throw busyErr(); return orig(...a); };
+    const error = vi.fn();
+    const res = await runQueueLoop(base(f, { maxBatches: 1, sleepFn: sleeps().fn, log: { ...log, error } as unknown as Logger }));
+    expect(f.done).toEqual([1]);
+    expect(res.restart).toMatch(/database is locked/);
+    expect(error.mock.calls.map((c) => String(c[0])).join('\n')).toContain('2 of 3 row(s) left in_progress');
+  });
+
   it('marks a failed batch failed once after a busy mark', async () => {
     const f = fakeQueue([[row(1)]]);
     busyFor(f, 'markFailed', 1);
