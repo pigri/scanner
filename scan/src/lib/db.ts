@@ -162,6 +162,20 @@ function loadSchema(): string {
 // passes includeSuffixes=['gov.hu','hu'], the foreign fleet passes
 // excludeSuffixes=['gov.hu','hu']. report_queue is never filtered (reports are
 // pure DB reads, no network egress).
+// TRUNCATE takes the write lock and then waits up to busy_timeout for readers.
+// With a 0 wait it returns busy at once instead of blocking every writer.
+// Returns true when the checkpoint completed.
+export function checkpointNoWait(raw: Database.Database): boolean {
+  const saved = raw.pragma('busy_timeout', { simple: true }) as number;
+  try {
+    raw.pragma('busy_timeout = 0');
+    const rows = raw.pragma('wal_checkpoint(TRUNCATE)') as { busy: number }[];
+    return rows[0]?.busy === 0;
+  } finally {
+    raw.pragma(`busy_timeout = ${saved}`);
+  }
+}
+
 export interface OpenDbOptions {
   scanQueueFilter?: QueueFilter;
 }

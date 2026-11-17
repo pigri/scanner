@@ -6,7 +6,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { openDb } from './lib/db.js';
+import { openDb, checkpointNoWait } from './lib/db.js';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
 import { createLogger, type Logger } from './lib/log.js';
 import { scanChildEnv, TUNED_SCAN_FLAGS } from './lib/scan-all-runner.js';
@@ -207,7 +207,7 @@ async function main(): Promise<void> {
     const now = Date.now();
     if (now - lastCheckpoint < 60_000) return;
     lastCheckpoint = now;
-    try { db.raw.pragma('wal_checkpoint(TRUNCATE)'); } catch { /* busy: retry next tick */ }
+    try { checkpointNoWait(db.raw); } catch { /* busy: retry next tick */ }
   };
 
   const preflight = preflightFromOpts(opts);

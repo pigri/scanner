@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { openDb, type Db } from '../src/lib/db.js';
+import { openDb, checkpointNoWait, type Db } from '../src/lib/db.js';
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -308,5 +308,92 @@ describe('target_network.from_http', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('checkpointNoWait', () => {
+  function tempWal(): { dir: string; file: string; open: () => Database.Database } {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ckpt-'));
+    const file = path.join(dir, 'test.db');
+    const open = () => {
+      const c = new Database(file);
+      c.pragma('journal_mode = WAL');
+      return c;
+    };
+    const init = open();
+    init.exec('CREATE TABLE t (x INTEGER)');
+    init.close();
+    return { dir, file, open };
+  }
+
+  it('gives up at once while a reader is open and leaves the write lock free', () => {
+    const { dir, open } = tempWal();
+    const reader = open();
+    const writer = open();
+    const checkpointer = open();
+    const third = open();
+    try {
+      reader.exec('BEGIN');
+      reader.prepare('SELECT count(*) FROM t').get();
+      writer.prepare('INSERT INTO t VALUES (1)').run();
+
+      const t0 = Date.now();
+      expect(checkpointNoWait(checkpointer)).toBe(false);
+      expect(Date.now() - t0).toBeLessThan(500);
+
+      third.pragma('busy_timeout = 100');
+      expect(() => third.exec('BEGIN IMMEDIATE; COMMIT')).not.toThrow();
+    } finally {
+      for (const c of [reader, writer, checkpointer, third]) c.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('truncates the WAL when no reader is open', () => {
+    const { dir, file, open } = tempWal();
+    const writer = open();
+    try {
+      writer.prepare('INSERT INTO t VALUES (1)').run();
+      expect(fs.statSync(`${file}-wal`).size).toBeGreaterThan(0);
+      expect(checkpointNoWait(writer)).toBe(true);
+      expect(fs.statSync(`${file}-wal`).size).toBe(0);
+    } finally {
+      writer.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('restores busy_timeout after a checkpoint', () => {
+    const { dir, open } = tempWal();
+    const c = open();
+    try {
+      c.pragma('busy_timeout = 4321');
+      checkpointNoWait(c);
+      expect(c.pragma('busy_timeout', { simple: true })).toBe(4321);
+    } finally {
+      c.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('restores busy_timeout when the checkpoint throws', () => {
+    let timeout = 4321;
+    const fake = {
+      pragma(sql: string, opts?: { simple?: boolean }) {
+        const m = /^busy_timeout = (\d+)$/.exec(sql);
+        if (m) { timeout = Number(m[1]); return undefined; }
+        if (sql === 'busy_timeout') return opts?.simple ? timeout : [{ timeout }];
+        throw new Error('checkpoint failed');
+      },
+    } as unknown as Database.Database;
+    expect(() => checkpointNoWait(fake)).toThrow('checkpoint failed');
+    expect(timeout).toBe(4321);
+  });
+
+  // report-worker.ts runs main() on import, so the call sites are checked by reading them.
+  it.each(['worker.ts', 'report-worker.ts'])('%s checkpoints through checkpointNoWait', (file) => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8');
+    expect(src).toContain('checkpointNoWait(');
+    expect(src).not.toContain('wal_checkpoint(TRUNCATE)');
   });
 });
