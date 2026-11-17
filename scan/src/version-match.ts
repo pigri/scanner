@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import { openDb, type Db } from './lib/db.js';
 import { parseCommonCli, prepareTargets, run } from './lib/runner.js';
 import { openNvdLookup, type VulnLookup } from './lib/nvd-db.js';
-import { isSqliteBusy } from './cve-enrich.js';
+import { isSqliteBusy } from './lib/sqlite-busy.js';
 import { resolveAlias } from './lib/cpe-aliases.js';
 import {
   parseServerHeader, parseTechToken, evidenceFromPort, matchCves, severityForCvss,
