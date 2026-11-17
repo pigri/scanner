@@ -520,3 +520,35 @@ describe('unreachable flag', () => {
     }, 120_000);
   });
 });
+
+describe('GET /api/target score dates', () => {
+  const addScore = (raw: ReturnType<typeof openDb>['raw'], target: string, at: string) =>
+    raw
+      .prepare(`INSERT INTO risk_scores (target, score, breakdown_json, computed_at) VALUES (?, 10, '{}', ?)`)
+      .run(target, at);
+
+  it('keeps created and updated from risk_latest when the older risk_scores rows are gone', async () => {
+    const base = await startUi(
+      seed(false, (raw) => {
+        raw.prepare(`UPDATE risk_latest SET created_at = ?, updated_at = ? WHERE target = 'host.example'`)
+          .run('2026-08-01T00:00:00.000Z', '2026-11-09T00:00:00.000Z');
+        addScore(raw, 'host.example', '2026-10-20T00:00:00.000Z');
+      }),
+    );
+    const d = (await (await fetch(`${base}/api/target?t=host.example`)).json()) as any;
+    expect(d.created_at).toBe('2026-08-01T00:00:00.000Z');
+    expect(d.updated_at).toBe('2026-11-09T00:00:00.000Z');
+  }, 40_000);
+
+  it('takes a URL target dates from risk_scores, which risk_latest never holds', async () => {
+    const base = await startUi(
+      seed(false, (raw) => {
+        addScore(raw, 'https://url.example', '2026-09-01T00:00:00.000Z');
+        addScore(raw, 'https://url.example', '2026-11-02T00:00:00.000Z');
+      }),
+    );
+    const d = (await (await fetch(`${base}/api/target?t=${encodeURIComponent('https://url.example')}`)).json()) as any;
+    expect(d.created_at).toBe('2026-09-01T00:00:00.000Z');
+    expect(d.updated_at).toBe('2026-11-02T00:00:00.000Z');
+  }, 40_000);
+});

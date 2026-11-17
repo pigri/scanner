@@ -447,11 +447,14 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
     const t = (q.get('t') || '').trim();
     if (!t) return { error: 'missing target' };
     const risk = latestRiskRow(scan).get(t);
-    const span = scan
-      .prepare(
-        `SELECT MIN(computed_at) created_at, MAX(computed_at) updated_at FROM risk_scores WHERE target=?`,
-      )
-      .get(t) as { created_at: string | null; updated_at: string | null };
+    // risk_latest keeps the first and last scoring dates when old risk_scores
+    // rows are pruned. URL targets have no risk_latest row, so they fall back.
+    type Span = { created_at: string | null; updated_at: string | null };
+    const span =
+      (scan.prepare(`SELECT created_at, updated_at FROM risk_latest WHERE target=?`).get(t) as Span | undefined) ??
+      (scan
+        .prepare(`SELECT MIN(computed_at) created_at, MAX(computed_at) updated_at FROM risk_scores WHERE target=?`)
+        .get(t) as Span);
     // `tools` = comma-separated list of scanners (from runs.tool) that ever
     // observed this (port, protocol) on this target — so rustscan-only /
     // naabu-only findings are visible in the detail view.
