@@ -1,5 +1,6 @@
 import type { QueueOps, ClaimedRow } from './queue.js';
 import type { Logger } from './log.js';
+import { isSqliteBusy } from './sqlite-busy.js';
 import type { PreflightResult, PostBatchResult } from './egress-check.js';
 
 // Shared drain loop for both the scan worker and the report worker: claim a
@@ -24,12 +25,22 @@ import type { PreflightResult, PostBatchResult } from './egress-check.js';
 // rows are marked. When it says 'restart' (or throws), the batch ran in a
 // namespace that may be gone, so its result is not trusted: the rows go back to
 // pending without counting an attempt, and the loop returns a restart reason.
+//
+// Locked database: another process (the hourly risk run) can hold the write lock
+// longer than busy_timeout. A SQLITE_BUSY from the loop's own calls is contention,
+// not a fault. A busy claim backs off and retries. A busy mark retries for about
+// MARK_BUDGET_MS, because giving up throws away a finished scan; if that runs out
+// the rows stay in_progress for the startup reap and the loop returns a restart
+// reason. A busy hand-off or stats call is logged and skipped. Other errors throw.
 
 const HEARTBEAT_MS = 60_000;
 const STALE_MS = 15 * 60_000;
 const LEGACY_MS = 3 * 3600_000;
 const REAP_EVERY_MS = 60_000;
 const MAX_BACKOFF_MS = 300_000;
+const MARK_FIRST_WAIT_MS = 1_000;
+const MARK_MAX_WAIT_MS = 30_000;
+const MARK_BUDGET_MS = 300_000;
 
 export interface BatchOutcome {
   ok: boolean;
@@ -129,9 +140,35 @@ export async function runQueueLoop(o: QueueLoopOpts): Promise<{ batches: number;
     wake = () => { clearTimeout(t); wake = null; res(); };
   }));
 
+  // 'exhausted' once the write has stayed locked past the budget; 'interrupted' if a stop arrived while waiting.
+  const markWithRetry = async (run: () => void): Promise<'ok' | 'exhausted' | 'interrupted'> => {
+    let wait = MARK_FIRST_WAIT_MS;
+    let waited = 0;
+    while (true) {
+      try { run(); return 'ok'; }
+      catch (e) {
+        if (!isSqliteBusy(e)) throw e;
+        if (waited >= MARK_BUDGET_MS) return 'exhausted';
+        log.warn(`${label}: database busy while marking; retrying in ${Math.round(wait / 1000)}s`);
+        await idleSleep(wait);
+        if (interrupted) return 'interrupted';
+        waited += wait;
+        wait = Math.min(wait * 2, MARK_MAX_WAIT_MS);
+      }
+    }
+  };
+  const logStats = (what: string): void => {
+    try {
+      const st = queue.stats();
+      log.info(`${label}: ${what}: pending=${st.pending} in_progress=${st.in_progress} done=${st.done} failed=${st.failed}`);
+    } catch (e) {
+      if (!isSqliteBusy(e)) throw e;
+      log.warn(`${label}: database busy; skipped the stats log (${what})`);
+    }
+  };
+
   reap('startup reap', o.workerId);
-  const s0 = queue.stats();
-  log.info(`${label}: queue at start: pending=${s0.pending} in_progress=${s0.in_progress} done=${s0.done} failed=${s0.failed}`);
+  logStats('queue at start');
   if (o.watch) log.info(`${label}: watch mode, polling every ${o.pollSec}s when idle`);
   let idle = false;
   let backoffMs = o.pollSec * 1000;
@@ -160,7 +197,17 @@ export async function runQueueLoop(o: QueueLoopOpts): Promise<{ batches: number;
       }
       backoffMs = o.pollSec * 1000;
     }
-    const claimed = queue.claimBatch(o.batchSize, new Date(now()).toISOString(), o.workerId);
+    let claimed: ClaimedRow[];
+    try {
+      claimed = queue.claimBatch(o.batchSize, new Date(now()).toISOString(), o.workerId);
+    } catch (e) {
+      if (!isSqliteBusy(e)) throw e;
+      log.warn(`${label}: database busy, not claiming; retrying in ${Math.round(backoffMs / 1000)}s`);
+      await idleSleep(backoffMs);
+      backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
+      continue;
+    }
+    backoffMs = o.pollSec * 1000;
     if (!claimed.length) {
       if (o.watch) {
         if (!idle) { log.info(`${label}: queue empty; idling (poll every ${o.pollSec}s)`); idle = true; }
@@ -221,16 +268,39 @@ export async function runQueueLoop(o: QueueLoopOpts): Promise<{ batches: number;
     const dt = ((Date.now() - start) / 1000).toFixed(1);
     const doneIso = new Date().toISOString();
 
+    let marked: 'ok' | 'exhausted' | 'interrupted' = 'ok';
     if (outcome.ok) {
-      for (const c of claimed) { queue.markDone(c.id, outcome.runId ?? null, doneIso, o.workerId); log.info(`  done  #${c.id} ${c.target} → run_id=${outcome.runId ?? '(none)'}`); }
-      log.step(`${label}: batch ${batchN} DONE in ${dt}s → ${claimed.length} row(s) marked done`);
-      o.onBatchDone?.(claimed, outcome);
+      for (const c of claimed) {
+        marked = await markWithRetry(() => queue.markDone(c.id, outcome.runId ?? null, doneIso, o.workerId));
+        if (marked !== 'ok') break;
+        log.info(`  done  #${c.id} ${c.target} → run_id=${outcome.runId ?? '(none)'}`);
+      }
+      if (marked === 'ok') {
+        log.step(`${label}: batch ${batchN} DONE in ${dt}s → ${claimed.length} row(s) marked done`);
+        try { o.onBatchDone?.(claimed, outcome); }
+        catch (e) {
+          if (!isSqliteBusy(e)) throw e;
+          log.warn(`${label}: database busy; skipped the hand-off for batch ${batchN}`);
+        }
+      }
     } else {
-      for (const c of claimed) { queue.markFailed(c.id, outcome.error ?? 'unknown', doneIso, o.workerId); log.error(`  fail  #${c.id} ${c.target} → ${outcome.error ?? 'unknown'}`); }
-      log.error(`${label}: batch ${batchN} FAILED in ${dt}s → ${claimed.length} row(s) marked failed`);
+      for (const c of claimed) {
+        marked = await markWithRetry(() => queue.markFailed(c.id, outcome.error ?? 'unknown', doneIso, o.workerId));
+        if (marked !== 'ok') break;
+        log.error(`  fail  #${c.id} ${c.target} → ${outcome.error ?? 'unknown'}`);
+      }
+      if (marked === 'ok') log.error(`${label}: batch ${batchN} FAILED in ${dt}s → ${claimed.length} row(s) marked failed`);
     }
-    const s = queue.stats();
-    log.info(`${label}: queue after batch ${batchN}: pending=${s.pending} in_progress=${s.in_progress} done=${s.done} failed=${s.failed}`);
+    if (marked === 'exhausted') {
+      restart = 'database is locked; could not record the batch result';
+      log.error(`${label}: batch ${batchN}: database stayed locked while marking; ${claimed.length} row(s) left in_progress for the startup reap, exiting so the supervisor restarts the worker`);
+      break;
+    }
+    if (marked === 'interrupted') {
+      log.warn(`${label}: batch ${batchN}: stop requested while the database was locked; ${claimed.length} row(s) left in_progress for the startup reap`);
+      break;
+    }
+    logStats(`queue after batch ${batchN}`);
   }
 
   process.off('SIGINT', onInt);
