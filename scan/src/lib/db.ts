@@ -158,10 +158,6 @@ function loadSchema(): string {
   return fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
 }
 
-// scanQueueFilter narrows what the scan worker's claim() sees — the HU fleet
-// passes includeSuffixes=['gov.hu','hu'], the foreign fleet passes
-// excludeSuffixes=['gov.hu','hu']. report_queue is never filtered (reports are
-// pure DB reads, no network egress).
 // TRUNCATE takes the write lock and then waits up to busy_timeout for readers.
 // With a 0 wait it returns busy at once instead of blocking every writer.
 // Returns true when the checkpoint completed.
@@ -176,6 +172,10 @@ export function checkpointNoWait(raw: Database.Database): boolean {
   }
 }
 
+// scanQueueFilter narrows what the scan worker's claim() sees — the HU fleet
+// passes includeSuffixes=['gov.hu','hu'], the foreign fleet passes
+// excludeSuffixes=['gov.hu','hu']. report_queue is never filtered (reports are
+// pure DB reads, no network egress).
 export interface OpenDbOptions {
   scanQueueFilter?: QueueFilter;
 }
