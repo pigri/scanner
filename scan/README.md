@@ -222,14 +222,18 @@ Prune superseded rows. A target's latest evidence per tool is never deleted, how
 ```
 npm run retention -- --older-than 90           # dry-run: counts per table, runs to remove
 npm run retention -- --older-than 90 --apply   # delete
+npm run retention -- --older-than 90 --risk-older-than 30   # dry-run, also risk_scores
 ```
 
 - `--older-than N` — only rows of runs older than N days are candidates (default: 90)
+- `--risk-older-than N` — also prune `risk_scores` rows older than N days (default: `risk_scores` is not touched)
 - `--apply` — actually delete (default is dry-run)
 
 A row of `findings`, `ports`, `http_probes` or `screenshots` is pruned only when its run is older than N days **and** the same target has a newer, finished run of the same tool with rows in the same table (later `started_at`, ties by run id). A target that was not rescanned keeps all its rows. Deletes run in transactions of 1000 rows with a 60 s busy timeout, so live workers are not blocked for long.
 
-A run row and its `runs/<id>/` directory are removed only when no row in any table that references `runs` is left (so `risk_scores`, `scan_queue`, `dns_records` and the others keep their runs alive). Those tables are never modified. `--keep-min` is gone: the per-target rule replaces it.
+With `--risk-older-than N`, a `risk_scores` row is pruned when its `computed_at` is older than N days **and** it is not its target's latest row (the one with the greatest `computed_at`, ties by highest id; URL targets too). Each target keeps its latest score however old, so `risk_latest` needs no refresh and its `created_at` does not change. History queries (`query risk --since/--until`, `enqueue --from-risk`) then see only N days. The dry run and the apply output print a `risk_scores` count line.
+
+A run row and its `runs/<id>/` directory are removed only when no row in any table that references `runs` is left (so `risk_scores`, `scan_queue`, `dns_records` and the others keep their runs alive). Those tables are never modified, except `risk_scores` with `--risk-older-than`: a risk run whose rows are all pruned is removed with the others. `--keep-min` is gone: the per-target rule replaces it.
 
 The weekly `retention.timer` in `deploy/` runs this with `--apply`; dry-run first (see `deploy/README.md`).
 

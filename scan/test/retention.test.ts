@@ -301,3 +301,136 @@ describe('runRetention keeps risk_latest in step', () => {
     expect(runIds(db.raw)).toEqual([r1, r2]);
   });
 });
+
+describe('runRetention risk_scores window (--risk-older-than)', () => {
+  const T = 'a.example.com';
+  const score = (db: Db, target: string, at: string, runId: number | null, s = 10) =>
+    runId === null
+      ? db.raw.prepare("INSERT INTO risk_scores(target, score, breakdown_json, computed_at, run_id) VALUES(?, ?, '{}', ?, NULL)").run(target, s, at)
+      : recordRiskScores(db.raw, [{ target, score: s, breakdownJson: '{}' }], at, runId);
+  const riskOpts = (over: Partial<RetentionOpts> = {}) => opts({ riskOlderThanDays: 30, ...over });
+  const riskIds = (raw: Database.Database): number[] =>
+    (raw.prepare('SELECT id FROM risk_scores ORDER BY id').all() as { id: number }[]).map((r) => r.id);
+
+  it('deletes old rows but keeps each target latest, even when older than the cutoff', () => {
+    const db = openDb(':memory:');
+    const r1 = db.startRun('risk', {}, OLD);
+    const r2 = db.startRun('risk', {}, OLD2);
+    const r3 = db.startRun('risk', {}, RECENT);
+    score(db, T, OLD, r1);
+    score(db, T, OLD2, r2);
+    score(db, 'b.example.com', OLD, r1);
+    score(db, 'c.example.com', OLD, r1);
+    score(db, 'c.example.com', RECENT, r3);
+    const res = runRetention(db.raw, riskOpts());
+    expect(res.riskScores).toBe(2);
+    expect(db.raw.prepare('SELECT target, computed_at FROM risk_scores ORDER BY id').all()).toEqual([
+      { target: T, computed_at: OLD2 },
+      { target: 'b.example.com', computed_at: OLD },
+      { target: 'c.example.com', computed_at: RECENT },
+    ]);
+  });
+
+  it('keeps rows inside the window', () => {
+    const db = openDb(':memory:');
+    const r1 = db.startRun('risk', {}, RECENT);
+    const r2 = db.startRun('risk', {}, '2026-08-25T00:00:00Z');
+    score(db, T, RECENT, r1);
+    score(db, T, '2026-08-25T00:00:00Z', r2);
+    const res = runRetention(db.raw, riskOpts());
+    expect(res.riskScores).toBe(0);
+    expect(count(db.raw, 'risk_scores')).toBe(2);
+  });
+
+  it('does not touch risk_scores without the flag', () => {
+    const db = openDb(':memory:');
+    const r1 = db.startRun('risk', {}, OLD);
+    const r2 = db.startRun('risk', {}, RECENT);
+    score(db, T, OLD, r1);
+    score(db, T, RECENT, r2);
+    const res = runRetention(db.raw, opts());
+    expect(res.riskScores).toBe(0);
+    expect(count(db.raw, 'risk_scores')).toBe(2);
+  });
+
+  it('with two rows sharing computed_at, the higher id stays', () => {
+    const db = openDb(':memory:');
+    const r1 = db.startRun('risk', {}, OLD);
+    score(db, T, OLD, r1, 10);
+    score(db, T, OLD, r1, 20);
+    runRetention(db.raw, riskOpts());
+    expect(db.raw.prepare('SELECT id, score FROM risk_scores').all()).toEqual([{ id: 2, score: 20 }]);
+  });
+
+  it('keeps the latest per URL target too', () => {
+    const db = openDb(':memory:');
+    const r1 = db.startRun('risk', {}, OLD);
+    const r2 = db.startRun('risk', {}, OLD2);
+    score(db, 'https://a.example.com', OLD, r1);
+    score(db, 'https://a.example.com', OLD2, r2);
+    runRetention(db.raw, riskOpts());
+    expect(db.raw.prepare('SELECT run_id FROM risk_scores').all()).toEqual([{ run_id: r2 }]);
+  });
+
+  it('prunes an old row that has no run', () => {
+    const db = openDb(':memory:');
+    const r2 = db.startRun('risk', {}, RECENT);
+    score(db, T, OLD, null);
+    score(db, T, RECENT, r2);
+    const res = runRetention(db.raw, riskOpts());
+    expect(res.riskScores).toBe(1);
+    expect(res.runs).toEqual([]);
+    expect(riskIds(db.raw)).toEqual([2]);
+  });
+
+  it('removes a risk run whose rows are all pruned, and keeps one that keeps a row', () => {
+    const db = openDb(':memory:');
+    const gone = db.startRun('risk', {}, OLD);
+    const kept = db.startRun('risk', {}, OLD2);
+    const last = db.startRun('risk', {}, RECENT);
+    score(db, T, OLD, gone);
+    score(db, T, OLD2, kept);
+    score(db, 'b.example.com', OLD, kept);
+    score(db, T, RECENT, last);
+    const res = runRetention(db.raw, riskOpts());
+    expect(res.runs).toEqual([gone]);
+    expect(runIds(db.raw)).toEqual([kept, last]);
+    expect(count(db.raw, 'risk_scores')).toBe(2);
+  });
+
+  it('leaves risk_latest unchanged after an apply', () => {
+    const db = openDb(':memory:');
+    const r1 = db.startRun('risk', {}, OLD);
+    const r2 = db.startRun('risk', {}, RECENT);
+    score(db, T, OLD, r1, 10);
+    score(db, T, RECENT, r2, 50);
+    const before = db.raw.prepare('SELECT * FROM risk_latest ORDER BY target').all();
+    runRetention(db.raw, riskOpts());
+    expect(count(db.raw, 'risk_scores')).toBe(1);
+    expect(db.raw.prepare('SELECT * FROM risk_latest ORDER BY target').all()).toEqual(before);
+  });
+
+  it('a dry run deletes nothing and reports the count', () => {
+    const db = openDb(':memory:');
+    const r1 = db.startRun('risk', {}, OLD);
+    const r2 = db.startRun('risk', {}, RECENT);
+    score(db, T, OLD, r1);
+    score(db, T, RECENT, r2);
+    const plan = runRetention(db.raw, riskOpts({ apply: false }));
+    expect(plan.riskScores).toBe(1);
+    expect(plan.runs).toEqual([r1]);
+    expect(count(db.raw, 'risk_scores')).toBe(2);
+    expect(runIds(db.raw)).toEqual([r1, r2]);
+  });
+
+  it('deletes in bounded chunks and still reaches every row', () => {
+    const db = openDb(':memory:');
+    const r1 = db.startRun('risk', {}, OLD);
+    const r2 = db.startRun('risk', {}, RECENT);
+    for (let i = 0; i < 7; i++) score(db, T, `2026-03-0${i + 1}T00:00:00Z`, r1);
+    score(db, T, RECENT, r2);
+    const res = runRetention(db.raw, riskOpts({ chunkSize: 2 }));
+    expect(res.riskScores).toBe(7);
+    expect(riskIds(db.raw)).toEqual([8]);
+  });
+});
