@@ -213,11 +213,14 @@ Everything after '--' is passed to nuclei verbatim.`));
     let count = 0;
     let reviewCount = 0;
     const evidence: NucleiRowEvidence[] = [];
+    let unparseable = 0;
     for (const line of fs.readFileSync(outFile, 'utf8').split('\n')) {
       if (!line.trim()) continue;
+      let parsed: unknown;
+      try { parsed = JSON.parse(line); } catch { unparseable++; continue; }
       let ev: NucleiRowEvidence | null = null;
       try {
-        const row = JSON.parse(line) as {
+        const row = parsed as {
           'template-id'?: string; template_id?: string;
           info?: { name?: string; severity?: string; classification?: { 'cve-id'?: string[] } };
           host?: string; 'matched-at'?: string; type?: string;
@@ -303,7 +306,9 @@ Everything after '--' is passed to nuclei verbatim.`));
     const notes: string[] = [];
     const elogLines = errorLog && fs.existsSync(errorLog) ? fs.readFileSync(errorLog, 'utf8').split('\n') : [];
     const skipped = nucleiSkippedHosts(r.stderr, elogLines, maxHostError);
-    const covered = nucleiCoveredTargets(targets, evidence, { fromUrls, exitCode: r.code, skipped });
+    // An unparseable line has no known host, so no host can be called fully examined.
+    if (unparseable) notes.push(`coverage skipped: ${unparseable} unparseable nuclei row(s)`);
+    const covered = unparseable ? [] : nucleiCoveredTargets(targets, evidence, { fromUrls, exitCode: r.code, skipped });
     if (covered.length && !db.recordCoverage(toolName, covered, now, runId)) {
       notes.push('tool_coverage write failed: scan.db busy');
     }

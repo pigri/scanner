@@ -141,6 +141,14 @@ describe('nuclei coverage', () => {
     expect(coverage(r.db).rows).toEqual([]);
   }, 100_000);
 
+  it('records no coverage when an output line cannot be parsed, but still stores the findings', async () => {
+    const r = await runNuclei(['--from-urls'], [row('ssl', `${HOST}:443`), '{"template-id": truncated']);
+    const c = coverage(r.db);
+    expect(c.rows).toEqual([]);
+    expect(c.findingAts).toHaveLength(1);
+    expect(c.notes.join(';')).toContain('coverage skipped: 1 unparseable nuclei row');
+  }, 100_000);
+
   it('passes -elog to the URL pass only', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nuclei-cov-args-'));
     dirs.push(dir);

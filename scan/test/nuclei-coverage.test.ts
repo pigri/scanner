@@ -21,7 +21,7 @@ describe('nucleiCoveredTargets', () => {
   });
 
   it('does not cover a target with no row, nor one matched off-target', () => {
-    const other = { type: 'http', 'matched-at': 'https://other.example.test/', stored: true };
+    const other = { type: 'http', 'matched-at': 'https://other.example.test/', host: T, stored: true };
     expect(nucleiCoveredTargets([T], [], { fromUrls: true, exitCode: 0 })).toEqual([]);
     expect(nucleiCoveredTargets([T], [other], { fromUrls: true, exitCode: 0 })).toEqual([]);
     expect(nucleiCoveredTargets([T], [{ type: 'http', 'matched-at': `https://evil.example.test/${T}`, stored: true }], { fromUrls: true, exitCode: 0 })).toEqual([]);
