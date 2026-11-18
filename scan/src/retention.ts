@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
 import { openDb } from './lib/db.js';
+import { tableExists, watermarkSelect } from './lib/current-findings.js';
 
 /** The only tables retention deletes rows from. */
 const PRUNABLE_TABLES = ['findings', 'ports', 'http_probes', 'screenshots'] as const;
@@ -68,7 +69,8 @@ function usage(): void {
 Prune superseded rows of findings, ports, http_probes and screenshots. A row is
 pruned only when its run is older than --older-than days AND the same target has
 a newer, finished run of the same tool with rows in the same table. A target's latest evidence per tool is never
-pruned, however old. With --risk-older-than, risk_scores rows older than N days are
+pruned, however old. A findings row that is current under the shared rule (sticky tool,
+at or after its coverage stamp, or the newest of its tool for the target) is never pruned. With --risk-older-than, risk_scores rows older than N days are
 pruned too, except each target's latest row. A run and its output directory are removed only once no
 row in any table references the run. Other tables are never touched.
 
@@ -102,9 +104,17 @@ function planRows(raw: Database.Database, cutoffIso: string, riskCutoffIso: stri
   raw.exec(`
     DROP TABLE IF EXISTS temp.ret_latest;
     DROP TABLE IF EXISTS temp.ret_rows;
+    DROP TABLE IF EXISTS temp.ret_wm;
     CREATE TEMP TABLE ret_latest(tbl TEXT NOT NULL, target TEXT NOT NULL, tool TEXT NOT NULL, ts REAL NOT NULL, run_id INTEGER NOT NULL, PRIMARY KEY(tbl, target, tool)) WITHOUT ROWID;
     CREATE TEMP TABLE ret_rows(tbl TEXT NOT NULL, id INTEGER NOT NULL, run_id INTEGER, PRIMARY KEY(tbl, id)) WITHOUT ROWID;
   `);
+  // A findings row that is current under the shared rule is never pruned, even
+  // when a later run superseded its run. The watermark is keyed on the row's own
+  // findings.tool (nmap runs write 'nmap-vulners'), while supersession stays
+  // keyed on runs.tool.
+  const coverage = tableExists(raw, 'tool_coverage');
+  raw.exec(`CREATE TEMP TABLE ret_wm(target TEXT NOT NULL, tool TEXT NOT NULL, w TEXT NOT NULL, PRIMARY KEY(target, tool)) WITHOUT ROWID;
+    INSERT INTO temp.ret_wm ${watermarkSelect({ coverage })}`);
   // Latest superseding run per (table, target, tool): newer = later started_at, then higher id.
   // Only a finished run with a parseable started_at may supersede, so a worker killed
   // mid-run never displaces the last complete evidence.
@@ -119,6 +129,9 @@ function planRows(raw: Database.Database, cutoffIso: string, riskCutoffIso: stri
         WHERE r.finished_at IS NOT NULL AND ${jd('r.started_at')} IS NOT NULL
       ) WHERE rn = 1
     `);
+    const keepCurrent = t === 'findings'
+      ? ` AND NOT EXISTS (SELECT 1 FROM temp.ret_wm w WHERE w.target = t.target AND w.tool = t.tool AND t.seen_at >= w.w)`
+      : '';
     raw.prepare(`
       INSERT INTO temp.ret_rows(tbl, id, run_id)
       SELECT '${t}', t.id, t.run_id
@@ -126,7 +139,7 @@ function planRows(raw: Database.Database, cutoffIso: string, riskCutoffIso: stri
       JOIN runs r ON r.id = t.run_id
       JOIN temp.ret_latest l ON l.tbl = '${t}' AND l.target = t.target AND l.tool = r.tool
       WHERE ${jd('r.started_at')} < ${jd('?')}
-        AND (${jd('r.started_at')}, r.id) < (l.ts, l.run_id)
+        AND (${jd('r.started_at')}, r.id) < (l.ts, l.run_id)${keepCurrent}
     `).run(cutoffIso);
   }
   // risk_scores: not tied to a run's age. Pruned by its own computed_at, never the
@@ -206,7 +219,7 @@ export function runRetention(raw: Database.Database, opts: RetentionOpts): Reten
     }
     return { rows, riskScores, runs };
   } finally {
-    raw.exec('DROP TABLE IF EXISTS temp.ret_rows; DROP TABLE IF EXISTS temp.ret_latest; DROP TABLE IF EXISTS temp.ret_refd');
+    raw.exec('DROP TABLE IF EXISTS temp.ret_rows; DROP TABLE IF EXISTS temp.ret_latest; DROP TABLE IF EXISTS temp.ret_refd; DROP TABLE IF EXISTS temp.ret_wm');
   }
 }
 
