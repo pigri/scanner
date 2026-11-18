@@ -434,3 +434,97 @@ describe('runRetention risk_scores window (--risk-older-than)', () => {
     expect(riskIds(db.raw)).toEqual([8]);
   });
 });
+
+describe('runRetention keeps findings that are still current', () => {
+  const F_OLD = new Date(OLD).toISOString();
+  const F_RECENT = new Date(RECENT).toISOString();
+  const row = (raw: Database.Database, tool: string, target: string, run: number, at: string, title = 't') =>
+    raw.prepare('INSERT INTO findings(tool, target, title, seen_at, run_id) VALUES(?, ?, ?, ?, ?)').run(tool, target, title, at, run).lastInsertRowid as number;
+  const cover = (raw: Database.Database, tool: string, target: string, at: string) =>
+    raw.prepare('INSERT INTO tool_coverage(target, tool, seen_at, run_id) VALUES(?, ?, ?, NULL)').run(target, tool, at);
+  const ids = (raw: Database.Database): number[] =>
+    (raw.prepare('SELECT id FROM findings ORDER BY id').all() as { id: number }[]).map((r) => r.id);
+
+  it('keeps the covering run rows after a later partial run that did not cover the target', () => {
+    const db = openDb(':memory:');
+    const r1 = mk(db, 'nuclei', OLD);
+    const r2 = mk(db, 'nuclei', RECENT);
+    const covered = row(db.raw, 'nuclei', 'a.example.com', r1, F_OLD, 'covered');
+    const partial = row(db.raw, 'nuclei', 'a.example.com', r2, F_RECENT, 'partial');
+    cover(db.raw, 'nuclei', 'a.example.com', F_OLD);
+    const res = runRetention(db.raw, opts());
+    expect(res.rows.findings).toBe(0);
+    expect(ids(db.raw)).toEqual([covered, partial]);
+  });
+
+  it('still prunes rows that predate the coverage stamp', () => {
+    const db = openDb(':memory:');
+    const r1 = mk(db, 'nuclei', OLD);
+    const r2 = mk(db, 'nuclei', RECENT);
+    row(db.raw, 'nuclei', 'a.example.com', r1, F_OLD);
+    const kept = row(db.raw, 'nuclei', 'a.example.com', r2, F_RECENT);
+    cover(db.raw, 'nuclei', 'a.example.com', F_RECENT);
+    const res = runRetention(db.raw, opts());
+    expect(res.rows.findings).toBe(1);
+    expect(ids(db.raw)).toEqual([kept]);
+  });
+
+  it('keeps old sticky rows', () => {
+    const db = openDb(':memory:');
+    const r1 = mk(db, 'synthesize-eol', OLD);
+    const r2 = mk(db, 'synthesize-eol', RECENT);
+    const a = row(db.raw, 'synthesize-eol', 'a.example.com', r1, F_OLD);
+    const b = row(db.raw, 'synthesize-eol', 'a.example.com', r2, F_RECENT);
+    const res = runRetention(db.raw, opts());
+    expect(res.rows.findings).toBe(0);
+    expect(ids(db.raw)).toEqual([a, b]);
+  });
+
+  it('maps the watermark by the row tool, not the run tool', () => {
+    const db = openDb(':memory:');
+    const r1 = mk(db, 'nmap', OLD);
+    const r2 = mk(db, 'nmap', RECENT);
+    const a = row(db.raw, 'nmap-vulners', 'a.example.com', r1, F_OLD);
+    const b = row(db.raw, 'nmap-vulners', 'a.example.com', r2, F_RECENT);
+    cover(db.raw, 'nmap-vulners', 'a.example.com', F_OLD);
+    expect(runRetention(db.raw, opts({ apply: false })).rows.findings).toBe(0);
+    expect(ids(db.raw)).toEqual([a, b]);
+  });
+
+  it('a dry run reports only the rows that are not kept', () => {
+    const db = openDb(':memory:');
+    const r1 = mk(db, 'nuclei', OLD);
+    const r2 = mk(db, 'nuclei', RECENT);
+    row(db.raw, 'nuclei', 'a.example.com', r1, F_OLD);
+    row(db.raw, 'nuclei', 'a.example.com', r2, F_RECENT);
+    row(db.raw, 'nuclei', 'b.example.com', r1, F_OLD);
+    row(db.raw, 'nuclei', 'b.example.com', r2, F_RECENT);
+    cover(db.raw, 'nuclei', 'a.example.com', F_OLD);
+    expect(runRetention(db.raw, opts({ apply: false })).rows.findings).toBe(1);
+    expect(count(db.raw, 'findings')).toBe(4);
+  });
+
+  it('without tool_coverage prunes exactly the same rows as with an empty one', () => {
+    const build = (dropTable: boolean): number[] => {
+      const db = openDb(':memory:');
+      const r1 = mk(db, 'nuclei', OLD);
+      const r2 = mk(db, 'nuclei', OLD2);
+      const r3 = mk(db, 'nuclei', RECENT);
+      const o = [
+        row(db.raw, 'nuclei', 'a.example.com', r1, F_OLD, 'x'),
+        row(db.raw, 'nuclei', 'a.example.com', r2, new Date(OLD2).toISOString(), 'y'),
+        row(db.raw, 'nuclei', 'a.example.com', r3, F_RECENT, 'z'),
+        row(db.raw, 'nuclei', 'b.example.com', r1, F_OLD, 'x'),
+      ];
+      if (dropTable) db.raw.exec('DROP TABLE tool_coverage');
+      const before = ids(db.raw);
+      runRetention(db.raw, opts());
+      const after = new Set(ids(db.raw));
+      expect(o).toEqual(before);
+      return before.filter((i) => !after.has(i));
+    };
+    const withoutTable = build(true);
+    expect(withoutTable).toEqual([1, 2]);
+    expect(build(false)).toEqual(withoutTable);
+  });
+});
