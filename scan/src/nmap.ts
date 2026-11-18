@@ -1,9 +1,11 @@
 #!/usr/bin/env -S node --loader tsx
 import fs from 'node:fs';
+import type Database from 'better-sqlite3';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, writeLines, resolveOutputPath } from './lib/runner.js';
-import { parseNmapXml, vulnersCoveredTargets } from './lib/nmap-parse.js';
+import { parseNmapXml, vulnersCoveredTargets, hostTarget } from './lib/nmap-parse.js';
 import { openDb } from './lib/db.js';
+import { tableExists, watermarkSelect } from './lib/current-findings.js';
 
 // Data-store ports that fall OUTSIDE nmap's top-1000 (all rank by open-frequency,
 // and the NoSQL/cache/graph stores sit well under the top-1000 cutoff of
@@ -43,6 +45,22 @@ function topTcpPorts(n: number): number[] | null {
   return rows.slice(0, n).map((r) => r.port);
 }
 
+/** Ports carrying a current (open) nmap-vulners finding, per target. */
+function openVulnersPorts(raw: Database.Database, targets: readonly string[]): Map<string, Set<number>> {
+  const stmt = raw.prepare(
+    `SELECT DISTINCT json_extract(f.meta_json, '$.port') AS port
+     FROM findings f JOIN (${watermarkSelect({ coverage: tableExists(raw, 'tool_coverage'), targetParam: '@t' })}) wm
+       ON wm.target = f.target AND wm.tool = f.tool
+     WHERE f.target = @t AND f.tool = 'nmap-vulners' AND f.seen_at >= wm.w`,
+  );
+  const out = new Map<string, Set<number>>();
+  for (const t of new Set(targets)) {
+    const ports = (stmt.all({ t }) as { port: number | null }[]).map((r) => r.port).filter((p): p is number => typeof p === 'number');
+    if (ports.length) out.set(t, new Set(ports));
+  }
+  return out;
+}
+
 async function main(): Promise<void> {
   const opts = parseCommonCli(process.argv);
   // Own flags (before --): --nse <categories>
@@ -56,17 +74,21 @@ async function main(): Promise<void> {
   let hostTimeout = '600s';
   let dbPorts: number[] = DB_PORTS; // union'd in by default so DB stores aren't missed
   let vulners = false;             // --vulners: append `--script vulners` for CVE tagging
+  let narrowed = false;            // any flag that changes the scanned port set
   const passthrough: string[] = [];
   for (let i = 0; i < opts.extraArgs.length; i++) {
     const a = opts.extraArgs[i]!;
     const nxt = () => opts.extraArgs[++i]!;
     if (a === '--nse') nseCategories = nxt();
-    else if (a === '--top-ports') topPorts = parseInt(nxt(), 10);
+    else if (a === '--top-ports') { narrowed = true; topPorts = parseInt(nxt(), 10); }
     else if (a === '--host-timeout') hostTimeout = nxt();
-    else if (a === '--db-ports') dbPorts = nxt().split(',').map((p) => parseInt(p.trim(), 10)).filter(Number.isFinite);
-    else if (a === '--no-db-ports') dbPorts = [];
+    else if (a === '--db-ports') { narrowed = true; dbPorts = nxt().split(',').map((p) => parseInt(p.trim(), 10)).filter(Number.isFinite); }
+    else if (a === '--no-db-ports') { narrowed = true; dbPorts = []; }
     else if (a === '--vulners') vulners = true;
-    else passthrough.push(a);
+    else {
+      if (/^(-p.*|-F|--ports|--port-ratio|--exclude-ports)$/.test(a)) narrowed = true;
+      passthrough.push(a);
+    }
   }
 
   if (opts.help || !opts.targetsFile) {
@@ -148,8 +170,10 @@ Wrapper flags (before '--'):
 
   if (db && runId !== null) {
     let cveFindings = 0;
+    // Read before inserting: this run's rows would move the watermark past the old ones.
+    const openFindingPorts = openVulnersPorts(db.raw, hosts.map(hostTarget));
     for (const h of hosts) {
-      const target = h.hostnames[0] ?? h.ip;
+      const target = hostTarget(h);
       for (const p of h.ports) {
         db.insertPort({
           target, ip: h.ip,
@@ -184,7 +208,7 @@ Wrapper flags (before '--'):
       }
     }
     const notes: string[] = [];
-    if (!db.recordCoverage('nmap-vulners', vulnersCoveredTargets(hosts, { vulners, exitCode: r.code }), now, runId)) {
+    if (!db.recordCoverage('nmap-vulners', vulnersCoveredTargets(hosts, { vulners, exitCode: r.code, narrowed, openFindingPorts }), now, runId)) {
       notes.push('tool_coverage write failed: scan.db busy');
     }
     db.finishRun(runId, { targetsCount: targets.length, findingsCount: totalPorts + cveFindings, ...(notes.length ? { notes: notes.join('; ') } : {}), at: new Date().toISOString() });

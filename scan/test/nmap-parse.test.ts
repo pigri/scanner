@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseNmapXml, vulnersCoveredTargets, type NmapHost } from '../src/lib/nmap-parse.js';
+import { parseNmapXml, vulnersCoveredTargets, hostTarget, type NmapHost } from '../src/lib/nmap-parse.js';
 
 const FIXTURE = `<?xml version="1.0" encoding="UTF-8"?>
 <nmaprun scanner="nmap" args="nmap -sV" start="1700000000">
@@ -116,23 +116,45 @@ describe('vulnersCoveredTargets', () => {
     expect(vulnersCoveredTargets([withCve(host())], { vulners: false, exitCode: 0 })).toEqual([]);
   });
 
-  it('does not cover versioned ports when the run produced no vulners CVE anywhere', () => {
-    expect(vulnersCoveredTargets([host()], ON)).toEqual([]);
+  it('does not cover a versioned host without a vulners CVE, even when another host has one', () => {
+    const quiet = host({ ip: '203.0.113.5', hostnames: ['old.example.test'] });
+    expect(vulnersCoveredTargets([withCve(host()), quiet], ON)).toEqual(['www.example.test']);
   });
 
-  it('covers a host whose ports have a product but no version', () => {
-    const h = host({ ports: [{ port: 80, protocol: 'tcp', state: 'open', product: 'nginx' }] });
-    expect(vulnersCoveredTargets([h], ON)).toEqual(['www.example.test']);
+  it('does not cover a host whose ports have a product but no version', () => {
+    const h = withCve(host({ ports: [{ port: 80, protocol: 'tcp', state: 'open', product: 'nginx' }] }));
+    expect(vulnersCoveredTargets([h], ON)).toEqual([]);
+  });
+
+  it('does not cover when a port-narrowing flag was given', () => {
+    expect(vulnersCoveredTargets([withCve(host())], { ...ON, narrowed: true })).toEqual([]);
+  });
+
+  it('does not cover a target whose open finding sits on a port that is not open now', () => {
+    const open = new Map([['www.example.test', new Set([80, 8080])]]);
+    expect(vulnersCoveredTargets([withCve(host())], { ...ON, openFindingPorts: open })).toEqual([]);
+  });
+
+  it('covers a target whose open finding ports are all open now', () => {
+    const open = new Map([['www.example.test', new Set([80])]]);
+    expect(vulnersCoveredTargets([withCve(host())], { ...ON, openFindingPorts: open })).toEqual(['www.example.test']);
+  });
+
+  it('needs every host that maps to one target to be ok', () => {
+    const a = withCve(host());
+    const b = host({ ip: '198.51.100.9', hostnames: ['www.example.test'] });
+    expect(vulnersCoveredTargets([a, b], ON)).toEqual([]);
+    expect(vulnersCoveredTargets([a, withCve(b)], ON)).toEqual(['www.example.test']);
+  });
+
+  it('names a host by its first hostname', () => {
+    expect(hostTarget(host({ hostnames: ['a.example.test', 'ptr.example.net'] }))).toBe('a.example.test');
+    expect(hostTarget(host({ hostnames: [] }))).toBe('192.0.2.10');
   });
 
   it('does not cover a host nmap timed out on', () => {
     const h = withCve(host({ timedOut: true }));
     const other = withCve(host({ ip: '198.51.100.7', hostnames: ['api.example.test'] }));
     expect(vulnersCoveredTargets([h, other], ON)).toEqual(['api.example.test']);
-  });
-
-  it('a CVE on another host lifts the silent-failure guard for every host', () => {
-    const quiet = host({ ip: '203.0.113.5', hostnames: ['old.example.test'] });
-    expect(vulnersCoveredTargets([withCve(host()), quiet], ON)).toEqual(['www.example.test', 'old.example.test']);
   });
 });

@@ -1,4 +1,5 @@
 import { XMLParser } from 'fast-xml-parser';
+import { coveredTargets } from './coverage.js';
 
 export interface NmapScriptCve {
   id: string;          // e.g. "CVE-2017-15710" or "PRION:CVE-..." for vulners
@@ -158,21 +159,38 @@ export function parseNmapXml(xml: string): NmapHost[] {
   return out;
 }
 
+/** The raw target expression a host's findings are stored under. */
+export function hostTarget(h: NmapHost): string {
+  return h.hostnames[0] ?? h.ip;
+}
+
+export interface VulnersRun {
+  vulners: boolean;
+  exitCode: number | null;
+  /** A port-narrowing flag was given: the port set differs from earlier runs. */
+  narrowed?: boolean;
+  /** Per raw target, the ports that carry an open nmap-vulners finding before this run. */
+  openFindingPorts?: ReadonlyMap<string, ReadonlySet<number>>;
+}
+
 /**
- * Raw target expressions (the ones the wrapper writes findings under) that a
- * `--vulners` run conclusively examined. Absent output is never a signal: a failed
- * run, a timed-out host or a host with nothing open covers nothing, and when
- * versioned ports exist but the run produced no vulners CVE anywhere the script
- * or its API may have failed silently.
+ * Raw target expressions that a `--vulners` run conclusively examined. Absent
+ * output is never a signal: a failed run, a narrowed port set, a timed-out host,
+ * a host with nothing open, a host with no versioned port or that produced no
+ * vulners CVE (the script or its API may have failed for it), or a port with an
+ * open finding that is no longer open covers nothing. Hosts that map to one
+ * target must all be ok.
  */
-export function vulnersCoveredTargets(hosts: readonly NmapHost[], run: { vulners: boolean; exitCode: number | null }): string[] {
-  if (!run.vulners || run.exitCode !== 0) return [];
-  const anyCve = hosts.some((h) => h.ports.some((p) => p.scripts?.some((s) => s.cves?.length)));
-  const out: string[] = [];
-  for (const h of hosts) {
-    if (h.timedOut || h.ports.length === 0) continue;
-    if (!anyCve && h.ports.some((p) => p.version)) continue;
-    out.push(h.hostnames[0] ?? h.ip);
-  }
-  return out;
+export function vulnersCoveredTargets(hosts: readonly NmapHost[], run: VulnersRun): string[] {
+  if (!run.vulners || run.exitCode !== 0 || run.narrowed) return [];
+  const outcomes = hosts.map((h) => {
+    const target = hostTarget(h);
+    const open = new Set(h.ports.map((p) => p.port));
+    const ok = !h.timedOut
+      && h.ports.some((p) => p.version)
+      && h.ports.some((p) => p.scripts?.some((s) => s.cves?.length))
+      && [...(run.openFindingPorts?.get(target) ?? [])].every((port) => open.has(port));
+    return { target, ok };
+  });
+  return coveredTargets(outcomes);
 }

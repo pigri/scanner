@@ -13,7 +13,7 @@ afterEach(() => { for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true
 const HOST = 'www.example.test';
 const XML = `<?xml version="1.0"?>
 <nmaprun><host><status state="up"/><address addr="192.0.2.10" addrtype="ipv4"/>
-<hostnames><hostname name="${HOST}" type="user"/></hostnames>
+<hostnames><hostname name="${HOST}" type="user"/><hostname name="ptr.example.net" type="PTR"/></hostnames>
 <ports><port protocol="tcp" portid="80"><state state="open"/>
 <service name="http" product="nginx" version="1.18.0"/>
 <script id="vulners" output="x"><table key="cpe:/a:nginx:nginx:1.18.0"><table><elem key="id">CVE-2021-23017</elem><elem key="cvss">7.7</elem><elem key="type">cve</elem><elem key="is_exploit">false</elem></table></table></script>
@@ -31,14 +31,16 @@ XML
 exit ${exit}
 `;
 
-function runNmap(opts: { xml?: string; exit?: number; extra?: string[]; noSqlite?: boolean }): Promise<{ code: number | null; stderr: string; db: string }> {
+function runNmap(opts: { xml?: string; exit?: number; extra?: string[]; noSqlite?: boolean; seed?: (db: ReturnType<typeof openDb>) => void }): Promise<{ code: number | null; stderr: string; db: string }> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nmap-cov-'));
   dirs.push(dir);
   const bin = path.join(dir, 'bin');
   fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, 'nmap'), fakeNmap(opts.xml ?? XML, opts.exit ?? 0), { mode: 0o755 });
   const dbPath = path.join(dir, 'scan.db');
-  openDb(dbPath).close();
+  const seedDb = openDb(dbPath);
+  opts.seed?.(seedDb);
+  seedDb.close();
   const targets = path.join(dir, 'targets.txt');
   fs.writeFileSync(targets, `${HOST}\n`);
   return new Promise((resolve) => {
@@ -65,6 +67,12 @@ const coverage = (dbPath: string) => {
   return { cov, findings: f };
 };
 
+const OLD = '2026-01-01T00:00:00.000Z';
+const priorFinding = (port: number) => (db: ReturnType<typeof openDb>) => db.insertFinding({
+  tool: 'nmap-vulners', target: HOST, category: 'cve', severity: 'high', title: `CVE-2020-0001 on nginx (${HOST}:${port})`,
+  cve: 'CVE-2020-0001', matched_at: `${HOST}:${port}`, meta: { port },
+}, OLD, null);
+
 describe('nmap vulners coverage', () => {
   it('records coverage with the same target, stamp and run as its findings', async () => {
     const r = await runNmap({});
@@ -89,6 +97,37 @@ describe('nmap vulners coverage', () => {
   it('records nothing for a host nmap timed out on', async () => {
     const r = await runNmap({ xml: XML.replace('<host>', '<host starttime="1" endtime="2" timedout="true">') });
     expect(r.code, r.stderr).toBe(0);
+    expect(coverage(r.db).cov).toEqual([]);
+  }, 100_000);
+
+  it('records nothing when a port-narrowing flag is given', async () => {
+    for (const extra of [['--vulners', '--top-ports', '100'], ['--vulners', '--no-db-ports'], ['--vulners', '-p', '80']]) {
+      const r = await runNmap({ extra });
+      expect(r.code, r.stderr).toBe(0);
+      expect(coverage(r.db).cov, extra.join(' ')).toEqual([]);
+    }
+  }, 100_000);
+
+  it('records nothing when a port with an open finding is no longer open', async () => {
+    const r = await runNmap({ seed: priorFinding(8080) });
+    expect(r.code, r.stderr).toBe(0);
+    expect(coverage(r.db).cov).toEqual([]);
+  }, 100_000);
+
+  it('records coverage when the port of the open finding is still open', async () => {
+    const r = await runNmap({ seed: priorFinding(80) });
+    expect(r.code, r.stderr).toBe(0);
+    expect(coverage(r.db).cov.map((c) => c.target)).toEqual([HOST]);
+  }, 100_000);
+
+  it('ignores a prior finding on a closed port once a later run already superseded it', async () => {
+    const r = await runNmap({ seed: (db) => { priorFinding(8080)(db); db.recordCoverage('nmap-vulners', [HOST], '2026-01-02T00:00:00.000Z', null); } });
+    expect(coverage(r.db).cov.map((c) => c.target)).toEqual([HOST]);
+  }, 100_000);
+
+  it('records no coverage when storing a finding fails, and the run fails', async () => {
+    const r = await runNmap({ seed: (db) => db.raw.exec("CREATE TRIGGER t_lock BEFORE INSERT ON findings BEGIN SELECT RAISE(ABORT, 'database is locked'); END") });
+    expect(r.code).toBe(1);
     expect(coverage(r.db).cov).toEqual([]);
   }, 100_000);
 });
