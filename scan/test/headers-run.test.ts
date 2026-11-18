@@ -78,4 +78,33 @@ describe('auditUrls coverage', () => {
     await audit(db, [URL_A], fetchReturning(200), false);
     expect(cov(db)).toEqual([]);
   });
+
+  it('does not cover a redirect that ended on another host', async () => {
+    const db = openDb(':memory:');
+    const moved = (async () => {
+      const r = new Response(null, { status: 200, headers: { 'x-a': '1' } });
+      Object.defineProperty(r, 'url', { value: 'https://b.example/' });
+      return r;
+    }) as unknown as typeof fetch;
+    await audit(db, [URL_A], moved);
+    expect(cov(db)).toEqual([]);
+  });
+
+  it('covers a redirect that stayed on the same host', async () => {
+    const db = openDb(':memory:');
+    const same = (async () => {
+      const r = new Response(null, { status: 200, headers: { 'x-a': '1' } });
+      Object.defineProperty(r, 'url', { value: 'https://a.example/home' });
+      return r;
+    }) as unknown as typeof fetch;
+    await audit(db, [URL_A], same);
+    expect(cov(db)).toHaveLength(1);
+  });
+
+  it('does not cover a target whose findings insert failed', async () => {
+    const db = openDb(':memory:');
+    db.raw.exec("CREATE TRIGGER t BEFORE INSERT ON findings BEGIN SELECT RAISE(ABORT,'database is locked'); END");
+    await audit(db, [URL_A], fetchReturning(200));
+    expect(cov(db)).toEqual([]);
+  });
 });

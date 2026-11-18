@@ -4,6 +4,7 @@
 // with proper per-header severity, and covers the fields testssl doesn't:
 // CSP, HSTS-preload, X-Frame-Options, X-Content-Type-Options, Referrer-Policy,
 // Permissions-Policy, COOP, COEP, CORP.
+import { isBlockedAnswer } from './lib/real-answer.js';
 import { parseCommonCli, commonUsage, prepareTargets, requireTool, resolveOutputPath, writeLines } from './lib/runner.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -148,8 +149,10 @@ function auditHeaders(headers: Headers, scheme: 'http' | 'https'): Verdict[] {
  * challenge (`cf-mitigated`) is not the app at all. The status is the one
  * reached after redirects; the HEAD body is empty, so it is not inspected.
  */
-function coversHeaders(resp: Response): boolean {
-  return resp.status >= 200 && resp.status < 400 && !resp.headers.has('cf-mitigated');
+function coversHeaders(resp: Response, requested: string): boolean {
+  if (resp.status < 200 || resp.status >= 400 || isBlockedAnswer(resp.status, resp.headers.has('cf-mitigated'))) return false;
+  // redirect:'follow' can end on another host, whose headers are not this target's.
+  return !resp.url || new URL(resp.url).hostname === new URL(requested).hostname;
 }
 
 export interface AuditOpts {
@@ -202,7 +205,7 @@ export async function auditUrls(db: Db, urls: readonly LiveUrl[], opts: AuditOpt
           }, now, runId);
           findings++;
         }
-        outcomes.push({ target: u.target, ok: coversHeaders(resp) });
+        outcomes.push({ target: u.target, ok: coversHeaders(resp, u.url) });
       } catch (e) {
         outcomes.push({ target: u.target, ok: false });
         opts.write(JSON.stringify({ target: u.target, url: u.url, error: e instanceof Error ? e.message : String(e) }) + '\n');
