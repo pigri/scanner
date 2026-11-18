@@ -40,7 +40,7 @@ describe('ingestSslyzeOutput', () => {
   it('stores findings and certificates of well-formed output', () => {
     const { db, runId } = setup();
     const r = ingestSslyzeOutput(db, toText({ server_scan_results: [good()] }), NOW, runId);
-    expect(r).toEqual({ rows: 1, findings: 3, certs: 1 });
+    expect(r).toEqual({ rows: 1, findings: 3, certs: 1, covered: ['host.example.com'] });
     expect(findings(db).map((f) => f.category)).toEqual(['heartbleed', 'tls-1.0', 'sct-count']);
     expect(certCount(db)).toBe(1);
   });
@@ -76,12 +76,12 @@ describe('ingestSslyzeOutput', () => {
   ])('counts a %s server_scan_results as empty', (_n, v) => {
     const { db, runId } = setup();
     const r = ingestSslyzeOutput(db, JSON.stringify({ server_scan_results: v }), NOW, runId);
-    expect(r).toEqual({ rows: 0, findings: 0, certs: 0 });
+    expect(r).toEqual({ rows: 0, findings: 0, certs: 0, covered: [] });
   });
 
   it('counts a missing server_scan_results as empty', () => {
     const { db, runId } = setup();
-    expect(ingestSslyzeOutput(db, '{}', NOW, runId)).toEqual({ rows: 0, findings: 0, certs: 0 });
+    expect(ingestSslyzeOutput(db, '{}', NOW, runId)).toEqual({ rows: 0, findings: 0, certs: 0, covered: [] });
   });
 
   it('skips non-object elements and bad hostnames, keeps the good row', () => {
@@ -159,6 +159,52 @@ describe('ingestSslyzeOutput: wrong-typed nested fields', () => {
   });
 });
 
+const coverage = (db: ReturnType<typeof openDb>) =>
+  db.raw.prepare('SELECT target, tool, seen_at, run_id FROM tool_coverage ORDER BY target').all();
+const withStatus = (hostname: string, scan_status: string) => ({ ...good(hostname), scan_status });
+
+describe('sslyze coverage', () => {
+  it('covers a COMPLETED row with the findings target, stamp and run', () => {
+    const { db, runId } = setup();
+    const r = ingestSslyzeOutput(db, toText({ server_scan_results: [good('host.example.com')] }), NOW, runId);
+    expect(r?.covered).toEqual(['host.example.com']);
+    expect(coverage(db)).toEqual([{ target: 'host.example.com', tool: 'sslyze', seen_at: NOW, run_id: runId }]);
+    expect(findings(db)[0]!.target).toBe('host.example.com');
+  });
+
+  it('covers a COMPLETED row that produced no findings', () => {
+    const { db, runId } = setup();
+    const quiet = { server_location: { hostname: 'quiet.example.com', ip_address: '192.0.2.2', port: 443 }, scan_status: 'COMPLETED', scan_result: {} };
+    const r = ingestSslyzeOutput(db, toText({ server_scan_results: [quiet] }), NOW, runId);
+    expect(r?.findings).toBe(0);
+    expect(coverage(db)).toEqual([{ target: 'quiet.example.com', tool: 'sslyze', seen_at: NOW, run_id: runId }]);
+  });
+
+  it.each(['ERROR_NO_CONNECTIVITY', 'ERROR_CONNECTIVITY_TIMEOUT', 'NOT_SCANNED'])('does not cover a %s row', (status) => {
+    const { db, runId } = setup();
+    const r = ingestSslyzeOutput(db, toText({ server_scan_results: [withStatus('down.example.com', status)] }), NOW, runId);
+    expect(r?.covered).toEqual([]);
+    expect(coverage(db)).toEqual([]);
+  });
+
+  it('does not cover a host when any of its rows is not COMPLETED', () => {
+    const { db, runId } = setup();
+    const rows = [good('mixed.example.com'), withStatus('mixed.example.com', 'ERROR_NO_CONNECTIVITY'), good('ok.example.com')];
+    const r = ingestSslyzeOutput(db, toText({ server_scan_results: rows }), NOW, runId);
+    expect(r?.covered).toEqual(['ok.example.com']);
+    expect(coverage(db).map((c) => (c as { target: string }).target)).toEqual(['ok.example.com']);
+  });
+
+  it('adds a run note and still returns the ingest when the coverage write fails', () => {
+    const { db, runId } = setup();
+    vi.spyOn(db, 'recordCoverage').mockReturnValue(false);
+    const finish = vi.spyOn(db, 'finishRun');
+    const r = ingestAndFinishRun(db, () => toText({ server_scan_results: [good()] }), NOW, runId, 1);
+    expect(r?.findings).toBe(3);
+    expect(finish).toHaveBeenCalledWith(runId, expect.objectContaining({ notes: 'tool_coverage write failed: scan.db busy' }));
+  });
+});
+
 describe('ingestAndFinishRun', () => {
   const text = (): string => toText({ server_scan_results: [good()] });
 
@@ -167,7 +213,7 @@ describe('ingestAndFinishRun', () => {
     const finish = vi.spyOn(db, 'finishRun');
     const close = vi.spyOn(db, 'close');
     const r = ingestAndFinishRun(db, () => text(), NOW, runId, 9);
-    expect(r).toEqual({ rows: 1, findings: 3, certs: 1 });
+    expect(r).toEqual({ rows: 1, findings: 3, certs: 1, covered: ['host.example.com'] });
     expect(finish).toHaveBeenCalledWith(runId, expect.objectContaining({ targetsCount: 1, findingsCount: 3 }));
     expect(close).toHaveBeenCalledTimes(1);
   });

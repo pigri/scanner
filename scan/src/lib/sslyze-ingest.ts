@@ -1,4 +1,5 @@
 import type { Db } from './db.js';
+import { coveredTargets } from './coverage.js';
 import { toCertRecords, quoteBigSerials, type SslyzeCertResult } from './sslyze-cert.js';
 import { classifyRobot } from './sslyze-robot.js';
 
@@ -37,7 +38,8 @@ export interface SslyzeResult {
   }>;
 }
 
-export interface SslyzeIngest { rows: number; findings: number; certs: number }
+// `covered`: hosts whose every server row is COMPLETED. `coverageNote` is set only when the coverage write failed.
+export interface SslyzeIngest { rows: number; findings: number; certs: number; covered: string[]; coverageNote?: string }
 
 type ServerRow = NonNullable<SslyzeResult['server_scan_results']>[number];
 type ScanResult = NonNullable<ServerRow['scan_result']>;
@@ -83,9 +85,13 @@ export function ingestSslyzeOutput(db: Db, text: string, now: string, runId: num
     findings++;
   };
 
+  const outcomes: { target: string; ok: boolean }[] = [];
   for (const row of rows) {
     const target = row.server_location?.hostname;
-    if (!target || row.scan_status !== 'COMPLETED') continue;
+    if (!target) continue;
+    const completed = row.scan_status === 'COMPLETED';
+    outcomes.push({ target, ok: completed });
+    if (!completed) continue;
     const s = (typeof row.scan_result === 'object' && row.scan_result !== null ? row.scan_result : {}) as ScanResult;
 
     // ---- known-CVE vulnerability flags ----------------------------------
@@ -167,7 +173,10 @@ export function ingestSslyzeOutput(db: Db, text: string, now: string, runId: num
     certs++;
   }
 
-  return { rows: rows.length, findings, certs };
+  const covered = coveredTargets(outcomes);
+  const result: SslyzeIngest = { rows: rows.length, findings, certs, covered };
+  if (!db.recordCoverage('sslyze', covered, now, runId)) result.coverageNote = 'tool_coverage write failed: scan.db busy';
+  return result;
 }
 
 // Reads and ingests one sslyze output, and always finishes the run and closes the db.
@@ -192,6 +201,7 @@ export function ingestAndFinishRun(db: Db, read: () => string, now: string, runI
     db.finishRun(runId, {
       targetsCount: result ? result.rows : scanned,
       findingsCount: result ? result.findings : 0,
+      ...(result?.coverageNote ? { notes: result.coverageNote } : {}),
       at: new Date().toISOString(),
     });
     db.close();
