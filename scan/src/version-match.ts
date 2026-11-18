@@ -63,7 +63,8 @@ function httpEvidence(db: Db, target: string): Seen[] {
     `SELECT url, web_server, tech_json FROM (
        SELECT url, web_server, tech_json,
               ROW_NUMBER() OVER (PARTITION BY url ORDER BY seen_at DESC, id DESC) AS rn
-         FROM http_probes WHERE target = ?)
+         FROM http_probes WHERE target = ?
+          AND (COALESCE(web_server, '') <> '' OR COALESCE(tech_json, '[]') NOT IN ('[]', 'null', '')))
       WHERE rn = 1 ORDER BY url`,
   ).all(target) as { url: string; web_server: string | null; tech_json: string | null }[];
   const out: Seen[] = [];

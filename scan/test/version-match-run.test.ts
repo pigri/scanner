@@ -150,6 +150,7 @@ describe('runVersionMatch', () => {
       await runVersionMatch({ db, targets: ['a.example'], nvdDb: buildNvd('2026-11-01T00:00:00.000Z'), maxAgeDays: 14, dryRun: false, now: NOW });
       const runId = (db.raw.prepare("SELECT id FROM runs WHERE tool='version-match'").get() as { id: number }).id;
       expect(cov(db)).toEqual([{ target: 'a.example', tool: 'version-match', seen_at: AT, run_id: runId }]);
+      expect(findings(db).length).toBeGreaterThan(0);
       expect(findings(db).every((f) => f.target === 'a.example' && f.seen_at === AT)).toBe(true);
     });
 
@@ -201,6 +202,25 @@ describe('runVersionMatch', () => {
       expect(r.busySkipped).toBeGreaterThan(0);
       expect(cov(db)).toEqual([]);
     });
+  });
+
+  it('a newer banner-less http probe does not hide the older banner, and the target is covered', async () => {
+    const db = openDb(':memory:');
+    db.insertHttpProbe({ target: 'h.example', url: 'https://h.example/', web_server: 'Apache/2.4.6 (CentOS)', tech: ['Apache HTTP Server:2.4.6'] }, '2026-11-01T00:00:00.000Z', null);
+    db.insertHttpProbe({ target: 'h.example', url: 'https://h.example/', web_server: null, tech: [] }, '2026-11-02T00:00:00.000Z', null);
+    db.insertHttpProbe({ target: 'h.example', url: 'https://h.example/', web_server: '' }, '2026-11-02T01:00:00.000Z', null);
+    await runVersionMatch({ db, targets: ['h.example'], nvdDb: buildNvd('2026-11-01T00:00:00.000Z'), maxAgeDays: 14, dryRun: false, now: NOW });
+    expect(findings(db).map((f) => f.cve)).toEqual(['CVE-2017-9798']);
+    expect(db.raw.prepare('SELECT target FROM tool_coverage').all()).toEqual([{ target: 'h.example' }]);
+  });
+
+  it('a newer bare-product banner is a real change: no findings, still covered', async () => {
+    const db = openDb(':memory:');
+    db.insertHttpProbe({ target: 'h.example', url: 'https://h.example/', web_server: 'Apache/2.4.6 (CentOS)' }, '2026-11-01T00:00:00.000Z', null);
+    db.insertHttpProbe({ target: 'h.example', url: 'https://h.example/', web_server: 'Apache' }, '2026-11-02T00:00:00.000Z', null);
+    await runVersionMatch({ db, targets: ['h.example'], nvdDb: buildNvd('2026-11-01T00:00:00.000Z'), maxAgeDays: 14, dryRun: false, now: NOW });
+    expect(findings(db)).toHaveLength(0);
+    expect(db.raw.prepare('SELECT target FROM tool_coverage').all()).toEqual([{ target: 'h.example' }]);
   });
 
   it('a newer banner-less ports row does not hide the evidence', async () => {
