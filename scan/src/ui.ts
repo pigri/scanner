@@ -16,6 +16,7 @@ import { filterAndFacet } from './lib/target-filter.js';
 import { buildNewsSql } from './lib/news-sql.js';
 import { TARGET_ROWS_SQL, riskLatestMissingMessage } from './lib/target-rows-sql.js';
 import { NO_URL, latestRiskRow } from './lib/risk-latest.js';
+import { currentFindingsSelect, tableExists } from './lib/current-findings.js';
 import {
   targetNetworkSql,
   TARGET_NETWORK_LIST_SQL,
@@ -130,12 +131,6 @@ function newestAnswer(rows: readonly AnsweredRow[]): { at: string; source: strin
   return best ? { at: best.at, source: best.source } : null;
 }
 
-function tableExists(db: Database.Database, name: string): boolean {
-  return !!db
-    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?")
-    .get(name);
-}
-
 const missing = riskLatestMissingMessage(tableExists(scan, 'risk_latest'));
 if (missing) {
   console.error(missing);
@@ -165,18 +160,7 @@ function logicalFindings(): LogicalFinding[] {
   const now = Date.now();
   if (logicalCache && now - logicalCache.at < 60000) return logicalCache.rows;
   const rows = scan
-    .prepare(
-      `WITH logical AS MATERIALIZED (
-         SELECT target, tool, severity, category, title, MAX(cve) cve,
-                MIN(seen_at) first_seen, MAX(seen_at) last_seen, COUNT(*) occ
-         FROM findings GROUP BY target, tool, severity, category, title),
-       toollast AS MATERIALIZED (
-         SELECT target, tool, MAX(seen_at) tmax FROM findings GROUP BY target, tool)
-       SELECT l.target, l.tool, l.severity, l.category, l.title, l.cve,
-              l.first_seen, l.last_seen, l.occ,
-              CASE WHEN l.last_seen < tl.tmax THEN 1 ELSE 0 END resolved
-       FROM logical l JOIN toollast tl ON tl.target = l.target AND tl.tool = l.tool`,
-    )
+    .prepare(currentFindingsSelect({ coverage: false }))
     .all() as LogicalFinding[];
   logicalCache = { rows, at: now };
   return rows;
@@ -484,18 +468,11 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
     // Logical findings for this host, with open/resolved status.
     const findings = scan
       .prepare(
-        `WITH logical AS (
-           SELECT tool, severity, category, title, MAX(cve) cve,
-                  MIN(seen_at) first_seen, MAX(seen_at) last_seen, COUNT(*) occ
-           FROM findings WHERE target=@t GROUP BY tool, severity, category, title),
-         toollast AS (
-           SELECT tool, MAX(seen_at) tmax FROM findings WHERE target=@t GROUP BY tool)
-         SELECT l.tool, l.severity, l.category, l.title, l.cve, l.first_seen, l.last_seen, l.occ,
-                CASE WHEN l.last_seen < tl.tmax THEN 1 ELSE 0 END resolved
-         FROM logical l JOIN toollast tl ON tl.tool = l.tool
-         ORDER BY resolved ASC, CASE l.severity
+        `SELECT tool, severity, category, title, cve, first_seen, last_seen, occ, resolved
+         FROM (${currentFindingsSelect({ coverage: false, targetParam: '@t' })})
+         ORDER BY resolved ASC, CASE severity
            WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2
-           WHEN 'low' THEN 3 ELSE 4 END, l.tool LIMIT 800`,
+           WHEN 'low' THEN 3 ELSE 4 END, tool LIMIT 800`,
       )
       .all({ t }) as { resolved: number }[];
     const findingsSummary = {
