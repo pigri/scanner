@@ -53,3 +53,15 @@ export function currentFindingsSelect(opts: CurrentFindingsOpts): string {
               CASE WHEN l.last_seen < wm.w THEN 1 ELSE 0 END resolved
        FROM logical l JOIN wm ON wm.target = l.target AND wm.tool = l.tool`;
 }
+
+/**
+ * SQL for the raw rows a scorer reads: `target, tool, severity, title, cve,
+ * needs_review` of every finding row with `seen_at >= w`. Filters on the raw
+ * target, so call it before any identity folding.
+ */
+export function currentFindingRowsSelect(opts: CurrentFindingsOpts): string {
+  return `WITH wm AS MATERIALIZED (${watermarkSelect(opts)})
+       SELECT f.target, f.tool, f.severity, f.title, f.cve, f.needs_review
+       FROM findings f JOIN wm ON wm.target = f.target AND wm.tool = f.tool
+       WHERE f.seen_at >= wm.w`;
+}

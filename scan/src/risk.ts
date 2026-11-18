@@ -7,6 +7,7 @@ import { recordRiskScores } from './lib/risk-latest.js';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
 import { buildTargetResolver } from './lib/identity.js';
 import { loadNetworkSignals, type NetworkSignal } from './lib/risk-network.js';
+import { currentFindingRowsSelect, tableExists } from './lib/current-findings.js';
 
 export interface Opts {
   db: string;
@@ -101,6 +102,11 @@ export interface SignalOpts {
    * the discovery db when there are none. discovery: the discovery db only (the old source).
    */
   countrySource: 'network' | 'discovery';
+  /**
+   * current: only finding rows at or after their (target, tool) watermark. all: every row, the
+   * old read. Defaults to current.
+   */
+  findingsRule?: 'current' | 'all';
 }
 
 /** Read every target's scoring inputs. Read-only, so a dry run can use it on a read-only handle. */
@@ -123,7 +129,10 @@ export function loadRiskSignals(raw: Database.Database, opts: SignalOpts, now: s
   if (opts.discoveryDb) for (const domain of facts.keys()) targets.add(resolve(domain));
 
   const findingsByTarget = new Map<string, Finding[]>();
-  const findingRows = raw.prepare('SELECT target, tool, severity, title, cve, needs_review FROM findings')
+  const findingsSql = (opts.findingsRule ?? 'current') === 'all'
+    ? 'SELECT target, tool, severity, title, cve, needs_review FROM findings'
+    : currentFindingRowsSelect({ coverage: tableExists(raw, 'tool_coverage') });
+  const findingRows = raw.prepare(findingsSql)
     .all() as { target: string; tool: string; severity: string | null; title: string; cve: string | null; needs_review: number }[];
   for (const r of findingRows) {
     const key = resolve(r.target);
