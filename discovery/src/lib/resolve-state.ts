@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { writeFileAtomic } from './atomic-write.js';
 
 /**
  * Per-host consecutive-failure counter, persisted across refresh runs. Only
@@ -28,7 +29,7 @@ export function loadState(file: string): ResolveState {
 }
 
 export function saveState(file: string, state: ResolveState): void {
-  fs.writeFileSync(file, JSON.stringify(state) + '\n');
+  writeFileAtomic(file, JSON.stringify(state) + '\n');
 }
 
 /**

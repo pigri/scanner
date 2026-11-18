@@ -104,3 +104,20 @@ describe('loadState / saveState', () => {
     fs.rmSync(f, { force: true });
   });
 });
+
+describe('saveState atomicity', () => {
+  it('round-trips and leaves no temp file', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'resolve-state-'));
+    try {
+      const f = path.join(dir, 'resolve-state.json');
+      fs.writeFileSync(f, '{}\n');
+      const before = fs.statSync(f).ino;
+      saveState(f, { 'a.example.com': 2 });
+      expect(loadState(f)).toEqual({ 'a.example.com': 2 });
+      expect(fs.readdirSync(dir)).toEqual(['resolve-state.json']);
+      expect(fs.statSync(f).ino).not.toBe(before);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { reclassify, loadState, saveState } from './lib/resolve-state.js';
+import { writeFileAtomic } from './lib/atomic-write.js';
 
 interface Opts {
   parentsFile: string;
@@ -74,6 +75,44 @@ Options:
 `);
 }
 
+export interface EnrichRow {
+  domain: string;
+  addresses: unknown[];
+}
+
+export interface EnrichPaths {
+  jsonl: string;
+  csv: string;
+}
+
+/** Parse one enrich run's JSONL output; a missing file yields no rows. */
+export function readEnrichRows(file: string): EnrichRow[] {
+  if (!fs.existsSync(file)) return [];
+  const rows: EnrichRow[] = [];
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    rows.push(JSON.parse(line));
+  }
+  return rows;
+}
+
+/**
+ * Publish this run's enrich outputs over the shared ones, but only after a
+ * clean exit. On any other exit the old outputs stay. The temps are removed
+ * either way.
+ */
+export function installEnrichOutputs(code: number, tmp: EnrichPaths, dest: EnrichPaths): void {
+  try {
+    if (code === 0) {
+      if (fs.existsSync(tmp.jsonl)) fs.renameSync(tmp.jsonl, dest.jsonl);
+      if (fs.existsSync(tmp.csv)) fs.renameSync(tmp.csv, dest.csv);
+    }
+  } finally {
+    fs.rmSync(tmp.jsonl, { force: true });
+    fs.rmSync(tmp.csv, { force: true });
+  }
+}
+
 function run(cmd: string, args: string[]): Promise<number> {
   return new Promise((resolve) => {
     console.error(`\n$ ${cmd} ${args.join(' ')}`);
@@ -139,24 +178,31 @@ async function main(): Promise<void> {
     const union = [...new Set([...readLines(opts.domainsFile), ...readLines(phantomsFile)])].sort();
     const unionFile = path.join(os.tmpdir(), `refresh-union-${process.pid}.txt`);
     fs.writeFileSync(unionFile, union.join('\n') + '\n');
-    let code: number;
+    // Each run writes its own enrich output, so a concurrent run cannot
+    // truncate the file this one is about to read.
+    const tmp: EnrichPaths = {
+      jsonl: `enriched.jsonl.tmp-${process.pid}`,
+      csv: `enriched.csv.tmp-${process.pid}`,
+    };
+    let code = 1;
+    let publish = 1;
+    let rows: EnrichRow[] = [];
     try {
-      code = await run('npx', ['tsx', 'src/enrich.ts', unionFile, '--concurrency', '40']);
+      code = await run('npx', [
+        'tsx', 'src/enrich.ts', unionFile, '--concurrency', '40',
+        '--out-jsonl', tmp.jsonl, '--out-csv', tmp.csv,
+      ]);
+      // A non-zero exit means a partial file whose final line may be
+      // truncated. Only parse it on a clean exit: reclassify() throws on a
+      // non-zero code regardless of rows (before any of the master lists are
+      // touched), so [] there keeps the abort while avoiding a raw JSON-parse
+      // error that would mask reclassify's message.
+      if (code === 0) rows = readEnrichRows(tmp.jsonl);
+      publish = code;
     } finally {
       fs.rmSync(unionFile, { force: true });
-    }
-
-    // enriched.jsonl is truncate-on-open, so a non-zero exit means a partial
-    // file whose final line may be truncated. Only parse it on a clean exit:
-    // reclassify() throws on a non-zero code regardless of rows (before any of
-    // the master lists are touched), so passing [] there keeps the abort while
-    // avoiding a raw JSON-parse error that would mask reclassify's message.
-    const rows: { domain: string; addresses: unknown[] }[] = [];
-    if (code === 0 && fs.existsSync('enriched.jsonl')) {
-      for (const line of fs.readFileSync('enriched.jsonl', 'utf8').split('\n')) {
-        if (!line.trim()) continue;
-        rows.push(JSON.parse(line));
-      }
+      // `publish` stays 1 if enrich or the parse threw, so a bad file is never installed.
+      installEnrichOutputs(publish, tmp, { jsonl: 'enriched.jsonl', csv: 'enriched.csv' });
     }
     const { domains, phantoms, state } = reclassify(
       code,
@@ -165,8 +211,8 @@ async function main(): Promise<void> {
       opts.phantomThreshold,
     );
     const resolved = rows.filter((r) => r.addresses.length > 0);
-    fs.writeFileSync(opts.domainsFile, domains.join('\n') + '\n');
-    fs.writeFileSync(phantomsFile, phantoms.join('\n') + '\n');
+    writeFileAtomic(opts.domainsFile, domains.join('\n') + '\n');
+    writeFileAtomic(phantomsFile, phantoms.join('\n') + '\n');
     saveState(stateFile, state);
     const grace = domains.length - resolved.length;
     console.error(
@@ -183,7 +229,7 @@ async function main(): Promise<void> {
     fs.readFileSync(opts.domainsFile, 'utf8').split('\n').map((s) => s.trim()).filter(Boolean)
   ).size;
   console.error(`\ndone. ${initialCount} -> ${finalCount} (+${finalCount - initialCount})`);
-  fs.writeFileSync('refresh-summary.json', JSON.stringify({
+  writeFileAtomic('refresh-summary.json', JSON.stringify({
     at: new Date().toISOString(),
     parents: parents.length,
     seclist: opts.seclist,
