@@ -214,6 +214,23 @@ describe('runVersionMatch', () => {
     expect(db.raw.prepare('SELECT target FROM tool_coverage').all()).toEqual([{ target: 'h.example' }]);
   });
 
+  it('a newer header-less probe with only unrelated tech does not hide the older header', async () => {
+    const db = openDb(':memory:');
+    db.insertHttpProbe({ target: 'h.example', url: 'https://h.example/', web_server: 'Apache/2.4.6 (CentOS)' }, '2026-11-01T00:00:00.000Z', null);
+    db.insertHttpProbe({ target: 'h.example', url: 'https://h.example/', web_server: null, tech: ['HSTS'] }, '2026-11-02T00:00:00.000Z', null);
+    await runVersionMatch({ db, targets: ['h.example'], nvdDb: buildNvd('2026-11-01T00:00:00.000Z'), maxAgeDays: 14, dryRun: false, now: NOW });
+    expect(findings(db).map((f) => f.cve)).toEqual(['CVE-2017-9798']);
+    expect(db.raw.prepare('SELECT target FROM tool_coverage').all()).toEqual([{ target: 'h.example' }]);
+  });
+
+  it('takes a version from a newer header-less probe whose tech carries it', async () => {
+    const db = openDb(':memory:');
+    db.insertHttpProbe({ target: 'h.example', url: 'https://h.example/', web_server: 'Apache' }, '2026-11-01T00:00:00.000Z', null);
+    db.insertHttpProbe({ target: 'h.example', url: 'https://h.example/', web_server: null, tech: ['Apache HTTP Server:2.4.6'] }, '2026-11-02T00:00:00.000Z', null);
+    await runVersionMatch({ db, targets: ['h.example'], nvdDb: buildNvd('2026-11-01T00:00:00.000Z'), maxAgeDays: 14, dryRun: false, now: NOW });
+    expect(findings(db).map((f) => f.cve)).toEqual(['CVE-2017-9798']);
+  });
+
   it('a newer bare-product banner is a real change: no findings, still covered', async () => {
     const db = openDb(':memory:');
     db.insertHttpProbe({ target: 'h.example', url: 'https://h.example/', web_server: 'Apache/2.4.6 (CentOS)' }, '2026-11-01T00:00:00.000Z', null);

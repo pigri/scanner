@@ -59,19 +59,26 @@ export interface VersionMatchResult {
 interface Seen { evidence: Evidence; matchedAt: string; text: string }
 
 function httpEvidence(db: Db, target: string): Seen[] {
-  const rows = db.raw.prepare(
+  // Header and tech come from their own latest non-empty row per URL, so a newer
+  // probe that lost one of them cannot hide the older value.
+  const latest = (cond: string) => db.raw.prepare(
     `SELECT url, web_server, tech_json FROM (
        SELECT url, web_server, tech_json,
               ROW_NUMBER() OVER (PARTITION BY url ORDER BY seen_at DESC, id DESC) AS rn
-         FROM http_probes WHERE target = ?
-          AND (COALESCE(web_server, '') <> '' OR COALESCE(tech_json, '[]') NOT IN ('[]', 'null', '')))
+         FROM http_probes WHERE target = ? AND ${cond})
       WHERE rn = 1 ORDER BY url`,
   ).all(target) as { url: string; web_server: string | null; tech_json: string | null }[];
+  const headers = latest("COALESCE(web_server, '') <> ''");
+  const techs = latest("COALESCE(tech_json, '[]') NOT IN ('[]', 'null', '')");
+  const distroByUrl = new Map<string, string | null>();
   const out: Seen[] = [];
-  for (const r of rows) {
-    const fromHeader = r.web_server ? parseServerHeader(r.web_server) : [];
-    const distro = fromHeader.find((e) => e.distro)?.distro ?? null;
+  for (const r of headers) {
+    const fromHeader = parseServerHeader(r.web_server!);
+    distroByUrl.set(r.url, fromHeader.find((e) => e.distro)?.distro ?? null);
     for (const e of fromHeader) out.push({ evidence: e, matchedAt: r.url, text: `${e.name}/${e.raw}` });
+  }
+  for (const r of techs) {
+    const distro = distroByUrl.get(r.url) ?? null;
     let tech: unknown = [];
     try { tech = r.tech_json ? JSON.parse(r.tech_json) : []; } catch { /* malformed tech_json: header evidence still counts */ }
     for (const t of Array.isArray(tech) ? tech : []) {
