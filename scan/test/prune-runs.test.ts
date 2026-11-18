@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { parseRunIds, parseExpect, applyPrune } from '../src/prune-runs.js';
 import { openDb } from '../src/lib/db.js';
+import { currentFindingsSelect } from '../src/lib/current-findings.js';
 import { recordRiskScores, deleteRiskScoresForRuns } from '../src/lib/risk-latest.js';
 
 describe('parseRunIds', () => {
@@ -61,5 +62,43 @@ describe('applyPrune (the prune-runs CLI body)', () => {
     expect(db.raw.prepare('SELECT id FROM runs').all()).toEqual([{ id: r1 }]);
     expect(db.raw.prepare('SELECT target, score FROM risk_latest ORDER BY target').all())
       .toEqual([{ target: 'a.example.com', score: 10 }]);
+  });
+});
+
+describe('applyPrune and tool_coverage', () => {
+  const cov = (raw: ReturnType<typeof openDb>['raw']) =>
+    raw.prepare('SELECT target, tool, run_id FROM tool_coverage ORDER BY target, tool').all();
+  const resolved = (raw: ReturnType<typeof openDb>['raw']) =>
+    (raw.prepare(currentFindingsSelect({ coverage: true })).all() as { title: string; resolved: number }[])
+      .map((r) => `${r.title}:${r.resolved}`).sort();
+
+  function seed() {
+    const db = openDb(':memory:');
+    const old = db.startRun('nmap', {}, '2026-01-01T00:00:00Z');
+    const bad = db.startRun('nmap', {}, '2026-01-02T00:00:00Z');
+    const other = db.startRun('nmap', {}, '2026-01-03T00:00:00Z');
+    db.insertFinding({ tool: 'nmap', target: 'a.example.com', title: 'old' }, '2026-01-01T00:00:00Z', old);
+    db.recordCoverage('nmap', ['a.example.com'], '2026-01-02T00:00:00Z', bad);
+    db.recordCoverage('nmap', ['b.example.com'], '2026-01-03T00:00:00Z', other);
+    return { db, bad, other };
+  }
+
+  it('deletes the coverage rows of the pruned run', () => {
+    const { db, bad } = seed();
+    applyPrune(db.raw, [bad]);
+    expect(cov(db.raw).map((r) => (r as { run_id: number }).run_id)).not.toContain(bad);
+  });
+
+  it('opens an older finding of that target and tool again', () => {
+    const { db, bad } = seed();
+    expect(resolved(db.raw)).toEqual(['old:1']);
+    applyPrune(db.raw, [bad]);
+    expect(resolved(db.raw)).toEqual(['old:0']);
+  });
+
+  it('keeps the coverage rows of other runs', () => {
+    const { db, bad, other } = seed();
+    applyPrune(db.raw, [bad]);
+    expect(cov(db.raw)).toEqual([{ target: 'b.example.com', tool: 'nmap', run_id: other }]);
   });
 });
