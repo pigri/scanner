@@ -6,6 +6,7 @@ import { openDb, type Db } from './lib/db.js';
 import { fetchCanary, probeUrl, hashBody, isNearCanary, type CanaryProbe } from './lib/catchall.js';
 import { cveIdsFor } from './lib/nuclei-cve.js';
 import { NUCLEI_URL_TOOL } from './lib/nuclei-tool.js';
+import { hostOf, nucleiCoveredTargets } from './lib/nuclei-coverage.js';
 
 // Nuclei templates whose semantics are "did the server return a page for this
 // path?" — these fire false positives on catch-all responders that return the
@@ -14,14 +15,6 @@ import { NUCLEI_URL_TOOL } from './lib/nuclei-tool.js';
 // deliberately NOT in this set — those observations are true even on decoys.
 const CATCHALL_SUSPECT_TEMPLATE_RE =
   /(?:^|[\/-])(exposures|exposed-panels|backup|config-exposure|wp-config|env-file|secrets|debug-endpoint|token-exposure|dump-files)(?:[\/-]|$)|(?:-detect(?:ion)?$)/i;
-
-// Extract the bare host from a nuclei matched-at URL so we can look up its
-// canary. Falls back to the raw string when parsing fails.
-function hostOf(url: string | null | undefined): string {
-  if (!url) return '';
-  try { return new URL(url.startsWith('http') ? url : `https://${url}`).host; }
-  catch { return url.split('/')[0] ?? ''; }
-}
 
 function loadLiveHttpTargets(db: Db): Set<string> {
   const set = new Set<string>();
@@ -216,14 +209,16 @@ Everything after '--' is passed to nuclei verbatim.`));
 
     let count = 0;
     let reviewCount = 0;
+    const coverageRows: { type?: string | undefined; 'matched-at'?: string | undefined }[] = [];
     for (const line of fs.readFileSync(outFile, 'utf8').split('\n')) {
       if (!line.trim()) continue;
       try {
         const row = JSON.parse(line) as {
           'template-id'?: string; template_id?: string;
           info?: { name?: string; severity?: string; classification?: { 'cve-id'?: string[] } };
-          host?: string; 'matched-at'?: string;
+          host?: string; 'matched-at'?: string; type?: string;
         };
+        coverageRows.push({ type: row.type, 'matched-at': row['matched-at'] });
         const tid = row['template-id'] ?? row.template_id ?? 'unknown';
         const cves = row.info?.classification?.['cve-id'];
         const targetHost = row.host ?? hostOf(row['matched-at']) ?? '';
@@ -295,7 +290,12 @@ Everything after '--' is passed to nuclei verbatim.`));
         if (isSuspect) reviewCount++;
       } catch { /* ignore */ }
     }
-    db.finishRun(runId, { targetsCount: targets.length, findingsCount: count, at: new Date().toISOString() });
+    const notes: string[] = [];
+    const covered = nucleiCoveredTargets(targets, coverageRows, { fromUrls, exitCode: r.code });
+    if (covered.length && !db.recordCoverage(toolName, covered, now, runId)) {
+      notes.push('tool_coverage write failed: scan.db busy');
+    }
+    db.finishRun(runId, { targetsCount: targets.length, findingsCount: count, ...(notes.length ? { notes: notes.join('; ') } : {}), at: new Date().toISOString() });
     db.close();
     console.error(
       `  sqlite: ${path.resolve(opts.sqlite!)} (+${count} findings, ${reviewCount} needs_review, run #${runId})`
