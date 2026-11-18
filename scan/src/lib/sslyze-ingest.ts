@@ -1,4 +1,5 @@
 import type { Db } from './db.js';
+import { coveredTargets } from './coverage.js';
 import { toCertRecords, quoteBigSerials, type SslyzeCertResult } from './sslyze-cert.js';
 import { classifyRobot } from './sslyze-robot.js';
 
@@ -37,7 +38,44 @@ export interface SslyzeResult {
   }>;
 }
 
-export interface SslyzeIngest { rows: number; findings: number; certs: number }
+// The flags the wrapper passes to sslyze (sslyze.ts spreads this list).
+export const SSLYZE_SCAN_FLAGS = [
+  '--certinfo', '--heartbleed', '--openssl_ccs', '--robot', '--fallback',
+  '--compression', '--reneg', '--resum', '--ems',
+  '--sslv3', '--tlsv1', '--tlsv1_1', '--tlsv1_2', '--tlsv1_3',
+] as const;
+
+// Every scan_result command the ingester reads AND the wrapper schedules, with its flag.
+// A host is covered only when each of them COMPLETED. ssl_2_0_cipher_suites is read but never
+// scheduled (no --sslv2), so it is always NOT_SCHEDULED and must not gate coverage;
+// session_resumption and tls_1_2 are scheduled but read by nothing.
+export const SSLYZE_COVERAGE_COMMANDS = {
+  heartbleed: '--heartbleed',
+  openssl_ccs_injection: '--openssl_ccs',
+  robot: '--robot',
+  tls_compression: '--compression',
+  session_renegotiation: '--reneg',
+  tls_extended_master_secret: '--ems',
+  tls_fallback_scsv: '--fallback',
+  ssl_3_0_cipher_suites: '--sslv3',
+  tls_1_0_cipher_suites: '--tlsv1',
+  tls_1_1_cipher_suites: '--tlsv1_1',
+  tls_1_3_cipher_suites: '--tlsv1_3',
+  certificate_info: '--certinfo',
+} as const satisfies Partial<Record<keyof ScanResult, string>>;
+export const SSLYZE_READ_COMMANDS = Object.keys(SSLYZE_COVERAGE_COMMANDS) as (keyof typeof SSLYZE_COVERAGE_COMMANDS)[];
+
+function allCommandsCompleted(scanResult: unknown): boolean {
+  if (typeof scanResult !== 'object' || scanResult === null) return false;
+  const sr = scanResult as Record<string, unknown>;
+  return SSLYZE_READ_COMMANDS.every((c) => {
+    const cmd = sr[c];
+    return typeof cmd === 'object' && cmd !== null && (cmd as { status?: unknown }).status === 'COMPLETED';
+  });
+}
+
+// `covered`: hosts whose every server row is COMPLETED with every command read COMPLETED. `coverageNote` is set only when the coverage write failed.
+export interface SslyzeIngest { rows: number; findings: number; certs: number; covered: string[]; coverageNote?: string }
 
 type ServerRow = NonNullable<SslyzeResult['server_scan_results']>[number];
 type ScanResult = NonNullable<ServerRow['scan_result']>;
@@ -83,9 +121,13 @@ export function ingestSslyzeOutput(db: Db, text: string, now: string, runId: num
     findings++;
   };
 
+  const outcomes: { target: string; ok: boolean }[] = [];
   for (const row of rows) {
     const target = row.server_location?.hostname;
-    if (!target || row.scan_status !== 'COMPLETED') continue;
+    if (!target) continue;
+    const completed = row.scan_status === 'COMPLETED';
+    outcomes.push({ target, ok: completed && allCommandsCompleted(row.scan_result) });
+    if (!completed) continue;
     const s = (typeof row.scan_result === 'object' && row.scan_result !== null ? row.scan_result : {}) as ScanResult;
 
     // ---- known-CVE vulnerability flags ----------------------------------
@@ -167,7 +209,10 @@ export function ingestSslyzeOutput(db: Db, text: string, now: string, runId: num
     certs++;
   }
 
-  return { rows: rows.length, findings, certs };
+  const covered = coveredTargets(outcomes);
+  const result: SslyzeIngest = { rows: rows.length, findings, certs, covered };
+  if (!db.recordCoverage('sslyze', covered, now, runId)) result.coverageNote = 'tool_coverage write failed: scan.db busy';
+  return result;
 }
 
 // Reads and ingests one sslyze output, and always finishes the run and closes the db.
@@ -192,6 +237,7 @@ export function ingestAndFinishRun(db: Db, read: () => string, now: string, runI
     db.finishRun(runId, {
       targetsCount: result ? result.rows : scanned,
       findingsCount: result ? result.findings : 0,
+      ...(result?.coverageNote ? { notes: result.coverageNote } : {}),
       at: new Date().toISOString(),
     });
     db.close();
