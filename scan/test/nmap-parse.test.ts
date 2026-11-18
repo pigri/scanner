@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseNmapXml } from '../src/lib/nmap-parse.js';
+import { parseNmapXml, vulnersCoveredTargets, hostTarget, type NmapHost } from '../src/lib/nmap-parse.js';
 
 const FIXTURE = `<?xml version="1.0" encoding="UTF-8"?>
 <nmaprun scanner="nmap" args="nmap -sV" start="1700000000">
@@ -69,5 +69,92 @@ describe('parseNmapXml', () => {
   it('gracefully returns [] on garbage input', () => {
     expect(parseNmapXml('not xml')).toEqual([]);
     expect(parseNmapXml('')).toEqual([]);
+  });
+});
+
+const host = (over: Partial<NmapHost> = {}): NmapHost => ({
+  ip: '192.0.2.10',
+  hostnames: ['www.example.test'],
+  ports: [{ port: 80, protocol: 'tcp', state: 'open', service: 'http', product: 'nginx', version: '1.24.0' }],
+  ...over,
+});
+const withCve = (h: NmapHost): NmapHost => ({
+  ...h,
+  ports: h.ports.map((p) => ({ ...p, scripts: [{ id: 'vulners', cves: [{ id: 'CVE-2024-0001', cvss: 7.5 }] }] })),
+});
+const ON = { vulners: true, exitCode: 0 };
+
+describe('parseNmapXml host timeout', () => {
+  it('flags a host nmap gave up on', () => {
+    const xml = `<nmaprun><host starttime="1" endtime="2" timedout="true"><status state="up"/>
+      <address addr="192.0.2.10" addrtype="ipv4"/><ports><port protocol="tcp" portid="22"><state state="open"/></port></ports></host>
+      <host><status state="up"/><address addr="198.51.100.7" addrtype="ipv4"/></host></nmaprun>`;
+    const [a, b] = parseNmapXml(xml);
+    expect(a!.timedOut).toBe(true);
+    expect(b!.timedOut).toBeUndefined();
+  });
+});
+
+describe('vulnersCoveredTargets', () => {
+  it('covers a host whose versioned port produced vulners CVEs', () => {
+    expect(vulnersCoveredTargets([withCve(host())], ON)).toEqual(['www.example.test']);
+  });
+
+  it('uses the ip when the host has no hostname', () => {
+    expect(vulnersCoveredTargets([withCve(host({ hostnames: [] }))], ON)).toEqual(['192.0.2.10']);
+  });
+
+  it('does not cover a host with no open port', () => {
+    expect(vulnersCoveredTargets([host({ ports: [] })], ON)).toEqual([]);
+  });
+
+  it('covers nothing on a non-zero exit', () => {
+    expect(vulnersCoveredTargets([withCve(host())], { vulners: true, exitCode: 1 })).toEqual([]);
+  });
+
+  it('covers nothing when vulners was off', () => {
+    expect(vulnersCoveredTargets([withCve(host())], { vulners: false, exitCode: 0 })).toEqual([]);
+  });
+
+  it('does not cover a versioned host without a vulners CVE, even when another host has one', () => {
+    const quiet = host({ ip: '203.0.113.5', hostnames: ['old.example.test'] });
+    expect(vulnersCoveredTargets([withCve(host()), quiet], ON)).toEqual(['www.example.test']);
+  });
+
+  it('does not cover a host whose ports have a product but no version', () => {
+    const h = withCve(host({ ports: [{ port: 80, protocol: 'tcp', state: 'open', product: 'nginx' }] }));
+    expect(vulnersCoveredTargets([h], ON)).toEqual([]);
+  });
+
+  it('does not cover when a port-narrowing flag was given', () => {
+    expect(vulnersCoveredTargets([withCve(host())], { ...ON, narrowed: true })).toEqual([]);
+  });
+
+  it('does not cover a target whose open finding sits on a port that is not open now', () => {
+    const open = new Map([['www.example.test', new Set([80, 8080])]]);
+    expect(vulnersCoveredTargets([withCve(host())], { ...ON, openFindingPorts: open })).toEqual([]);
+  });
+
+  it('covers a target whose open finding ports are all open now', () => {
+    const open = new Map([['www.example.test', new Set([80])]]);
+    expect(vulnersCoveredTargets([withCve(host())], { ...ON, openFindingPorts: open })).toEqual(['www.example.test']);
+  });
+
+  it('needs every host that maps to one target to be ok', () => {
+    const a = withCve(host());
+    const b = host({ ip: '198.51.100.9', hostnames: ['www.example.test'] });
+    expect(vulnersCoveredTargets([a, b], ON)).toEqual([]);
+    expect(vulnersCoveredTargets([a, withCve(b)], ON)).toEqual(['www.example.test']);
+  });
+
+  it('names a host by its first hostname', () => {
+    expect(hostTarget(host({ hostnames: ['a.example.test', 'ptr.example.net'] }))).toBe('a.example.test');
+    expect(hostTarget(host({ hostnames: [] }))).toBe('192.0.2.10');
+  });
+
+  it('does not cover a host nmap timed out on', () => {
+    const h = withCve(host({ timedOut: true }));
+    const other = withCve(host({ ip: '198.51.100.7', hostnames: ['api.example.test'] }));
+    expect(vulnersCoveredTargets([h, other], ON)).toEqual(['api.example.test']);
   });
 });
