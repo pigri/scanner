@@ -65,3 +65,22 @@ export function currentFindingRowsSelect(opts: CurrentFindingsOpts): string {
        FROM findings f JOIN wm ON wm.target = f.target AND wm.tool = f.tool
        WHERE f.seen_at >= wm.w`;
 }
+
+/**
+ * FROM clause over raw finding rows `f` that are current under an existing
+ * watermark CTE `wm` (columns target, tool, w), so one watermark scan can serve
+ * several readers. Callers add their own WHERE with AND.
+ */
+export function currentRowsFrom(wm: string): string {
+  return `findings f JOIN ${wm} ON ${wm}.target = f.target AND ${wm}.tool = f.tool AND f.seen_at >= ${wm}.w`;
+}
+
+/**
+ * FROM clause over logical findings `l` (target, severity) that are open under
+ * the watermark CTE `wm`: last_seen >= w.
+ */
+export function openLogicalFrom(wm: string): string {
+  return `(SELECT target, tool, severity, MAX(seen_at) last_seen FROM findings
+         GROUP BY target, tool, severity, category, title) l
+       JOIN ${wm} ON ${wm}.target = l.target AND ${wm}.tool = l.tool AND l.last_seen >= ${wm}.w`;
+}
