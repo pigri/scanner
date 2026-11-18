@@ -53,8 +53,76 @@ describe('currentFindingsSelect (rule 3: watermark = MAX(seen_at) per target, to
     );
   });
 
-  it('rejects coverage until WP3 implements it', () => {
-    expect(() => currentFindingsSelect({ coverage: true })).toThrow();
+});
+
+describe('currentFindingsSelect (rules 1 and 2: sticky tools and tool_coverage)', () => {
+  const cover = (raw: ReturnType<typeof seed>, target: string, tool: string, at: string) =>
+    raw
+      .prepare('INSERT INTO tool_coverage (target, tool, seen_at, run_id) VALUES (?, ?, ?, NULL)')
+      .run(target, tool, at);
+  const open = (raw: ReturnType<typeof seed>, coverage = true) =>
+    byTitle(raw.prepare(currentFindingsSelect({ coverage })).all() as Row[]);
+
+  it('resolves every row of a tool that a newer coverage record outlasts', () => {
+    const raw = seed();
+    cover(raw, 'host.example', 'version-match', '2026-11-10T13:00:00.000Z');
+    expect(open(raw)).toMatchObject({
+      'host.example/gone': 1,
+      'host.example/kept': 1,
+      'host.example/only': 0,
+      'other.example/solo': 0,
+    });
+  });
+
+  it('keeps rows seen at or after the coverage stamp open', () => {
+    const raw = seed();
+    cover(raw, 'host.example', 'version-match', T2);
+    expect(open(raw)).toMatchObject({ 'host.example/gone': 1, 'host.example/kept': 0 });
+    raw.prepare(
+      `INSERT INTO findings (target, tool, severity, category, title, seen_at)
+       VALUES ('host.example', 'version-match', 'high', 'cve', 'later', '2026-11-10T12:30:00.000Z')`,
+    ).run();
+    expect(open(raw)).toMatchObject({ 'host.example/gone': 1, 'host.example/kept': 0, 'host.example/later': 0 });
+  });
+
+  it('never resolves sticky tools, with or without coverage', () => {
+    const raw = seed();
+    const ins = raw.prepare(
+      `INSERT INTO findings (target, tool, severity, category, title, seen_at)
+       VALUES ('host.example', ?, 'high', 'eol', ?, ?)`,
+    );
+    for (const tool of STICKY_TOOLS) {
+      ins.run(tool, `${tool}-old`, T0);
+      ins.run(tool, `${tool}-new`, T2);
+      cover(raw, 'host.example', tool, '2026-11-10T13:00:00.000Z');
+    }
+    for (const coverage of [true, false]) {
+      const r = open(raw, coverage);
+      for (const tool of STICKY_TOOLS) {
+        expect(r[`host.example/${tool}-old`]).toBe(0);
+        expect(r[`host.example/${tool}-new`]).toBe(0);
+      }
+    }
+  });
+
+  it('works scoped to one target', () => {
+    const raw = seed();
+    cover(raw, 'host.example', 'version-match', '2026-11-10T13:00:00.000Z');
+    cover(raw, 'other.example', 'version-match', '2026-11-10T13:00:00.000Z');
+    const rows = raw
+      .prepare(currentFindingsSelect({ coverage: true, targetParam: '@t' }))
+      .all({ t: 'host.example' }) as Row[];
+    expect(byTitle(rows)).toEqual({
+      'host.example/gone': 1,
+      'host.example/kept': 1,
+      'host.example/only': 0,
+    });
+  });
+
+  it('ignores coverage rows when coverage is false', () => {
+    const raw = seed();
+    cover(raw, 'host.example', 'version-match', '2026-11-10T13:00:00.000Z');
+    expect(open(raw, false)).toMatchObject({ 'host.example/gone': 1, 'host.example/kept': 0 });
   });
 });
 

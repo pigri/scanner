@@ -160,7 +160,7 @@ function logicalFindings(): LogicalFinding[] {
   const now = Date.now();
   if (logicalCache && now - logicalCache.at < 60000) return logicalCache.rows;
   const rows = scan
-    .prepare(currentFindingsSelect({ coverage: false }))
+    .prepare(currentFindingsSelect({ coverage: tableExists(scan, 'tool_coverage') }))
     .all() as LogicalFinding[];
   logicalCache = { rows, at: now };
   return rows;
@@ -469,7 +469,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
     const findings = scan
       .prepare(
         `SELECT tool, severity, category, title, cve, first_seen, last_seen, occ, resolved
-         FROM (${currentFindingsSelect({ coverage: false, targetParam: '@t' })})
+         FROM (${currentFindingsSelect({ coverage: tableExists(scan, 'tool_coverage'), targetParam: '@t' })})
          ORDER BY resolved ASC, CASE severity
            WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2
            WHEN 'low' THEN 3 ELSE 4 END, tool LIMIT 800`,

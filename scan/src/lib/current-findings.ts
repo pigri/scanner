@@ -10,26 +10,29 @@ export function tableExists(db: Database.Database, name: string): boolean {
 }
 
 export interface CurrentFindingsOpts {
-  /** Read tool_coverage for the watermark. Not implemented yet; must be false. */
+  /** Join tool_coverage for the watermark. Callers pass tableExists(db, 'tool_coverage'). */
   coverage: boolean;
   /** Named SQL parameter (e.g. '@t') that limits the result to one target. */
   targetParam?: string;
 }
 
-function assertNoCoverage(opts: CurrentFindingsOpts): void {
-  if (opts.coverage) throw new Error('tool_coverage watermark is not implemented');
-}
-
 /**
  * SQL yielding one row per (target, tool) as `target, tool, w`. A row is
- * current when `seen_at >= w`. The watermark is the newest `seen_at` of the
- * pair, so a run that reports nothing leaves older rows open until the tool
- * reports something else for that target.
+ * current when `seen_at >= w`. The watermark is '' for sticky tools (never
+ * resolved), else the tool_coverage stamp when one exists, else the newest
+ * `seen_at` of the pair, so a run that reports nothing leaves older rows open
+ * until the tool reports something else for that target.
  */
 export function watermarkSelect(opts: CurrentFindingsOpts): string {
-  assertNoCoverage(opts);
   const where = opts.targetParam ? ` WHERE target = ${opts.targetParam}` : '';
-  return `SELECT target, tool, MAX(seen_at) AS w FROM findings${where} GROUP BY target, tool`;
+  const sticky = STICKY_TOOLS.map((t) => `'${t}'`).join(',');
+  const join = opts.coverage
+    ? ' LEFT JOIN tool_coverage c ON c.target = t.target AND c.tool = t.tool'
+    : '';
+  const mark = opts.coverage ? 'COALESCE(c.seen_at, t.tmax)' : 't.tmax';
+  return `SELECT t.target, t.tool,
+         CASE WHEN t.tool IN (${sticky}) THEN '' ELSE ${mark} END AS w
+         FROM (SELECT target, tool, MAX(seen_at) tmax FROM findings${where} GROUP BY target, tool) t${join}`;
 }
 
 /**
