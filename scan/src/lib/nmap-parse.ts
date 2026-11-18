@@ -29,6 +29,8 @@ export interface NmapHost {
   ip: string;
   hostnames: string[];
   ports: NmapPort[];
+  /** nmap gave up on this host (`--host-timeout`): its port list may be partial. */
+  timedOut?: boolean;
 }
 
 function asArray<T>(x: T | T[] | undefined): T[] {
@@ -103,6 +105,7 @@ function parseScripts(port: RawPort): NmapScript[] {
 }
 
 interface RawHost {
+  '@_timedout'?: string | boolean;
   status?: { '@_state'?: string };
   address?: { '@_addr'?: string; '@_addrtype'?: string } | { '@_addr'?: string; '@_addrtype'?: string }[];
   hostnames?: { hostname?: { '@_name'?: string } | { '@_name'?: string }[] };
@@ -148,7 +151,28 @@ export function parseNmapXml(xml: string): NmapHost[] {
       if (scripts.length) port.scripts = scripts;
       ports.push(port);
     }
-    out.push({ ip, hostnames, ports });
+    const host: NmapHost = { ip, hostnames, ports };
+    if (h['@_timedout'] === 'true' || h['@_timedout'] === true) host.timedOut = true;
+    out.push(host);
+  }
+  return out;
+}
+
+/**
+ * Raw target expressions (the ones the wrapper writes findings under) that a
+ * `--vulners` run conclusively examined. Absent output is never a signal: a failed
+ * run, a timed-out host or a host with nothing open covers nothing, and when
+ * versioned ports exist but the run produced no vulners CVE anywhere the script
+ * or its API may have failed silently.
+ */
+export function vulnersCoveredTargets(hosts: readonly NmapHost[], run: { vulners: boolean; exitCode: number | null }): string[] {
+  if (!run.vulners || run.exitCode !== 0) return [];
+  const anyCve = hosts.some((h) => h.ports.some((p) => p.scripts?.some((s) => s.cves?.length)));
+  const out: string[] = [];
+  for (const h of hosts) {
+    if (h.timedOut || h.ports.length === 0) continue;
+    if (!anyCve && h.ports.some((p) => p.version)) continue;
+    out.push(h.hostnames[0] ?? h.ip);
   }
   return out;
 }

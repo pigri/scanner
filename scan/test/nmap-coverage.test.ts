@@ -1,0 +1,94 @@
+import { describe, it, expect, afterEach } from 'vitest';
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { openDb } from '../src/lib/db.js';
+
+const scanDir = path.resolve(__dirname, '..');
+const tsx = path.join(scanDir, 'node_modules', '.bin', 'tsx');
+const dirs: string[] = [];
+afterEach(() => { for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true }); });
+
+const HOST = 'www.example.test';
+const XML = `<?xml version="1.0"?>
+<nmaprun><host><status state="up"/><address addr="192.0.2.10" addrtype="ipv4"/>
+<hostnames><hostname name="${HOST}" type="user"/></hostnames>
+<ports><port protocol="tcp" portid="80"><state state="open"/>
+<service name="http" product="nginx" version="1.18.0"/>
+<script id="vulners" output="x"><table key="cpe:/a:nginx:nginx:1.18.0"><table><elem key="id">CVE-2021-23017</elem><elem key="cvss">7.7</elem><elem key="type">cve</elem><elem key="is_exploit">false</elem></table></table></script>
+</port></ports></host></nmaprun>`;
+
+// A stand-in nmap that writes XML to the file after -oX and exits with EXIT.
+const fakeNmap = (xml: string, exit: number) => `#!/bin/sh
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-oX" ]; then out="$2"; fi
+  shift
+done
+cat > "$out" <<'XML'
+${xml}
+XML
+exit ${exit}
+`;
+
+function runNmap(opts: { xml?: string; exit?: number; extra?: string[]; noSqlite?: boolean }): Promise<{ code: number | null; stderr: string; db: string }> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nmap-cov-'));
+  dirs.push(dir);
+  const bin = path.join(dir, 'bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'nmap'), fakeNmap(opts.xml ?? XML, opts.exit ?? 0), { mode: 0o755 });
+  const dbPath = path.join(dir, 'scan.db');
+  openDb(dbPath).close();
+  const targets = path.join(dir, 'targets.txt');
+  fs.writeFileSync(targets, `${HOST}\n`);
+  return new Promise((resolve) => {
+    const child = spawn(tsx, ['src/nmap.ts', '--targets', targets, ...(opts.noSqlite ? [] : ['--sqlite', dbPath]),
+      '--run-dir', path.join(dir, 'runs'), '--', ...(opts.extra ?? ['--vulners'])], {
+      cwd: scanDir,
+      env: { PATH: `${bin}:${process.env['PATH'] ?? ''}`, HOME: dir },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', (b) => (stderr += b));
+    const timer = setTimeout(() => child.kill('SIGKILL'), 90_000);
+    child.on('close', (code) => { clearTimeout(timer); resolve({ code, stderr, db: dbPath }); });
+  });
+}
+
+const coverage = (dbPath: string) => {
+  const db = openDb(dbPath);
+  const cov = db.raw.prepare('SELECT target, tool, seen_at, run_id FROM tool_coverage').all() as
+    { target: string; tool: string; seen_at: string; run_id: number }[];
+  const f = db.raw.prepare("SELECT target, seen_at, run_id FROM findings WHERE tool = 'nmap-vulners'").all() as
+    { target: string; seen_at: string; run_id: number }[];
+  db.close();
+  return { cov, findings: f };
+};
+
+describe('nmap vulners coverage', () => {
+  it('records coverage with the same target, stamp and run as its findings', async () => {
+    const r = await runNmap({});
+    expect(r.code, r.stderr).toBe(0);
+    const { cov, findings } = coverage(r.db);
+    expect(findings).toHaveLength(1);
+    expect(cov).toEqual([{ target: findings[0]!.target, tool: 'nmap-vulners', seen_at: findings[0]!.seen_at, run_id: findings[0]!.run_id }]);
+    expect(cov[0]!.target).toBe(HOST);
+  }, 100_000);
+
+  it('records nothing on a non-zero exit', async () => {
+    const r = await runNmap({ exit: 1 });
+    expect(coverage(r.db).cov).toEqual([]);
+  }, 100_000);
+
+  it('records nothing without --vulners', async () => {
+    const r = await runNmap({ extra: [] });
+    expect(r.code, r.stderr).toBe(0);
+    expect(coverage(r.db).cov).toEqual([]);
+  }, 100_000);
+
+  it('records nothing for a host nmap timed out on', async () => {
+    const r = await runNmap({ xml: XML.replace('<host>', '<host starttime="1" endtime="2" timedout="true">') });
+    expect(r.code, r.stderr).toBe(0);
+    expect(coverage(r.db).cov).toEqual([]);
+  }, 100_000);
+});

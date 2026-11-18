@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, writeLines, resolveOutputPath } from './lib/runner.js';
-import { parseNmapXml } from './lib/nmap-parse.js';
+import { parseNmapXml, vulnersCoveredTargets } from './lib/nmap-parse.js';
 import { openDb } from './lib/db.js';
 
 // Data-store ports that fall OUTSIDE nmap's top-1000 (all rank by open-frequency,
@@ -183,7 +183,11 @@ Wrapper flags (before '--'):
         }
       }
     }
-    db.finishRun(runId, { targetsCount: targets.length, findingsCount: totalPorts + cveFindings, at: new Date().toISOString() });
+    const notes: string[] = [];
+    if (!db.recordCoverage('nmap-vulners', vulnersCoveredTargets(hosts, { vulners, exitCode: r.code }), now, runId)) {
+      notes.push('tool_coverage write failed: scan.db busy');
+    }
+    db.finishRun(runId, { targetsCount: targets.length, findingsCount: totalPorts + cveFindings, ...(notes.length ? { notes: notes.join('; ') } : {}), at: new Date().toISOString() });
     db.close();
     console.error(`  sqlite: ${path.resolve(opts.sqlite!)} (+${totalPorts} ports${cveFindings ? `, +${cveFindings} CVE findings` : ''}, run #${runId})`);
   }
