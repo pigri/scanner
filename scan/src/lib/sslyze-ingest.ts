@@ -38,7 +38,25 @@ export interface SslyzeResult {
   }>;
 }
 
-// `covered`: hosts whose every server row is COMPLETED. `coverageNote` is set only when the coverage write failed.
+// Every scan_result command the ingester reads. A host is covered only when each of them COMPLETED;
+// session_resumption and tls_1_2 are in sslyze's output but read by nothing.
+export const SSLYZE_READ_COMMANDS = [
+  'heartbleed', 'openssl_ccs_injection', 'robot', 'tls_compression', 'session_renegotiation',
+  'tls_extended_master_secret', 'tls_fallback_scsv',
+  'ssl_2_0_cipher_suites', 'ssl_3_0_cipher_suites', 'tls_1_0_cipher_suites', 'tls_1_1_cipher_suites', 'tls_1_3_cipher_suites',
+  'certificate_info',
+] as const satisfies readonly (keyof ScanResult)[];
+
+function allCommandsCompleted(scanResult: unknown): boolean {
+  if (typeof scanResult !== 'object' || scanResult === null) return false;
+  const sr = scanResult as Record<string, unknown>;
+  return SSLYZE_READ_COMMANDS.every((c) => {
+    const cmd = sr[c];
+    return typeof cmd === 'object' && cmd !== null && (cmd as { status?: unknown }).status === 'COMPLETED';
+  });
+}
+
+// `covered`: hosts whose every server row is COMPLETED with every command read COMPLETED. `coverageNote` is set only when the coverage write failed.
 export interface SslyzeIngest { rows: number; findings: number; certs: number; covered: string[]; coverageNote?: string }
 
 type ServerRow = NonNullable<SslyzeResult['server_scan_results']>[number];
@@ -90,7 +108,7 @@ export function ingestSslyzeOutput(db: Db, text: string, now: string, runId: num
     const target = row.server_location?.hostname;
     if (!target) continue;
     const completed = row.scan_status === 'COMPLETED';
-    outcomes.push({ target, ok: completed });
+    outcomes.push({ target, ok: completed && allCommandsCompleted(row.scan_result) });
     if (!completed) continue;
     const s = (typeof row.scan_result === 'object' && row.scan_result !== null ? row.scan_result : {}) as ScanResult;
 

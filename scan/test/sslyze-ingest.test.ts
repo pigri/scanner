@@ -1,23 +1,31 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { openDb } from '../src/lib/db.js';
-import { ingestSslyzeOutput, ingestAndFinishRun } from '../src/lib/sslyze-ingest.js';
+import { ingestSslyzeOutput, ingestAndFinishRun, SSLYZE_READ_COMMANDS } from '../src/lib/sslyze-ingest.js';
 
 const NOW = '2026-01-01T00:00:00.000Z';
+
+// Every command the ingester reads, finished; `over` replaces single commands.
+const allCommands = (over: Record<string, unknown> = {}): Record<string, unknown> => {
+  const out: Record<string, unknown> = {};
+  for (const c of SSLYZE_READ_COMMANDS) out[c] = { status: 'COMPLETED', result: {} };
+  return { ...out, ...over };
+};
+const done = (result: unknown) => ({ status: 'COMPLETED', result });
 
 const good = (hostname: unknown = 'host.example.com') => ({
   server_location: { hostname, ip_address: '192.0.2.1', port: 443 },
   scan_status: 'COMPLETED',
-  scan_result: {
-    heartbleed: { result: { is_vulnerable_to_heartbleed: true } },
-    tls_1_0_cipher_suites: { result: { is_tls_version_supported: true } },
-    certificate_info: { result: { certificate_deployments: [{
+  scan_result: allCommands({
+    heartbleed: done({ is_vulnerable_to_heartbleed: true }),
+    tls_1_0_cipher_suites: done({ is_tls_version_supported: true }),
+    certificate_info: done({ certificate_deployments: [{
       leaf_certificate_signed_certificate_timestamps_count: 0,
       received_certificate_chain: [{
         fingerprint_sha256: 'uTDvCVyiwPnM5M+7A6dM3WS6KZQGb8e8OFfrWcnlLHk=',
         serial_number: 'BIGSERIAL',
       }],
-    }] } },
-  },
+    }] }),
+  }),
 });
 
 // sslyze emits serials as bare integers beyond 2^53, which JSON.stringify cannot produce.
@@ -174,10 +182,42 @@ describe('sslyze coverage', () => {
 
   it('covers a COMPLETED row that produced no findings', () => {
     const { db, runId } = setup();
-    const quiet = { server_location: { hostname: 'quiet.example.com', ip_address: '192.0.2.2', port: 443 }, scan_status: 'COMPLETED', scan_result: {} };
+    const quiet = { server_location: { hostname: 'quiet.example.com', ip_address: '192.0.2.2', port: 443 }, scan_status: 'COMPLETED', scan_result: allCommands() };
     const r = ingestSslyzeOutput(db, toText({ server_scan_results: [quiet] }), NOW, runId);
     expect(r?.findings).toBe(0);
     expect(coverage(db)).toEqual([{ target: 'quiet.example.com', tool: 'sslyze', seen_at: NOW, run_id: runId }]);
+  });
+
+  it.each(SSLYZE_READ_COMMANDS)('does not cover a COMPLETED row whose %s command errored', (cmd) => {
+    const { db, runId } = setup();
+    const errored = { status: 'ERROR', error_reason: 'CONNECTIVITY_ISSUE', result: null };
+    const row = { ...good('err.example.com'), scan_result: allCommands({ [cmd]: errored }) };
+    const r = ingestSslyzeOutput(db, toText({ server_scan_results: [row] }), NOW, runId);
+    expect(r?.covered).toEqual([]);
+    expect(coverage(db)).toEqual([]);
+  });
+
+  it('keeps an earlier tls-1.0 finding current when the tls_1_0 command errored', () => {
+    const { db, runId } = setup();
+    db.insertFinding({ tool: 'sslyze', target: 'err.example.com', category: 'tls-1.0', severity: 'medium', title: 'TLS 1.0 supported' }, '2025-12-01T00:00:00.000Z', runId);
+    const errored = { status: 'ERROR', error_reason: 'CONNECTIVITY_ISSUE', result: null };
+    const row = { ...good('err.example.com'), scan_result: allCommands({ tls_1_0_cipher_suites: errored }) };
+    ingestSslyzeOutput(db, toText({ server_scan_results: [row] }), NOW, runId);
+    expect(coverage(db)).toEqual([]);
+  });
+
+  it('does not cover a COMPLETED row that lacks a command the ingester reads', () => {
+    const { db, runId } = setup();
+    const bare = { server_location: { hostname: 'bare.example.com', port: 443 }, scan_status: 'COMPLETED', scan_result: {} };
+    const r = ingestSslyzeOutput(db, toText({ server_scan_results: [bare] }), NOW, runId);
+    expect(r?.covered).toEqual([]);
+  });
+
+  it('covers nothing and throws when a findings insert fails', () => {
+    const { db, runId } = setup();
+    db.raw.exec("CREATE TRIGGER t BEFORE INSERT ON findings BEGIN SELECT RAISE(ABORT, 'database is locked'); END");
+    expect(() => ingestSslyzeOutput(db, toText({ server_scan_results: [good()] }), NOW, runId)).toThrow(/locked/);
+    expect(coverage(db)).toEqual([]);
   });
 
   it.each(['ERROR_NO_CONNECTIVITY', 'ERROR_CONNECTIVITY_TIMEOUT', 'NOT_SCANNED'])('does not cover a %s row', (status) => {
