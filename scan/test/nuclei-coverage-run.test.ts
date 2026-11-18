@@ -18,9 +18,11 @@ const MISSED = 'skipped.example.test';
 const FAKE_NUCLEI = `#!/bin/sh
 while [ $# -gt 0 ]; do
   if [ "$1" = "-o" ]; then out="$2"; fi
+  if [ "$1" = "-elog" ]; then elog="$2"; fi
   shift
 done
 cp "$FAKE_ROWS" "$out"
+[ -n "$FAKE_ELOG" ] && [ -n "$elog" ] && cp "$FAKE_ELOG" "$elog"
 [ -n "$FAKE_STDERR" ] && printf '%s\\n' "$FAKE_STDERR" >&2
 exit "\${FAKE_EXIT:-0}"
 `;
@@ -29,7 +31,7 @@ const row = (type: string, matchedAt: string, host = HOST) => JSON.stringify({
   'template-id': 't-' + type, type, info: { name: 'T', severity: 'info' }, host, 'matched-at': matchedAt,
 });
 
-function runNuclei(extra: string[], rows: string[], exit = 0, opt: { trigger?: string; stderrLines?: string[] } = {}) {
+function runNuclei(extra: string[], rows: string[], exit = 0, opt: { trigger?: string; stderrLines?: string[]; elog?: string[] } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nuclei-cov-'));
   dirs.push(dir);
   const bin = path.join(dir, 'bin');
@@ -37,6 +39,8 @@ function runNuclei(extra: string[], rows: string[], exit = 0, opt: { trigger?: s
   fs.writeFileSync(path.join(bin, 'nuclei'), FAKE_NUCLEI, { mode: 0o755 });
   const rowsFile = path.join(dir, 'rows.jsonl');
   fs.writeFileSync(rowsFile, rows.join('\n') + '\n');
+  const elogFile = path.join(dir, 'elog.jsonl');
+  if (opt.elog) fs.writeFileSync(elogFile, opt.elog.join('\n') + '\n');
   const dbPath = path.join(dir, 'scan.db');
   const db = openDb(dbPath);
   for (const h of [HOST, MISSED]) {
@@ -52,7 +56,7 @@ function runNuclei(extra: string[], rows: string[], exit = 0, opt: { trigger?: s
     const child = spawn(tsx, ['src/nuclei.ts', '--targets', targets, '--sqlite', dbPath,
       '--run-dir', path.join(dir, 'runs'), '--', '--live-only', ...extra], {
       cwd: scanDir,
-      env: { PATH: `${bin}:${process.env['PATH'] ?? ''}`, HOME: dir, FAKE_ROWS: rowsFile, FAKE_EXIT: String(exit), FAKE_STDERR: (opt.stderrLines ?? []).join('\n') },
+      env: { PATH: `${bin}:${process.env['PATH'] ?? ''}`, HOME: dir, FAKE_ROWS: rowsFile, FAKE_EXIT: String(exit), FAKE_ELOG: opt.elog ? elogFile : '', FAKE_STDERR: (opt.stderrLines ?? []).join('\n') },
       stdio: ['ignore', 'ignore', 'pipe'],
     });
     let stderr = '';
@@ -117,6 +121,24 @@ describe('nuclei coverage', () => {
     const r = await runNuclei(['--from-urls'], [row('ssl', `${HOST}:443`), row('ssl', `${MISSED}:443`, MISSED)], 0,
       { stderrLines: [`[INF] Skipped ${MISSED}:443 from target list as found unresponsive 30 times`] });
     expect(coverage(r.db).rows.map((x) => x.target)).toEqual([HOST]);
+  }, 100_000);
+
+  it('records nothing for a host whose row failed before its insert', async () => {
+    const bad = JSON.stringify({ 'template-id': 't', type: 'ssl', info: { classification: { 'cve-id': [5] } }, host: MISSED, 'matched-at': `${MISSED}:443` });
+    const r = await runNuclei(['--from-urls'], [row('ssl', `${HOST}:443`), bad]);
+    expect(coverage(r.db).rows.map((x) => x.target)).toEqual([HOST]);
+  }, 100_000);
+
+  it('records nothing for a host whose error log reaches the -mhe limit', async () => {
+    const errs = Array.from({ length: 30 }, (_, i) => JSON.stringify({ template: 't.yaml', type: 'http', input: `https://${MISSED}/p${i}`, address: `${MISSED}:443`, error: 'cause="connection reset by peer"', kind: 'unknown-error' }));
+    const r = await runNuclei(['--from-urls'], [row('ssl', `${HOST}:443`), row('ssl', `${MISSED}:443`, MISSED)], 0, { elog: errs });
+    expect(coverage(r.db).rows.map((x) => x.target)).toEqual([HOST]);
+  }, 100_000);
+
+  it('records nothing for a host whose off-host match failed to store', async () => {
+    const trigger = `CREATE TRIGGER fail_sso BEFORE INSERT ON findings WHEN NEW.matched_at LIKE '%sso.example.test%' BEGIN SELECT RAISE(ABORT, 'database is locked'); END;`;
+    const r = await runNuclei(['--from-urls'], [row('ssl', `${HOST}:443`), row('http', 'https://sso.example.test/login', HOST)], 0, { trigger });
+    expect(coverage(r.db).rows).toEqual([]);
   }, 100_000);
 
   it('passes -elog to the URL pass only', async () => {

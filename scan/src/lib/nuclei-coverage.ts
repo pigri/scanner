@@ -18,6 +18,8 @@ export function hostOf(url: string | null | undefined): string {
 export interface NucleiRowEvidence {
   type?: string | undefined;
   'matched-at'?: string | undefined;
+  /** The row's `host`, which keys its finding. */
+  host?: string | undefined;
   /** Every finding of this row reached the database. */
   stored: boolean;
 }
@@ -63,11 +65,13 @@ export function nucleiCoveredTargets(
   const state = new Map<string, { hit: boolean; failed: boolean }>();
   for (const r of rows) {
     const h = parseMatched(r['matched-at']).hostname;
-    if (!h) continue;
-    const s = state.get(h) ?? { hit: false, failed: false };
-    if (!r.stored) s.failed = true;
-    else if (r.type !== 'dns') s.hit = true;
-    state.set(h, s);
+    const keys = new Set([h, parseMatched(r.host).hostname].filter(Boolean));
+    for (const k of keys) {
+      const s = state.get(k) ?? { hit: false, failed: false };
+      if (!r.stored) s.failed = true;
+      else if (r.type !== 'dns' && k === h) s.hit = true;
+      state.set(k, s);
+    }
   }
   const out: string[] = [];
   for (const t of targets) {

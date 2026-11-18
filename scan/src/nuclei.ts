@@ -222,7 +222,8 @@ Everything after '--' is passed to nuclei verbatim.`));
           info?: { name?: string; severity?: string; classification?: { 'cve-id'?: string[] } };
           host?: string; 'matched-at'?: string; type?: string;
         };
-        ev = { type: row.type, 'matched-at': row['matched-at'], stored: true };
+        // Fails closed: stored flips to true only after the row's last insert.
+        ev = { type: row.type, 'matched-at': row['matched-at'], host: row.host, stored: false };
         evidence.push(ev);
         const tid = row['template-id'] ?? row.template_id ?? 'unknown';
         const cves = row.info?.classification?.['cve-id'];
@@ -295,12 +296,13 @@ Everything after '--' is passed to nuclei verbatim.`));
             count++;
           } catch (e) { ev.stored = false; throw e; }
         }
+        ev.stored = true;
         if (isSuspect) reviewCount++;
       } catch { /* ignore */ }
     }
     const notes: string[] = [];
     const elogLines = errorLog && fs.existsSync(errorLog) ? fs.readFileSync(errorLog, 'utf8').split('\n') : [];
-    const skipped = nucleiSkippedHosts(r.stderr, elogLines, Math.max(maxHostError, concurrency));
+    const skipped = nucleiSkippedHosts(r.stderr, elogLines, maxHostError);
     const covered = nucleiCoveredTargets(targets, evidence, { fromUrls, exitCode: r.code, skipped });
     if (covered.length && !db.recordCoverage(toolName, covered, now, runId)) {
       notes.push('tool_coverage write failed: scan.db busy');

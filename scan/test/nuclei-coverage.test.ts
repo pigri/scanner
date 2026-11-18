@@ -59,6 +59,11 @@ describe('nucleiCoveredTargets storage and skips', () => {
     expect(nucleiCoveredTargets([T], [ssl, { type: 'dns', 'matched-at': T, stored: false }], opts)).toEqual([]);
   });
 
+  it('does not cover a target whose off-host match (keyed on row.host) failed to store', () => {
+    const off = { type: 'http', 'matched-at': 'https://sso.example.test/login', host: T, stored: false };
+    expect(nucleiCoveredTargets([T], [ssl, off], opts)).toEqual([]);
+  });
+
   it('does not cover a target nuclei skipped, even with rows', () => {
     expect(nucleiCoveredTargets([T], [ssl], { ...opts, skipped: new Set([T]) })).toEqual([]);
   });
