@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
 import { currentFindingsSelect, tableExists, STICKY_TOOLS } from '../src/lib/current-findings.js';
 import { openDb } from '../src/lib/db.js';
+import { riskToolKey, riskToolKeySql } from '../src/lib/nuclei-tool.js';
 
 const T0 = '2026-11-10T10:00:00.000Z';
 const T1 = '2026-11-10T11:00:00.000Z';
@@ -221,5 +222,84 @@ describe('currentFindingsSelect with partial:true (partial runs leave the waterm
       mark(raw, T2, tool);
     }
     for (const v of Object.values(sel(raw, true))) expect(v).toBe(0);
+  });
+});
+
+describe('currentFindingsSelect (nuclei passes are one tool)', () => {
+  type Full = Row & { occ: number; first_seen: string; last_seen: string; cve: string | null };
+  const add = (raw: ReturnType<typeof seed>, tool: string, title: string, at: string, target = 'twin.example') =>
+    raw
+      .prepare(
+        `INSERT INTO findings (target, tool, severity, category, title, cve, seen_at)
+         VALUES (?, ?, 'high', 'cve', ?, 'CVE-2026-1', ?)`,
+      )
+      .run(target, tool, title, at);
+  const rowsOf = (raw: ReturnType<typeof seed>, targetParam?: string) =>
+    (targetParam
+      ? raw.prepare(currentFindingsSelect({ coverage: false, partial: true, targetParam })).all({ t: 'twin.example' })
+      : raw.prepare(currentFindingsSelect({ coverage: false, partial: true })).all()) as Full[];
+  const twin = (rows: Full[]) => rows.filter((r) => r.target === 'twin.example');
+
+  it('gives one row for a match both passes report, as tool nuclei, with occurrences summed', () => {
+    const raw = seed();
+    add(raw, 'nuclei', 'same', T0);
+    add(raw, 'nuclei', 'same', T1);
+    add(raw, 'nuclei-url', 'same', T2);
+    const rows = twin(rowsOf(raw));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ tool: 'nuclei', occ: 3, first_seen: T0, last_seen: T2, cve: 'CVE-2026-1', resolved: 0 });
+  });
+
+  it('keeps a finding open when either twin still reports it', () => {
+    const raw = seed();
+    add(raw, 'nuclei', 'same', T0);
+    add(raw, 'nuclei', 'later', T2); // nuclei watermark T2: nuclei side of "same" is resolved
+    add(raw, 'nuclei-url', 'same', T1);
+    add(raw, 'nuclei-url', 'other', T1); // nuclei-url watermark T1: "same" is open there
+    expect(twin(rowsOf(raw))).toHaveLength(3);
+    expect(byTitle(twin(rowsOf(raw)))).toEqual({
+      'twin.example/same': 0,
+      'twin.example/later': 0,
+      'twin.example/other': 0,
+    });
+  });
+
+  it('resolves a finding only when both twins have resolved it', () => {
+    const raw = seed();
+    add(raw, 'nuclei', 'same', T0);
+    add(raw, 'nuclei-url', 'same', T0);
+    add(raw, 'nuclei', 'news', T2);
+    add(raw, 'nuclei-url', 'news2', T2);
+    const rows = twin(rowsOf(raw));
+    expect(rows).toHaveLength(3);
+    expect(byTitle(rows)['twin.example/same']).toBe(1);
+  });
+
+  it('does not let a newer nuclei-url row resolve a finding only nuclei reported', () => {
+    const raw = seed();
+    add(raw, 'nuclei', 'solo', T0);
+    add(raw, 'nuclei-url', 'url-only', T2);
+    const rows = twin(rowsOf(raw));
+    expect(rows.map((r) => r.tool)).toEqual(['nuclei', 'nuclei']);
+    expect(byTitle(rows)).toEqual({ 'twin.example/solo': 0, 'twin.example/url-only': 0 });
+  });
+
+  it('per-target variant equals the global one for the twin rows', () => {
+    const raw = seed();
+    add(raw, 'nuclei', 'same', T0);
+    add(raw, 'nuclei-url', 'same', T2);
+    add(raw, 'nuclei', 'solo', T1);
+    const strip = (rows: Full[]) => twin(rows).map((r) => JSON.stringify(r)).sort();
+    expect(strip(rowsOf(raw, '@t'))).toEqual(strip(rowsOf(raw)));
+  });
+});
+
+describe('riskToolKeySql', () => {
+  it('agrees with riskToolKey', () => {
+    const { raw } = openDb(':memory:');
+    for (const tool of ['nuclei', 'nuclei-url', 'httpx', 'version-match', '']) {
+      const got = (raw.prepare(`SELECT ${riskToolKeySql('t')} k FROM (SELECT ? t)`).get(tool) as { k: string }).k;
+      expect(got).toBe(riskToolKey(tool));
+    }
   });
 });

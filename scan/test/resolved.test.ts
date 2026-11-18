@@ -180,3 +180,9 @@ describe('classifyHost', () => {
     expect(classifyHost(d)).toBe('clean-now');
   });
 });
+
+describe('keyOf nuclei passes', () => {
+  it('gives both nuclei passes one key', () => {
+    expect(keyOf({ tool: 'nuclei-url', category: 'x', title: 'y' })).toBe(keyOf({ tool: 'nuclei', category: 'x', title: 'y' }));
+  });
+});

@@ -10,6 +10,7 @@
 // (window.tool === key.tool, or window.tool === 'scan-all' which acts as a
 // wildcard for the orchestrator's umbrella row).
 import { keyOf, type Key } from './resolved.js';
+import { riskToolKey } from './nuclei-tool.js';
 
 export interface Observation {
   tool: string;
@@ -71,7 +72,7 @@ function assertChronological(windows: readonly ScanWindow[]): void {
 }
 
 function windowAppliesToKey(w: ScanWindow, keyTool: string): boolean {
-  return w.tool === 'scan-all' || w.tool === keyTool;
+  return w.tool === 'scan-all' || riskToolKey(w.tool) === riskToolKey(keyTool);
 }
 
 function computeStatus(applicable: PresenceState[]): Status {

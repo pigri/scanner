@@ -1,6 +1,7 @@
 #!/usr/bin/env -S node --loader tsx
 import { openDb } from './lib/db.js';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
+import { newSinceSql } from './lib/news-sql.js';
 
 interface Opts {
   db: string;
@@ -162,23 +163,7 @@ function main(): void {
     // combo was FIRST seen at/after --since. Effectively "what's genuinely
     // new since <date>", not just "what showed up again on a rescan".
     if (!opts.since) { console.error('new-since needs a date, e.g. `query new-since 2026-08-19`'); process.exit(1); }
-    const sql = `
-      WITH firsts AS (
-        SELECT tool, target, COALESCE(category,'') cat, title, MIN(seen_at) first_seen
-        FROM findings GROUP BY tool, target, cat, title
-      )
-      SELECT f.seen_at, f.tool, f.target, f.severity, f.title, f.cve
-      FROM findings f
-      JOIN firsts fi ON fi.tool = f.tool AND fi.target = f.target
-                    AND COALESCE(f.category,'') = fi.cat AND fi.title = f.title
-                    AND fi.first_seen = f.seen_at
-      WHERE fi.first_seen >= ?
-      ${opts.severity ? 'AND f.severity = ?' : ''}
-      ${opts.tool ? 'AND f.tool = ?' : ''}
-      ORDER BY CASE f.severity
-        WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC,
-        f.seen_at DESC
-    `;
+    const sql = newSinceSql({ severity: !!opts.severity, tool: !!opts.tool });
     const params: unknown[] = [opts.since];
     if (opts.severity) params.push(opts.severity);
     if (opts.tool) params.push(opts.tool);

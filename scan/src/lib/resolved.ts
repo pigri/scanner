@@ -8,6 +8,8 @@
 // `query new-since` uses (see src/query.ts) so behavior stays consistent
 // across the two differential views.
 
+import { riskToolKey } from './nuclei-tool.js';
+
 export interface Observation {
   tool: string;
   target: string;
@@ -25,7 +27,7 @@ export type Key = string;
 // punctuation (nuclei template ids, TLS issue names) so a plain delimiter
 // would risk collisions.
 export function keyOf(o: Pick<Observation, 'tool' | 'category' | 'title'>): Key {
-  return JSON.stringify([o.tool, o.category, o.title]);
+  return JSON.stringify([riskToolKey(o.tool), o.category, o.title]);
 }
 
 export interface ScanWindow {

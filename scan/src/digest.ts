@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import { newSinceSql } from './lib/news-sql.js';
 
 const SEV_RANK: Record<string, number> = { info: 0, low: 1, medium: 2, high: 3, critical: 4 };
 
@@ -50,21 +51,7 @@ async function main(): Promise<void> {
   const db = new Database(dbPath, { readonly: true });
 
   // ─── Δ findings — first sighting at or after `since` ─────────────────────
-  const newFindings = db.prepare(`
-    WITH firsts AS (
-      SELECT tool, target, COALESCE(category,'') cat, title, MIN(seen_at) first_seen
-      FROM findings GROUP BY tool, target, cat, title
-    )
-    SELECT f.seen_at, f.tool, f.target, f.severity, f.title, f.cve
-    FROM findings f
-    JOIN firsts fi ON fi.tool=f.tool AND fi.target=f.target
-                  AND COALESCE(f.category,'')=fi.cat AND fi.title=f.title
-                  AND fi.first_seen=f.seen_at
-    WHERE fi.first_seen >= ?
-    ORDER BY CASE f.severity
-      WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC,
-      f.seen_at DESC
-  `).all(since) as DigestRow[];
+  const newFindings = db.prepare(newSinceSql({})).all(since) as DigestRow[];
 
   // ─── Δ CVE rows (first_seen >= window) ───────────────────────────────────
   const newCves = db.prepare(`

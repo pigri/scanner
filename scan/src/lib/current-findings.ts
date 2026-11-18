@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { NUCLEI_FAMILY_SQL } from './nuclei-tool.js';
 
 /** Tools whose findings are asserted by hand or by synthesis and never close. */
 export const STICKY_TOOLS = ['synthesize-eol', 'manual', 'manual-triage'] as const;
@@ -60,19 +61,32 @@ export function watermarkSelect(opts: CurrentFindingsOpts): string {
  * SQL for logical findings: every sighting of the same (target, tool, severity,
  * category, title) collapsed to one row with first/last seen and count.
  * `resolved` is 1 when last_seen predates the pair's watermark, else 0.
+ *
+ * The two nuclei passes (lib/nuclei-tool.ts) keep their own watermark, then
+ * merge under tool 'nuclei': a finding is open when either pass still reports
+ * it, so one match found by both is one row. The families sit in separate
+ * branches so the plain one keeps the index-order grouping.
  */
 export function currentFindingsSelect(opts: CurrentFindingsOpts): string {
-  const where = opts.targetParam ? ` WHERE target = ${opts.targetParam}` : '';
+  const and = opts.targetParam ? ` AND target = ${opts.targetParam}` : '';
   const materialized = opts.targetParam ? '' : ' MATERIALIZED';
-  return `WITH logical AS${materialized} (
-         SELECT target, tool, severity, category, title, MAX(cve) cve,
+  const grouped = (op: string) => `SELECT target, tool, severity, category, title, MAX(cve) cve,
                 MIN(seen_at) first_seen, MAX(seen_at) last_seen, COUNT(*) occ
-         FROM findings${where} GROUP BY target, tool, severity, category, title),
+         FROM findings WHERE +tool ${op} ${NUCLEI_FAMILY_SQL}${and} GROUP BY target, tool, severity, category, title`;
+  return `WITH plain AS${materialized} (${grouped('NOT IN')}),
+       fam AS${materialized} (${grouped('IN')}),
        wm AS${materialized} (${watermarkSelect(opts)})
        SELECT l.target, l.tool, l.severity, l.category, l.title, l.cve,
               l.first_seen, l.last_seen, l.occ,
               CASE WHEN l.last_seen < wm.w THEN 1 ELSE 0 END resolved
-       FROM logical l JOIN wm ON wm.target = l.target AND wm.tool = l.tool`;
+       FROM plain l JOIN wm ON wm.target = l.target AND wm.tool = l.tool
+       UNION ALL
+       SELECT target, 'nuclei', severity, category, title, MAX(cve),
+              MIN(first_seen), MAX(last_seen), SUM(occ), MIN(resolved)
+       FROM (SELECT l.target, l.severity, l.category, l.title, l.cve, l.first_seen, l.last_seen, l.occ,
+                    CASE WHEN l.last_seen < wm.w THEN 1 ELSE 0 END resolved
+             FROM fam l JOIN wm ON wm.target = l.target AND wm.tool = l.tool)
+       GROUP BY target, severity, category, title`;
 }
 
 /**
@@ -101,7 +115,15 @@ export function currentRowsFrom(wm: string): string {
  * the watermark CTE `wm`: last_seen >= w.
  */
 export function openLogicalFrom(wm: string): string {
-  return `(SELECT target, tool, severity, MAX(seen_at) last_seen FROM findings
-         GROUP BY target, tool, severity, category, title) l
-       JOIN ${wm} ON ${wm}.target = l.target AND ${wm}.tool = l.tool AND l.last_seen >= ${wm}.w`;
+  const grouped = (op: string) => `SELECT target, tool, severity, MAX(seen_at) last_seen FROM findings
+         WHERE +tool ${op} ${NUCLEI_FAMILY_SQL} GROUP BY target, tool, severity, category, title`;
+  return `(SELECT l.target, l.severity FROM (${grouped('NOT IN')}) l
+         JOIN ${wm} ON ${wm}.target = l.target AND ${wm}.tool = l.tool AND l.last_seen >= ${wm}.w
+       UNION ALL
+       SELECT target, severity FROM (
+         SELECT l.target, l.severity, l.category, l.title FROM
+           (SELECT target, tool, severity, category, title, MAX(seen_at) last_seen FROM findings
+            WHERE +tool IN ${NUCLEI_FAMILY_SQL} GROUP BY target, tool, severity, category, title) l
+         JOIN ${wm} ON ${wm}.target = l.target AND ${wm}.tool = l.tool AND l.last_seen >= ${wm}.w)
+       GROUP BY target, severity, category, title) l`;
 }

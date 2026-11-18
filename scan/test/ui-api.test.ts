@@ -730,3 +730,40 @@ describe('CVE lists follow cves.open', () => {
     expect((await fetch(`${base}/api/attackPaths`)).status).toBe(200);
   }, 40_000);
 });
+
+describe('nuclei passes in the findings list', () => {
+  const seedTwins = () =>
+    seed(false, (raw) => {
+      const ins = raw.prepare(
+        `INSERT INTO findings (target, tool, severity, category, title, matched_at, meta_json, seen_at)
+         VALUES ('host.example', ?, 'high', 'exposure-.env', 'env exposed', ?, ?, ?)`,
+      );
+      ins.run('nuclei', 'https://host.example/.env', '{"detail":"from-host-pass"}', iso(5));
+      ins.run('nuclei-url', 'https://host.example/a/.env', '{"detail":"from-url-pass"}', iso(2));
+      // evidence for a finding only the URL pass reported
+      raw.prepare(
+        `INSERT INTO findings (target, tool, severity, category, title, matched_at, meta_json, seen_at)
+         VALUES ('host.example', 'nuclei-url', 'high', 'exposure-.git', 'git exposed', 'https://host.example/.git/', '{"detail":"url-only"}', ?)`,
+      ).run(iso(2));
+    });
+
+  it('lists a match both passes found once and filters it by either tool name', async () => {
+    const base = await startUi(seedTwins());
+    const all = (await (await fetch(`${base}/api/findings?limit=100`)).json()) as any;
+    expect(all.rows.filter((r: any) => r.title === 'env exposed')).toHaveLength(1);
+    expect(all.rows.every((r: any) => r.tool === 'nuclei')).toBe(true);
+    for (const tool of ['nuclei', 'nuclei-url']) {
+      const f = (await (await fetch(`${base}/api/findings?tool=${tool}&limit=100`)).json()) as any;
+      expect(f.rows.map((r: any) => r.title).sort()).toEqual(['env exposed', 'git exposed']);
+    }
+  }, 40_000);
+
+  it('finds the evidence of a secret that only the URL pass reported', async () => {
+    const base = await startUi(seedTwins());
+    const s = (await (await fetch(`${base}/api/secrets?limit=100`)).json()) as any;
+    const git = s.rows.find((r: any) => r.title === 'git exposed');
+    expect(git).toMatchObject({ tool: 'nuclei', matched_at: 'https://host.example/.git/', evidence: 'url-only' });
+    const env = s.rows.find((r: any) => r.title === 'env exposed');
+    expect(env.evidence).toBe('from-url-pass');
+  }, 40_000);
+});

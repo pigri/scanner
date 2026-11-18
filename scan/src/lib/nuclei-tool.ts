@@ -5,3 +5,11 @@ export const NUCLEI_URL_TOOL = 'nuclei-url';
 export function riskToolKey(tool: string): string {
   return tool === NUCLEI_URL_TOOL ? 'nuclei' : tool;
 }
+
+/** SQL list of the tools riskToolKey folds into 'nuclei'. */
+export const NUCLEI_FAMILY_SQL = `('nuclei','${NUCLEI_URL_TOOL}')`;
+
+/** SQL twin of riskToolKey over a column or expression. */
+export function riskToolKeySql(col: string): string {
+  return `CASE WHEN ${col} = '${NUCLEI_URL_TOOL}' THEN 'nuclei' ELSE ${col} END`;
+}

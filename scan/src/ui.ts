@@ -17,6 +17,7 @@ import { buildNewsSql } from './lib/news-sql.js';
 import { targetRowsSql, riskLatestMissingMessage } from './lib/target-rows-sql.js';
 import { NO_URL, latestRiskRow } from './lib/risk-latest.js';
 import { currentFindingsSelect, findingsRuleOpts, tableExists } from './lib/current-findings.js';
+import { riskToolKey, riskToolKeySql } from './lib/nuclei-tool.js';
 import {
   targetNetworkSql,
   TARGET_NETWORK_LIST_SQL,
@@ -631,7 +632,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
     // Base predicate: everything EXCEPT the severity and status filters (those
     // two are applied on top, so their facet counts can exclude themselves).
     const base = all.filter((r) => {
-      if (tool && r.tool !== tool) return false;
+      if (tool && r.tool !== riskToolKey(tool)) return false;
       if (category && r.category !== category) return false;
       if (search) {
         const hay = `${r.target}\n${r.title}\n${r.cve ?? ''}`.toLowerCase();
@@ -758,7 +759,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
     // pulled from the most recent matching finding's meta_json (few rows, cheap).
     const evStmt = scan.prepare(
       `SELECT matched_at, meta_json FROM findings
-       WHERE target=@target AND tool=@tool AND COALESCE(category,'')=@category AND title=@title
+       WHERE target=@target AND ${riskToolKeySql('tool')}=@tool AND COALESCE(category,'')=@category AND title=@title
        ORDER BY seen_at DESC LIMIT 1`,
     );
     const rows = filtered.slice(offset, offset + limit).map((f) => {

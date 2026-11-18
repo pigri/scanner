@@ -217,3 +217,21 @@ describe('computeAttendance — ordering + edge cases', () => {
     expect(rows[0]!.presence).toEqual(['present', 'absent', 'absent']);
   });
 });
+
+describe('computeAttendance — nuclei passes', () => {
+  it('treats a nuclei-url window and a nuclei observation as the same key and window', () => {
+    const win = [
+      w('nuclei-url', '2026-08-01T00:00:00.000Z', '2026-08-01T01:00:00.000Z'),
+      w('nuclei-url', '2026-08-10T00:00:00.000Z', '2026-08-10T01:00:00.000Z'),
+    ];
+    const rows = computeAttendance(
+      [
+        obs({ title: 'x', tool: 'nuclei', seen_at: '2026-08-01T00:30:00.000Z' }),
+        obs({ title: 'x', tool: 'nuclei-url', seen_at: '2026-08-10T00:30:00.000Z' }),
+      ],
+      win,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.presence).toEqual(['present', 'present']);
+  });
+});

@@ -1,3 +1,5 @@
+import { NUCLEI_FAMILY_SQL, riskToolKeySql } from './nuclei-tool.js';
+
 // Shared SQL for the UI's News view, so the server (src/ui.ts) and the query-plan
 // test (test/news-sql.test.ts) use the exact same string — no drift between what
 // ships and what the test pins.
@@ -8,10 +10,49 @@
 // index on exactly these columns + seen_at + cve, so the inner aggregation is
 // served in index order: no temp B-tree for the GROUP BY and no table reads.
 // (The outer ORDER BY / GROUP BY day over the aggregated rows still sorts.)
+//
+// The two nuclei passes (lib/nuclei-tool.ts) are one tool here: the family
+// branch groups them without the tool column and reports 'nuclei', so a match
+// both passes found is one row with the earliest first_seen. Its GROUP BY
+// spans two tools, so it needs one temp B-tree; the plain branch keeps the
+// index order.
 export const NEWS_FIRSTS_SQL =
   `SELECT target, tool, severity, category, title, cve, MIN(seen_at) first_seen
-   FROM findings GROUP BY target, tool, severity, category, title`;
+   FROM findings WHERE +tool NOT IN ${NUCLEI_FAMILY_SQL} GROUP BY target, tool, severity, category, title
+   UNION ALL
+   SELECT target, 'nuclei' tool, severity, category, title, MAX(cve) cve, MIN(seen_at) first_seen
+   FROM findings WHERE +tool IN ${NUCLEI_FAMILY_SQL} GROUP BY target, severity, category, title`;
 
+export interface NewSinceFilter {
+  severity?: boolean;
+  tool?: boolean;
+}
+
+/**
+ * Rows whose (tool, target, category, title) was first seen at or after `?`
+ * (the first parameter), then `severity` and `tool` parameters when asked for.
+ * Both nuclei passes count as one tool, so a URL-pass re-observation of a
+ * finding the host pass already had is not new. A `tool` filter matches the
+ * row's own tool name.
+ */
+export function newSinceSql(f: NewSinceFilter): string {
+  const key = riskToolKeySql('tool');
+  return `WITH firsts AS (
+        SELECT ${key} tk, target, COALESCE(category,'') cat, title, MIN(seen_at) first_seen
+        FROM findings GROUP BY tk, target, cat, title
+      )
+      SELECT f.seen_at, f.tool, f.target, f.severity, f.title, f.cve
+      FROM findings f
+      JOIN firsts fi ON fi.tk = ${riskToolKeySql('f.tool')} AND fi.target = f.target
+                    AND COALESCE(f.category,'') = fi.cat AND fi.title = f.title
+                    AND fi.first_seen = f.seen_at
+      WHERE fi.first_seen >= ?
+      ${f.severity ? 'AND f.severity = ?' : ''}
+      ${f.tool ? 'AND f.tool = ?' : ''}
+      ORDER BY CASE f.severity
+        WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC,
+        f.seen_at DESC`;
+}
 
 export interface NewsFilter {
   /** Validated YYYY-MM-DD, or empty. */
