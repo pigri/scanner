@@ -48,6 +48,8 @@ export interface HostCountryDetail {
 export interface ScoreOptions {
   /** Points added when the target had a recent network change. Defaults to NETWORK_CHANGED_BUMP. */
   networkChangedBump?: number;
+  /** Count every finding row with a CVE, as before the distinct count. For dry-run comparison only. */
+  legacyCveCount?: boolean;
 }
 
 /**
@@ -127,6 +129,7 @@ export function computeScore(s: TargetSignals, o: ScoreOptions = {}): ScoreResul
   let takeover = 0, tlsWeak = 0, wordpress = 0;
   let reviewSkipped = 0;
   const versionMatchCves = new Set<string>();
+  const distinctCves = new Set<string>();
 
   // Findings are append-only INSERTs in scan.db: the same host rescanned N
   // times gets the same (tool, category, title) row N times, and the scorer
@@ -155,7 +158,7 @@ export function computeScore(s: TargetSignals, o: ScoreOptions = {}): ScoreResul
     else if (sev === 'medium') medium++;
     else if (sev === 'low') low++;
     else if (sev === 'info' || sev === 'informational') info++;
-    if (f.cve) cves++;
+    if (f.cve) { cves++; distinctCves.add(f.cve); }
     if (f.tool === 'takeover') takeover = 30;
     // TLS bonus reduced from 12 → 8 to avoid double-counting: testssl
     // findings already contribute via highPoints/mediumPoints, and a flat
@@ -181,7 +184,7 @@ export function computeScore(s: TargetSignals, o: ScoreOptions = {}): ScoreResul
   const mediumPoints   = tieredPoints(medium,   5, 5, 1, 30);
   const lowPoints      = tieredPoints(low,      1, 10, 0.3, 15);
   const infoPoints     = tieredPoints(info,     0.2, 20, 0.05, 5);
-  const cvePoints      = tieredPoints(cves,     10, 3, 2, 60);
+  const cvePoints      = tieredPoints(o.legacyCveCount ? cves : distinctCves.size, 10, 3, 2, 60);
   // First 5 distinct CVEs at 3 pts, extras at 0.5, cap 20.
   const versionMatchPoints = tieredPoints(versionMatchCves.size, 3, 5, 0.5, 20);
 

@@ -32,6 +32,8 @@ export interface DryRunReport {
   targets: number;
   suffixSet: boolean;
   countrySource: Effect;
+  /** Old rule (every finding row, every CVE row counted) against the current-findings rule. */
+  currentFindings: Effect;
   bumps: (Effect & { bump: number })[];
 }
 
@@ -70,14 +72,17 @@ export function dryRun(raw: Database.Database, o: DryRunOpts): DryRunReport {
   const newSig = loadRiskSignals(raw, { ...base, countrySource: 'network' }, o.now);
   const scores = (m: Map<string, TargetSignals>, bump: number): Map<string, number> =>
     new Map([...m].map(([t, s]) => [t, computeScore(s, { networkChangedBump: bump }).score]));
+  const allSig = loadRiskSignals(raw, { ...base, countrySource: 'network', findingsRule: 'all' }, o.now);
   const names = [...newSig.keys()];
   const oldScores = scores(oldSig, 0);
   const newScores = scores(newSig, 0);
+  const legacyScores = new Map([...allSig].map(([t, s]) => [t, computeScore(s, { networkChangedBump: 0, legacyCveCount: true }).score]));
   const qualifies = (t: string): boolean => (newSig.get(t)?.networkChange?.count ?? 0) > 0;
   return {
     targets: names.length,
     suffixSet: o.hostSuffix !== null,
     countrySource: compare(names, oldScores, newScores, () => false, o.sample),
+    currentFindings: compare(names, legacyScores, newScores, () => false, o.sample),
     bumps: o.bumps.map((bump) => ({
       bump,
       ...compare(names, newScores, scores(newSig, bump), qualifies, o.sample),
@@ -111,6 +116,8 @@ export function formatReport(r: DryRunReport): string {
     out.push(`(b) networkChanged bump ${b.bump}: ${b.affected} targets qualify, ${b.capped} already at 100`);
     out.push(...effectLines(b), '');
   }
+  out.push('(c) current findings: only rows at or after their tool watermark, each CVE counted once');
+  out.push(...effectLines(r.currentFindings), '');
   out.push('The code defines no score bands; a crossing is a move to another 10-point step.');
   return out.join('\n');
 }
