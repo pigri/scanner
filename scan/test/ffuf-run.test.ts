@@ -14,7 +14,7 @@ const ONE_HIT = JSON.stringify({ results: [{ url: 'https://a.example/admin/', in
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
-interface Scenario { canary?: typeof CANARY | null; code?: number; stderr?: string; report?: string | null }
+interface Scenario { canary?: (typeof CANARY & { mitigated?: boolean }) | null; code?: number; stderr?: string; report?: string | null }
 
 function deps(sc: Scenario): FfufDeps {
   return {
@@ -86,6 +86,41 @@ describe('ffufHosts coverage', () => {
   it('records nothing for a null runId', async () => {
     const db = openDb(':memory:');
     await scan(db, {}, false);
+    expect(cov(db)).toEqual([]);
+  });
+
+  it.each([401, 403, 429, 500, 503])('does not cover a host whose canary got %i', async (status) => {
+    const db = openDb(':memory:');
+    await scan(db, { canary: { ...CANARY, status } });
+    expect(cov(db)).toEqual([]);
+  });
+
+  it('does not cover a host whose canary carried cf-mitigated', async () => {
+    const db = openDb(':memory:');
+    await scan(db, { canary: { ...CANARY, mitigated: true } });
+    expect(cov(db)).toEqual([]);
+  });
+
+  it('does not cover a 403 canary whose all-403 report was dropped as WAF-uniform', async () => {
+    const db = openDb(':memory:');
+    const all403 = JSON.stringify({ results: Array.from({ length: 5 }, (_, i) => ({ url: `https://a.example/p${i}`, input: { FUZZ: `p${i}` }, status: 403, length: 100 })) });
+    await scan(db, { canary: { ...CANARY, status: 403 }, report: all403 });
+    expect(cov(db)).toEqual([]);
+  });
+
+  it.each([
+    'Receiving spurious errors (ratio 0.5)',
+    'Getting an unusual amount of 403 responses, exiting.',
+  ])('does not cover a job that stopped on %s', async (stderr) => {
+    const db = openDb(':memory:');
+    await scan(db, { report: ONE_HIT, stderr });
+    expect(cov(db)).toEqual([]);
+  });
+
+  it('does not cover a host whose findings insert failed', async () => {
+    const db = openDb(':memory:');
+    db.raw.exec("CREATE TRIGGER t BEFORE INSERT ON findings BEGIN SELECT RAISE(ABORT,'database is locked'); END");
+    await scan(db, { report: ONE_HIT });
     expect(cov(db)).toEqual([]);
   });
 });

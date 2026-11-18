@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, writeLines, resolveOutputPath } from './lib/runner.js';
 import { openDb, type Db } from './lib/db.js';
+import { isBlockedAnswer } from './lib/real-answer.js';
 import { fetchCanary, probeUrl, hashBody, isNearCanary } from './lib/catchall.js';
 
 // Curated wordlist. Kept short so per-host runtime stays under ~15s: one
@@ -90,7 +91,7 @@ function loadLive(db: Db, targets: readonly string[]): LiveUrl[] {
   return [...bySeed.values()];
 }
 
-const MAXTIME_NOTICE = /Maximum running time/i;
+const STOPPED_EARLY = /Maximum running time|Receiving spurious errors|unusual amount of 403/i;
 
 export interface FfufDeps {
   run: typeof run;
@@ -303,7 +304,9 @@ export async function ffufHosts(db: Db, live: readonly LiveUrl[], o: FfufOpts): 
       );
       // ffuf exits 0 on -maxtime-job (partial report, notice on stderr) and on
       // unreachable hosts (empty report); the canary rules out the latter.
-      if (canary && r.code === 0 && !MAXTIME_NOTICE.test(r.stderr)) covered.push(target);
+      // A blocked or rate-limited canary means ffuf's empty or uniform report
+      // came from the block, not from the app.
+      if (canary && !isBlockedAnswer(canary.status, canary.mitigated === true) && r.code === 0 && !STOPPED_EARLY.test(r.stderr)) covered.push(target);
     } catch (e) {
       console.error(`  ${target}: parse error: ${e instanceof Error ? e.message : String(e)}`);
     }
