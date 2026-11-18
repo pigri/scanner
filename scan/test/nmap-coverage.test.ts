@@ -101,7 +101,11 @@ describe('nmap vulners coverage', () => {
   }, 100_000);
 
   it('records nothing when a port-narrowing flag is given', async () => {
-    for (const extra of [['--vulners', '--top-ports', '100'], ['--vulners', '--no-db-ports'], ['--vulners', '-p', '80']]) {
+    const forms = [
+      ['--top-ports', '100'], ['--top-ports=100'], ['-top-ports', '100'], ['--no-db-ports'], ['--db-ports', '80'],
+      ['-p', '80'], ['-p80'], ['-F'], ['--ports=80'], ['-exclude-ports', '22'], ['--exclude-ports=22'], ['--port-ratio=0.5'],
+    ];
+    for (const extra of forms.map((f) => ['--vulners', ...f])) {
       const r = await runNmap({ extra });
       expect(r.code, r.stderr).toBe(0);
       expect(coverage(r.db).cov, extra.join(' ')).toEqual([]);
@@ -122,7 +126,24 @@ describe('nmap vulners coverage', () => {
 
   it('ignores a prior finding on a closed port once a later run already superseded it', async () => {
     const r = await runNmap({ seed: (db) => { priorFinding(8080)(db); db.recordCoverage('nmap-vulners', [HOST], '2026-01-02T00:00:00.000Z', null); } });
-    expect(coverage(r.db).cov.map((c) => c.target)).toEqual([HOST]);
+    const { cov, findings: all } = coverage(r.db);
+    const findings = all.filter((f) => f.run_id !== null);
+    // The seeded stamp (2026-01-02, no run) must have been replaced by this run's.
+    expect(cov).toEqual([{ target: HOST, tool: 'nmap-vulners', seen_at: findings[0]!.seen_at, run_id: findings[0]!.run_id }]);
+    expect(cov[0]!.seen_at > '2026-01-02T00:00:00.000Z').toBe(true);
+    expect(cov[0]!.run_id).not.toBeNull();
+  }, 100_000);
+
+  it('keeps the run and skips coverage when reading the open findings fails', async () => {
+    const r = await runNmap({
+      seed: (db) => db.raw.prepare(
+        "INSERT INTO findings(tool, target, title, meta_json, seen_at) VALUES ('nmap-vulners', ?, 'CVE-2020-0001 on nginx', 'not json', ?)",
+      ).run(HOST, OLD),
+    });
+    expect(r.code, r.stderr).toBe(0);
+    const { cov, findings } = coverage(r.db);
+    expect(cov).toEqual([]);
+    expect(findings).toHaveLength(2);
   }, 100_000);
 
   it('records no coverage when storing a finding fails, and the run fails', async () => {

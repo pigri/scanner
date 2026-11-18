@@ -86,7 +86,8 @@ async function main(): Promise<void> {
     else if (a === '--no-db-ports') { narrowed = true; dbPorts = []; }
     else if (a === '--vulners') vulners = true;
     else {
-      if (/^(-p.*|-F|--ports|--port-ratio|--exclude-ports)$/.test(a)) narrowed = true;
+      // nmap parses options with getopt_long_only: one or two dashes, `=` or a separate value.
+      if (/^-{1,2}(p|F$|ports|top-ports|port-ratio|exclude-ports)/.test(a)) narrowed = true;
       passthrough.push(a);
     }
   }
@@ -171,7 +172,15 @@ Wrapper flags (before '--'):
   if (db && runId !== null) {
     let cveFindings = 0;
     // Read before inserting: this run's rows would move the watermark past the old ones.
-    const openFindingPorts = openVulnersPorts(db.raw, hosts.map(hostTarget));
+    let openFindingPorts: Map<string, Set<number>> | null = new Map();
+    if (vulners && !narrowed) {
+      try {
+        openFindingPorts = openVulnersPorts(db.raw, hosts.map(hostTarget));
+      } catch (e) {
+        openFindingPorts = null;
+        console.error(`WARN: cannot read open nmap-vulners findings, recording no coverage: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
     for (const h of hosts) {
       const target = hostTarget(h);
       for (const p of h.ports) {
@@ -208,7 +217,8 @@ Wrapper flags (before '--'):
       }
     }
     const notes: string[] = [];
-    if (!db.recordCoverage('nmap-vulners', vulnersCoveredTargets(hosts, { vulners, exitCode: r.code, narrowed, openFindingPorts }), now, runId)) {
+    const covered = openFindingPorts ? vulnersCoveredTargets(hosts, { vulners, exitCode: r.code, narrowed, openFindingPorts }) : [];
+    if (!db.recordCoverage('nmap-vulners', covered, now, runId)) {
       notes.push('tool_coverage write failed: scan.db busy');
     }
     db.finishRun(runId, { targetsCount: targets.length, findingsCount: totalPorts + cveFindings, ...(notes.length ? { notes: notes.join('; ') } : {}), at: new Date().toISOString() });
