@@ -138,4 +138,86 @@ describe('runVersionMatch', () => {
     expect(findings(db).every((x) => x.target === 'a.example')).toBe(true);
     expect(findings(db).length).toBe(3);
   });
+
+  describe('tool coverage', () => {
+    const cov = (db: Db) =>
+      db.raw.prepare('SELECT target, tool, seen_at, run_id FROM tool_coverage ORDER BY target').all();
+    const AT = NOW.toISOString();
+
+    it('covers a target that matched, with the same at and target as its findings', async () => {
+      const db = openDb(':memory:');
+      seed(db);
+      await runVersionMatch({ db, targets: ['a.example'], nvdDb: buildNvd('2026-11-01T00:00:00.000Z'), maxAgeDays: 14, dryRun: false, now: NOW });
+      const runId = (db.raw.prepare("SELECT id FROM runs WHERE tool='version-match'").get() as { id: number }).id;
+      expect(cov(db)).toEqual([{ target: 'a.example', tool: 'version-match', seen_at: AT, run_id: runId }]);
+      expect(findings(db).every((f) => f.target === 'a.example' && f.seen_at === AT)).toBe(true);
+    });
+
+    it('covers a target with evidence but no CVE match', async () => {
+      const db = openDb(':memory:');
+      db.insertHttpProbe({ target: 'c.example', url: 'https://c.example/', web_server: 'nginx/1.25.3' }, '2026-11-01T00:00:00.000Z', null);
+      await runVersionMatch({ db, targets: ['c.example'], nvdDb: buildNvd('2026-11-01T00:00:00.000Z'), maxAgeDays: 14, dryRun: false, now: NOW });
+      expect(findings(db)).toHaveLength(0);
+      expect(cov(db).map((r: any) => r.target)).toEqual(['c.example']);
+    });
+
+    it('records nothing on a dry run', async () => {
+      const db = openDb(':memory:');
+      seed(db);
+      await runVersionMatch({ db, targets: ['a.example'], nvdDb: buildNvd('2026-11-01T00:00:00.000Z'), maxAgeDays: 14, dryRun: true, now: NOW, log: () => {} });
+      expect(cov(db)).toEqual([]);
+    });
+
+    it('records nothing when the NVD lookup is unavailable', async () => {
+      const db = openDb(':memory:');
+      seed(db);
+      await runVersionMatch({ db, targets: ['a.example'], nvdDb: '/nonexistent/nvd.db', maxAgeDays: 14, dryRun: false, now: NOW, log: () => {} });
+      expect(cov(db)).toEqual([]);
+    });
+
+    it('does not cover a target whose lookup throws, but covers the others', async () => {
+      const db = openDb(':memory:');
+      seed(db);
+      db.insertHttpProbe({ target: 'bad.example', url: 'https://bad.example/', web_server: 'nginx/1.18.0' }, '2026-11-01T00:00:00.000Z', null);
+      const inner = buildNvd('2026-11-01T00:00:00.000Z');
+      const { openNvdLookup } = await import('../src/lib/nvd-db.js');
+      const real = openNvdLookup(inner)!;
+      const lookup: VulnLookup = {
+        snapshotAt: real.snapshotAt,
+        cpeMatches: (v, p) => { if (p === 'nginx') throw new Error('boom'); return real.cpeMatches(v, p); },
+        cveMeta: (ids) => real.cveMeta(ids),
+      };
+      await runVersionMatch({ db, targets: ['bad.example', 'a.example'], nvdDb: inner, lookup, maxAgeDays: 14, dryRun: false, now: NOW, log: () => {} });
+      expect(cov(db).map((r: any) => r.target)).toEqual(['a.example']);
+    });
+
+    it('does not cover a target whose insert was skipped as busy', async () => {
+      const db = openDb(':memory:');
+      seed(db);
+      const real = db.insertFinding.bind(db);
+      db.insertFinding = () => { throw Object.assign(new Error('locked'), { code: 'SQLITE_BUSY' }); };
+      const r = await runVersionMatch({ db, targets: ['a.example'], nvdDb: buildNvd('2026-11-01T00:00:00.000Z'), maxAgeDays: 14, dryRun: false, now: NOW, log: () => {} });
+      db.insertFinding = real;
+      expect(r.busySkipped).toBeGreaterThan(0);
+      expect(cov(db)).toEqual([]);
+    });
+  });
+
+  it('a newer banner-less ports row does not hide the evidence', async () => {
+    const db = openDb(':memory:');
+    db.insertPort({ target: 'b.example', port: 8080, protocol: 'tcp', product: 'Apache httpd', version: '2.4.6', extrainfo: '(CentOS)' }, '2026-11-01T00:00:00.000Z', null);
+    db.insertPort({ target: 'b.example', port: 8080, protocol: 'tcp', service: 'http-alt' }, '2026-11-02T00:00:00.000Z', null);
+    await runVersionMatch({ db, targets: ['b.example'], nvdDb: buildNvd('2026-11-01T00:00:00.000Z'), maxAgeDays: 14, dryRun: false, now: NOW });
+    expect(findings(db).map((f) => f.matched_at)).toEqual(['b.example:8080']);
+  });
+
+  it('takes port evidence from the latest row that has a product', async () => {
+    const db = openDb(':memory:');
+    db.insertPort({ target: 'b.example', port: 8080, protocol: 'tcp', product: 'Apache httpd', version: '2.4.7' }, '2026-10-01T00:00:00.000Z', null);
+    db.insertPort({ target: 'b.example', port: 8080, protocol: 'tcp', product: 'Apache httpd', version: '2.4.6', extrainfo: '(CentOS)' }, '2026-11-01T00:00:00.000Z', null);
+    db.insertPort({ target: 'b.example', port: 8080, protocol: 'tcp' }, '2026-11-02T00:00:00.000Z', null);
+    await runVersionMatch({ db, targets: ['b.example'], nvdDb: buildNvd('2026-11-01T00:00:00.000Z'), maxAgeDays: 14, dryRun: false, now: NOW });
+    expect(findings(db).some((f) => f.title.includes('2.4.7'))).toBe(false);
+    expect(findings(db)).toHaveLength(1);
+  });
 });

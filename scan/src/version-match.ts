@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import { openDb, type Db } from './lib/db.js';
 import { parseCommonCli, prepareTargets, run } from './lib/runner.js';
 import { openNvdLookup, type VulnLookup } from './lib/nvd-db.js';
+import { coveredTargets } from './lib/coverage.js';
 import { isSqliteBusy } from './lib/sqlite-busy.js';
 import { resolveAlias } from './lib/cpe-aliases.js';
 import {
@@ -85,7 +86,7 @@ function portEvidence(db: Db, target: string): Seen[] {
     `SELECT port, product, version, extrainfo FROM (
        SELECT port, product, version, extrainfo,
               ROW_NUMBER() OVER (PARTITION BY port, protocol ORDER BY seen_at DESC, id DESC) AS rn
-         FROM ports WHERE target = ?)
+         FROM ports WHERE target = ? AND product IS NOT NULL AND product <> '')
       WHERE rn = 1 ORDER BY port`,
   ).all(target) as { port: number; product: string | null; version: string | null; extrainfo: string | null }[];
   const out: Seen[] = [];
@@ -188,7 +189,9 @@ export async function runVersionMatch(opts: VersionMatchOpts): Promise<VersionMa
     }
   }
 
+  const outcomes: { target: string; ok: boolean }[] = [];
   for (const target of skipMatching ? [] : targets) {
+    let ok = true;
     try {
       const evidence = dedupe([...httpEvidence(db, target), ...portEvidence(db, target)]);
       for (const s of evidence) {
@@ -201,12 +204,20 @@ export async function runVersionMatch(opts: VersionMatchOpts): Promise<VersionMa
             continue;
           }
           if (insert(db, target, m, s, lookup.snapshotAt, stale, at, runId)) result.inserted++;
-          else result.busySkipped++;
+          else { result.busySkipped++; ok = false; }
         }
       }
     } catch (e) {
+      ok = false;
       result.failedTargets++;
       log(`WARN: version-match failed for ${target}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    outcomes.push({ target, ok });
+  }
+  if (!opts.dryRun && runId !== null) {
+    const covered = coveredTargets(outcomes);
+    if (!db.recordCoverage('version-match', covered, at, runId)) {
+      notes.push('tool_coverage write failed: scan.db busy');
     }
   }
 
