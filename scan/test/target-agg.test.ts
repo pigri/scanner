@@ -44,12 +44,11 @@ describe('targetAggSql versionMatch', () => {
       ins(db, { target: 'x', tool: 'version-match', severity: 'critical', cve: 'CVE-1', seen_at });
       ins(db, { target: 'x', tool: 'version-match', severity: 'high', cve: 'CVE-2', seen_at });
       ins(db, { target: 'x', tool: 'version-match', severity: 'medium', cve: 'CVE-3', seen_at });
-      ins(db, { target: 'x', tool: 'version-match', severity: 'low', title: 't-null', cve: null, seen_at });
-      ins(db, { target: 'x', tool: 'version-match', severity: 'low', title: 't-empty', cve: '', seen_at });
+      ins(db, { target: 'x', tool: 'version-match', severity: 'low', cve: null, seen_at });
+      ins(db, { target: 'x', tool: 'version-match', severity: 'low', cve: '', seen_at });
     }
     // a confirmed (non version-match) CVE must NOT count toward versionMatch
     ins(db, { target: 'x', tool: 'nuclei', severity: 'critical', cve: 'CVE-9' });
-    ins(db, { target: 'x', tool: 'nuclei', severity: 'low', title: 't-other', cve: 'CVE-10' });
     // host y: no version-match findings at all
     ins(db, { target: 'y', tool: 'nuclei', severity: 'high', cve: 'CVE-7' });
 
@@ -62,9 +61,10 @@ describe('targetAggSql versionMatch', () => {
     expect(y).toBeDefined();
     expect(x!.versionMatch).toBe(3); // CVE-1,2,3 distinct; dup + null + '' + nuclei excluded
     expect(y!.versionMatch).toBe(0);
-    // sibling columns: open logical findings, and distinct non-empty CVE ids
-    expect(x!.cves).toBe(5); // CVE-1,2,3,9,10; null/'' excluded
-    expect(x!.findings).toBe(7);
+    // Siblings now count differently from the row counts they replaced (5 and 7):
+    // CVE ids are distinct, and the null- and empty-cve rows are one logical finding.
+    expect(x!.cves).toBe(4); // CVE-1,2,3,9; null/'' excluded
+    expect(x!.findings).toBe(5); // critical, high, medium, low (null and '' share a title) + nuclei
   });
 });
 
@@ -120,6 +120,13 @@ describe('targetAggSql open findings', () => {
     ins(db, { target: 'x', tool: 'synthesize-eol', severity: 'medium', title: 'e', seen_at: T1 });
     withCoverage(db, [['x', 'manual', T2], ['x', 'synthesize-eol', T2]]);
     expect(aggOf(db, true, 'x')).toMatchObject({ high: 1, medium: 1, findings: 2, cves: 1 });
+  });
+
+  it('counts a sticky finding seen at two stamps once', () => {
+    const db = newDb();
+    ins(db, { target: 'x', tool: 'synthesize-eol', severity: 'medium', title: 'e', seen_at: T1 });
+    ins(db, { target: 'x', tool: 'synthesize-eol', severity: 'medium', title: 'e', seen_at: T2 });
+    expect(aggOf(db, false, 'x')).toMatchObject({ medium: 1, findings: 1 });
   });
 
   it('runs without the tool_coverage table when coverage is false', () => {

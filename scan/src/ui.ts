@@ -373,7 +373,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
         runs: count('runs'),
         ports: count('ports'),
         http_probes: count('http_probes'),
-        findings: count('findings'),
+        findings: open.length,
         cves: count('cves'),
         certificates: count('certificates'),
         dns_records: count('dns_records'),
