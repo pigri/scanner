@@ -231,6 +231,26 @@ describe('runVersionMatch', () => {
     expect(findings(db).map((f) => f.cve)).toEqual(['CVE-2017-9798']);
   });
 
+  for (const [label, tech] of [['NULL tech', undefined], ['empty tech', [] as string[]]] as const) {
+    it(`a newer probe with ${label} does not hide the older tech version`, async () => {
+      const db = openDb(':memory:');
+      db.insertHttpProbe({ target: 'h.example', url: 'https://h.example/', web_server: 'Apache', tech: ['Apache HTTP Server:2.4.6'] }, '2026-11-01T00:00:00.000Z', null);
+      db.insertHttpProbe({ target: 'h.example', url: 'https://h.example/', web_server: 'Apache', ...(tech ? { tech } : {}) }, '2026-11-02T00:00:00.000Z', null);
+      await runVersionMatch({ db, targets: ['h.example'], nvdDb: buildNvd('2026-11-01T00:00:00.000Z'), maxAgeDays: 14, dryRun: false, now: NOW });
+      expect(findings(db).map((f) => f.cve)).toEqual(['CVE-2017-9798']);
+      expect(db.raw.prepare('SELECT target FROM tool_coverage').all()).toEqual([{ target: 'h.example' }]);
+    });
+  }
+
+  it('applies the distro hint of the header row to tech-only evidence', async () => {
+    const db = openDb(':memory:');
+    db.insertHttpProbe({ target: 'h.example', url: 'https://h.example/', web_server: 'nginx/1.18.0 (CentOS)', tech: ['Apache HTTP Server:2.4.6'] }, '2026-11-01T00:00:00.000Z', null);
+    await runVersionMatch({ db, targets: ['h.example'], nvdDb: buildNvd('2026-11-01T00:00:00.000Z'), maxAgeDays: 14, dryRun: false, now: NOW });
+    const f = findings(db);
+    expect(f).toHaveLength(1);
+    expect(JSON.parse(f[0]!.meta_json).confidence).toBe('version-match-distro');
+  });
+
   it('a newer bare-product banner is a real change: no findings, still covered', async () => {
     const db = openDb(':memory:');
     db.insertHttpProbe({ target: 'h.example', url: 'https://h.example/', web_server: 'Apache/2.4.6 (CentOS)' }, '2026-11-01T00:00:00.000Z', null);
