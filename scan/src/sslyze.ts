@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, resolveOutputPath } from './lib/runner.js';
 import { openDb, type Db } from './lib/db.js';
-import { ingestAndFinishRun } from './lib/sslyze-ingest.js';
+import { ingestAndFinishRun, SSLYZE_SCAN_FLAGS } from './lib/sslyze-ingest.js';
 
 // Live-HTTPS targets from either http_probes (https://) or a 443/tcp port.
 function loadHttpsTargets(db: Db, targets: readonly string[]): string[] {
@@ -87,9 +87,7 @@ Wrapper flags (before '--'):
     '--targets_in', tmp,
     '--json_out', outFile,
     '--quiet',
-    '--certinfo', '--heartbleed', '--openssl_ccs', '--robot', '--fallback',
-    '--compression', '--reneg', '--resum', '--ems',
-    '--sslv3', '--tlsv1', '--tlsv1_1', '--tlsv1_2', '--tlsv1_3',
+    ...SSLYZE_SCAN_FLAGS,
     ...(slow ? ['--slow_connection'] : []),
     ...passthrough,
   ];

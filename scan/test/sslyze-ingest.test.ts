@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { openDb } from '../src/lib/db.js';
-import { ingestSslyzeOutput, ingestAndFinishRun, SSLYZE_READ_COMMANDS } from '../src/lib/sslyze-ingest.js';
+import { ingestSslyzeOutput, ingestAndFinishRun, SSLYZE_READ_COMMANDS, SSLYZE_COVERAGE_COMMANDS, SSLYZE_SCAN_FLAGS } from '../src/lib/sslyze-ingest.js';
 
 const NOW = '2026-01-01T00:00:00.000Z';
 
@@ -10,6 +10,13 @@ const allCommands = (over: Record<string, unknown> = {}): Record<string, unknown
   for (const c of SSLYZE_READ_COMMANDS) out[c] = { status: 'COMPLETED', result: {} };
   return { ...out, ...over };
 };
+// Shaped like real output: ssl_2_0 is never scheduled, tls_1_2 and session_resumption are scheduled but unread.
+const realShape = (over: Record<string, unknown> = {}): Record<string, unknown> => allCommands({
+  ssl_2_0_cipher_suites: { status: 'NOT_SCHEDULED', result: null },
+  tls_1_2_cipher_suites: { status: 'COMPLETED', result: { is_tls_version_supported: true } },
+  session_resumption: { status: 'COMPLETED', result: {} },
+  ...over,
+});
 const done = (result: unknown) => ({ status: 'COMPLETED', result });
 
 const good = (hostname: unknown = 'host.example.com') => ({
@@ -172,6 +179,31 @@ const coverage = (db: ReturnType<typeof openDb>) =>
 const withStatus = (hostname: string, scan_status: string) => ({ ...good(hostname), scan_status });
 
 describe('sslyze coverage', () => {
+  it('gates coverage on exactly these commands', () => {
+    expect([...SSLYZE_READ_COMMANDS]).toEqual([
+      'heartbleed', 'openssl_ccs_injection', 'robot', 'tls_compression', 'session_renegotiation',
+      'tls_extended_master_secret', 'tls_fallback_scsv', 'ssl_3_0_cipher_suites', 'tls_1_0_cipher_suites',
+      'tls_1_1_cipher_suites', 'tls_1_3_cipher_suites', 'certificate_info',
+    ]);
+  });
+
+  it('only gates on commands whose flag the wrapper passes', () => {
+    for (const flag of Object.values(SSLYZE_COVERAGE_COMMANDS)) expect(SSLYZE_SCAN_FLAGS).toContain(flag);
+  });
+
+  it('covers a row shaped like real output, with ssl_2_0 NOT_SCHEDULED', () => {
+    const { db, runId } = setup();
+    const row = { ...good('real.example.com'), scan_result: realShape() };
+    const r = ingestSslyzeOutput(db, toText({ server_scan_results: [row] }), NOW, runId);
+    expect(r?.covered).toEqual(['real.example.com']);
+  });
+
+  it.each(SSLYZE_READ_COMMANDS)('does not cover a row whose %s is NOT_SCHEDULED', (cmd) => {
+    const { db, runId } = setup();
+    const row = { ...good('ns.example.com'), scan_result: realShape({ [cmd]: { status: 'NOT_SCHEDULED', result: null } }) };
+    expect(ingestSslyzeOutput(db, toText({ server_scan_results: [row] }), NOW, runId)?.covered).toEqual([]);
+  });
+
   it('covers a COMPLETED row with the findings target, stamp and run', () => {
     const { db, runId } = setup();
     const r = ingestSslyzeOutput(db, toText({ server_scan_results: [good('host.example.com')] }), NOW, runId);
