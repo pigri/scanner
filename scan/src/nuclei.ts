@@ -5,6 +5,7 @@ import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, writeLin
 import { openDb, type Db } from './lib/db.js';
 import { fetchCanary, probeUrl, hashBody, isNearCanary, type CanaryProbe } from './lib/catchall.js';
 import { cveIdsFor } from './lib/nuclei-cve.js';
+import { NUCLEI_URL_TOOL } from './lib/nuclei-tool.js';
 
 // Nuclei templates whose semantics are "did the server return a page for this
 // path?" — these fire false positives on catch-all responders that return the
@@ -159,7 +160,10 @@ Everything after '--' is passed to nuclei verbatim.`));
     console.error(`--from-urls: pulled ${urlSample.length} katana URLs across ${targets.length} target(s) (cap ${urlsPerHost}/host)`);
   }
 
-  const runId = db ? db.startRun('nuclei', {
+  // The URL pass does not reliably repeat host-pass matches, so it keeps its own
+  // tool name: the open/resolved rule compares rows per (target, tool).
+  const toolName = fromUrls ? NUCLEI_URL_TOOL : 'nuclei';
+  const runId = db ? db.startRun(toolName, {
     targets: targets.length, urlSample: urlSample.length,
     liveOnly, severity, concurrency, rateLimit,
     timeout: templateTimeout, retries, fromUrls, urlsPerHost, extraArgs: passthrough,
@@ -276,7 +280,7 @@ Everything after '--' is passed to nuclei verbatim.`));
         };
         for (const cveId of cveIdsFor(cves)) {
           db.insertFinding({
-            tool: 'nuclei',
+            tool: toolName,
             target: targetHost,
             category: tid,
             severity: isSuspect ? 'info' : (row.info?.severity ?? null),

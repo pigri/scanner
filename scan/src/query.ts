@@ -75,7 +75,7 @@ Filters:
   --since <iso>      Only rows with seen_at >= this ISO date
   --until <iso>      Only rows with seen_at <= this ISO date
   --severity <s>     info | low | medium | high | critical
-  --tool <t>         nuclei | wpscan | testssl | takeover | ...
+  --tool <t>         nuclei | nuclei-url | wpscan | testssl | takeover | ...
   --target <host>    restrict to one target (review command)
   --limit <N>        cap output rows (review command; default 20)
 

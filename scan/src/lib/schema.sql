@@ -7,7 +7,7 @@ PRAGMA foreign_keys = ON;
 -- One row per orchestrated tool invocation.
 CREATE TABLE IF NOT EXISTS runs (
   id              INTEGER PRIMARY KEY,
-  tool            TEXT NOT NULL,           -- nmap | httpx | nuclei | wpscan | masscan | testssl | gowitness | takeover | scan-all
+  tool            TEXT NOT NULL,           -- nmap | httpx | nuclei | nuclei-url | wpscan | masscan | testssl | gowitness | takeover | scan-all
   started_at      TEXT NOT NULL,
   finished_at     TEXT,
   args_json       TEXT,
@@ -65,7 +65,7 @@ CREATE INDEX IF NOT EXISTS idx_http_seen   ON http_probes(seen_at);
 -- confirm or dismiss. See src/ffuf.ts for the current producer.
 CREATE TABLE IF NOT EXISTS findings (
   id             INTEGER PRIMARY KEY,
-  tool           TEXT NOT NULL,       -- nuclei | wpscan | testssl | takeover | manual
+  tool           TEXT NOT NULL,       -- nuclei | nuclei-url | wpscan | testssl | takeover | manual
   target         TEXT NOT NULL,       -- URL or host
   category       TEXT,                -- template-id | cve | tls-issue | takeover-type
   severity       TEXT,                -- info | low | medium | high | critical
