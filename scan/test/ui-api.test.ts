@@ -686,6 +686,7 @@ describe('CVE lists follow cves.open', () => {
     expect(d.total).toBe(3);
     const rs = await fetch(`${base}/api/cves?status=resolved&limit=100`);
     expect(rs.status).toBe(200);
+    expect(((await rs.json()) as any).total).toBe(0);
     const o = await fetch(`${base}/api/overview`);
     expect(o.status).toBe(200);
     expect(((await o.json()) as any).counts.cves).toBe(3);

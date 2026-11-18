@@ -157,10 +157,12 @@ interface LogicalFinding {
 }
 let logicalCache: { rows: LogicalFinding[]; at: number } | null = null;
 // `cves.open` arrives with a rollup migration; a DB without it answers as before.
+function cvesHasOpen(): boolean {
+  return tableExists(scan, 'cves')
+    && (scan.prepare('PRAGMA table_info(cves)').all() as { name: string }[]).some((r) => r.name === 'open');
+}
 function cvesOpenClause(prefix = 'AND'): string {
-  if (!tableExists(scan, 'cves')) return '';
-  const has = (scan.prepare('PRAGMA table_info(cves)').all() as { name: string }[]).some((r) => r.name === 'open');
-  return has ? ` ${prefix} open=1` : '';
+  return cvesHasOpen() ? ` ${prefix} open=1` : '';
 }
 function logicalFindings(): LogicalFinding[] {
   const now = Date.now();
@@ -688,7 +690,9 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
     const base: string[] = [];
     const baseArgs: unknown[] = [];
     if (search) { base.push('(cve_id LIKE ? OR target LIKE ?)'); baseArgs.push(`%${search}%`, `%${search}%`); }
-    if (cvesOpenClause() && status !== 'all') base.push(status === 'open' ? 'open=1' : 'open=0');
+    if (cvesHasOpen()) {
+      if (status !== 'all') base.push(status === 'open' ? 'open=1' : 'open=0');
+    } else if (status === 'resolved') base.push('0');
     const clauses = [...base];
     const args = [...baseArgs];
     if (exploit === '1') clauses.push('exploit=1');
