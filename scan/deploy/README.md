@@ -283,6 +283,20 @@ systemctl --user start scan-worker@1 scan-worker@2 scan-worker@3
 
 The report worker stays a single instance (it only writes report files).
 
+### Discovery lock
+
+Every timer job that rewrites `discovery/domains.txt` (`scan-feed`,
+`enrich-refresh`, `discovery-expand`, `ct-mirror`) runs under `flock` on
+`$XDG_RUNTIME_DIR/redteam-discovery.lock`, so two of them never overlap.
+`scan-feed`, `discovery-expand` and `ct-mirror` wait up to 30 minutes for the
+lock. `enrich-refresh` skips its run and exits 0 when the lock is held. Wrap a
+manual `refresh.ts` run in the same lock:
+
+```bash
+cd ~/gen0sec/redteam/discovery
+flock -w 1800 "$XDG_RUNTIME_DIR/redteam-discovery.lock" npx tsx src/refresh.ts --suffix gov.hu
+```
+
 ## Operate
 
 ```bash

@@ -12,10 +12,12 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+# flock -n -E 0: when another discovery job holds %t/redteam-discovery.lock this
+# run is skipped and exits 0; the next one is 30 min later.
 WorkingDirectory=/home/pigri/gen0sec/redteam/discovery
 # --skip-ct + --skip-brute keeps this cycle enrich-only. The slow parents-driven
 # CT/brute refresh stays a manual `refresh` invocation (or a slower timer).
-ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; export PATH="$HOME/.local/bin:$PATH"; mkdir -p logs && exec npx tsx src/refresh.ts --skip-ct --skip-brute >> logs/enrich-refresh.log 2>&1'
+ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; export PATH="$HOME/.local/bin:$PATH"; mkdir -p logs && exec flock -n -E 0 %t/redteam-discovery.lock npx tsx src/refresh.ts --skip-ct --skip-brute >> logs/enrich-refresh.log 2>&1'
 
 [Install]
 WantedBy=default.target

@@ -20,7 +20,7 @@ WorkingDirectory=/home/pigri/gen0sec/redteam/discovery
 # (resolves, non-wildcard, no CT) goes to the expand-tier-c.txt sidecar for
 # review; everything else is dropped. The 30-min enrich-refresh keeps domains.txt
 # fresh between runs, so this stays a pure expansion pass (no re-enrich here).
-ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; export PATH="$HOME/.local/bin:$PATH"; mkdir -p logs && exec npx tsx src/expand.ts --domains domains.txt --suffix gov.hu >> logs/discovery-expand.log 2>&1'
+ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; export PATH="$HOME/.local/bin:$PATH"; mkdir -p logs && exec flock -w 1800 %t/redteam-discovery.lock npx tsx src/expand.ts --domains domains.txt --suffix gov.hu >> logs/discovery-expand.log 2>&1'
 TimeoutStartSec=1800
 
 [Install]
