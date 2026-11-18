@@ -8,3 +8,5 @@ enriched.jsonl
 enriched.csv
 discovery/
 resolve-state.json
+# temp files from atomic writes and per-run enrich output
+*.tmp-*
