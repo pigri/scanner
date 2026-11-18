@@ -232,6 +232,7 @@ CREATE TABLE IF NOT EXISTS cves (
   first_seen    TEXT NOT NULL,
   last_seen     TEXT NOT NULL,
   exploit       INTEGER NOT NULL DEFAULT 0,   -- 1 if any source flagged an exploit available
+  open          INTEGER NOT NULL DEFAULT 1,   -- 1 if at least one current finding row carries the CVE (src/cve-rollup.ts)
   -- NVD enrichment (nullable; populated by src/cve-enrich.ts)
   description   TEXT,                          -- English description from NVD
   published_at  TEXT,                          -- ISO date from NVD

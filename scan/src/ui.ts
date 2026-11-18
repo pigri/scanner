@@ -156,6 +156,12 @@ interface LogicalFinding {
   resolved: number; // 1 = resolved, 0 = open
 }
 let logicalCache: { rows: LogicalFinding[]; at: number } | null = null;
+// `cves.open` arrives with a rollup migration; a DB without it answers as before.
+function cvesOpenClause(prefix = 'AND'): string {
+  if (!tableExists(scan, 'cves')) return '';
+  const has = (scan.prepare('PRAGMA table_info(cves)').all() as { name: string }[]).some((r) => r.name === 'open');
+  return has ? ` ${prefix} open=1` : '';
+}
 function logicalFindings(): LogicalFinding[] {
   const now = Date.now();
   if (logicalCache && now - logicalCache.at < 60000) return logicalCache.rows;
@@ -354,7 +360,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
           const bySeverity: Record<string, number> = {};
           for (const s of SEVERITY_ORDER) bySeverity[s] = 0;
           for (const r of scan
-            .prepare(`SELECT severity, COUNT(*) c FROM cves WHERE exploit=1 GROUP BY severity`)
+            .prepare(`SELECT severity, COUNT(*) c FROM cves WHERE exploit=1${cvesOpenClause()} GROUP BY severity`)
             .all() as { severity: string | null; c: number }[]) {
             const k = r.severity ?? 'info';
             bySeverity[k] = (bySeverity[k] ?? 0) + r.c;
@@ -362,7 +368,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
           const tot = scan
             .prepare(
               `SELECT COUNT(*) issues, COUNT(DISTINCT cve_id) cves, COUNT(DISTINCT target) targets
-               FROM cves WHERE exploit=1`,
+               FROM cves WHERE exploit=1${cvesOpenClause()}`,
             )
             .get() as { issues: number; cves: number; targets: number };
           return { issues: tot.issues, cves: tot.cves, targets: tot.targets, bySeverity };
@@ -374,7 +380,9 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
         ports: count('ports'),
         http_probes: count('http_probes'),
         findings: open.length,
-        cves: count('cves'),
+        cves: tableExists(scan, 'cves')
+          ? (scan.prepare(`SELECT COUNT(*) c FROM cves${cvesOpenClause('WHERE')}`).get() as { c: number }).c
+          : 0,
         certificates: count('certificates'),
         dns_records: count('dns_records'),
         discovered_urls: count('discovered_urls'),
@@ -492,7 +500,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
       ? scan
           .prepare(
             `SELECT cve_id, severity, cvss, tools, exploit, description FROM cves
-             WHERE target=? ORDER BY cvss DESC, cve_id LIMIT 300`,
+             WHERE target=?${cvesOpenClause()} ORDER BY cvss DESC, cve_id LIMIT 300`,
           )
           .all(t)
       : [];
@@ -675,10 +683,12 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
     const offset = clampInt(q.get('offset'), 0, 0, 1e9);
     const search = (q.get('q') || '').trim();
     const exploit = q.get('exploit'); // '1' = has exploit, '0' = none
+    const status = q.get('status') === 'resolved' || q.get('status') === 'all' ? q.get('status') : 'open';
     // `base` = non-exploit clauses (reused for the exploit facet counts).
     const base: string[] = [];
     const baseArgs: unknown[] = [];
     if (search) { base.push('(cve_id LIKE ? OR target LIKE ?)'); baseArgs.push(`%${search}%`, `%${search}%`); }
+    if (cvesOpenClause() && status !== 'all') base.push(status === 'open' ? 'open=1' : 'open=0');
     const clauses = [...base];
     const args = [...baseArgs];
     if (exploit === '1') clauses.push('exploit=1');
@@ -769,11 +779,11 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
   // from CVSS vectors. Heuristic — see the coverage caveats returned alongside.
   attackPaths() {
     if (!tableExists(scan, 'cves')) return { chains: [], partial: 0, coverage: { vectoredCves: 0, totalCves: 0, hostsAnalyzed: 0 } };
-    const totalCves = (scan.prepare(`SELECT COUNT(*) c FROM cves`).get() as { c: number }).c;
+    const totalCves = (scan.prepare(`SELECT COUNT(*) c FROM cves${cvesOpenClause('WHERE')}`).get() as { c: number }).c;
     const rows = scan
       .prepare(
         `SELECT target, cve_id, severity, cvss, nvd_cvss, exploit, nvd_vector
-         FROM cves WHERE nvd_vector IS NOT NULL AND nvd_vector != '' AND ${NO_URL}`,
+         FROM cves WHERE nvd_vector IS NOT NULL AND nvd_vector != '' AND ${NO_URL}${cvesOpenClause()}`,
       )
       .all() as { target: string; cve_id: string; severity: string | null; cvss: number | null; nvd_cvss: number | null; exploit: number; nvd_vector: string }[];
     type Item = { cve: string; severity: string | null; cvss: number | null; exploit: number };
@@ -947,7 +957,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
     }
     if (tableExists(scan, 'cves')) {
       for (const c of scan
-        .prepare(`SELECT DISTINCT cve_id, severity FROM cves WHERE target=? ORDER BY cve_id LIMIT 100`)
+        .prepare(`SELECT DISTINCT cve_id, severity FROM cves WHERE target=?${cvesOpenClause()} ORDER BY cve_id LIMIT 100`)
         .all(t) as { cve_id: string; severity: string | null }[]) {
         const id = `cve:${c.cve_id}`;
         addNode(id, c.cve_id, 'cve', { severity: c.severity ?? 'info' });
@@ -1625,17 +1635,20 @@ async function renderFindings(){
     el('div',{class:'panel'},table(['Sev','Status','Target','Title','CVE','Tool','First','Last'],rows),pager(fState,d.total,renderFindings)));
 }
 
-let cState={q:'',exploit:'',offset:0,limit:100};
+let cState={q:'',exploit:'',status:'open',offset:0,limit:100};
 async function renderCves(){
-  const d=await api('cves',{q:cState.q,exploit:cState.exploit,offset:cState.offset,limit:cState.limit});
+  const d=await api('cves',{q:cState.q,exploit:cState.exploit,status:cState.status,offset:cState.offset,limit:cState.limit});
   const ec=d.exploitCounts||{yes:0,no:0};
   const expChips=el('div',{class:'toolbar'},el('span',{class:'muted'},'exploit:'),
     ...[['','all',ec.yes+ec.no],['1','exploitable',ec.yes],['0','no exploit',ec.no]].map(([v,lbl,cnt])=>
       el('a',{class:'daychip'+(cState.exploit===v?' on':''),onclick:()=>{cState.exploit=v;cState.offset=0;renderCves();}},lbl+' ('+num(cnt)+')')));
+  const statusChips=el('div',{class:'toolbar'},el('span',{class:'muted'},'status:'),
+    ...[['open','open'],['resolved','resolved'],['all','all']].map(([v,lbl])=>
+      el('a',{class:'daychip'+(cState.status===v?' on':''),onclick:()=>{cState.status=v;cState.offset=0;renderCves();}},lbl)));
   const search=el('input',{type:'search',placeholder:'CVE id / target…',value:cState.q});
   search.addEventListener('input',debounce(()=>{cState.q=search.value;cState.offset=0;renderCves();},250));
   const rows=d.rows.map(c=>[cveLink(c.cve_id),link(c.target),sevPill(c.severity),String(esc(c.cvss)),esc(c.tools),c.exploit?el('span',{class:'pill sev-critical'},'exploit'):'',num(c.hit_count)]);
-  setView(expChips,el('div',{class:'toolbar'},search,el('span',{class:'muted'},num(d.total)+' cve rows')),
+  setView(statusChips,expChips,el('div',{class:'toolbar'},search,el('span',{class:'muted'},num(d.total)+' cve rows')),
     el('div',{class:'panel'},table(['CVE','Target','Sev','CVSS','Tools','','Hits'],rows,[3,6]),pager(cState,d.total,renderCves)));
 }
 

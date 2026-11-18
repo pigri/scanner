@@ -468,3 +468,32 @@ describe('tool_coverage / recordCoverage', () => {
     }
   });
 });
+
+describe('cves.open', () => {
+  it('adds the column to a legacy cves table; old rows read as open; reopens cleanly', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-migrate-'));
+    try {
+      const f = path.join(dir, 'legacy.db');
+      const raw = new Database(f);
+      raw.exec(`CREATE TABLE cves (
+        id INTEGER PRIMARY KEY, target TEXT NOT NULL, cve_id TEXT NOT NULL, severity TEXT, cvss REAL,
+        tools TEXT NOT NULL, hit_count INTEGER NOT NULL DEFAULT 1, first_seen TEXT NOT NULL,
+        last_seen TEXT NOT NULL, exploit INTEGER NOT NULL DEFAULT 0, UNIQUE(target, cve_id))`);
+      raw.prepare('INSERT INTO cves(target, cve_id, tools, first_seen, last_seen) VALUES(?,?,?,?,?)')
+        .run('old.example', 'CVE-2026-0001', 'nuclei', '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z');
+      raw.close();
+
+      const first = openDb(f);
+      const cols = (first.raw.prepare('PRAGMA table_info(cves)').all() as { name: string }[]).filter((r) => r.name === 'open');
+      expect(cols).toHaveLength(1);
+      expect(first.raw.prepare('SELECT open FROM cves').get()).toEqual({ open: 1 });
+      first.close();
+
+      let second: Db | undefined;
+      expect(() => { second = openDb(f); }).not.toThrow();
+      second?.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
