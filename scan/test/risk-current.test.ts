@@ -61,6 +61,15 @@ describe('loadRiskSignals: current findings only', () => {
     expect(s.has('192.0.2.5')).toBe(false);
     expect(s.get('a.example')!.findings).toEqual([]);
   });
+
+  it('filters on raw targets: a folded alias keeps its own watermark', () => {
+    const db = openDb(':memory:');
+    db.raw.prepare("INSERT INTO ports(target, ip, port, protocol, seen_at) VALUES('a.example', '192.0.2.5', 80, 'tcp', ?)").run(D1);
+    add(db, 'nuclei', 'a.example', 'high', 'title A', D2);
+    add(db, 'nuclei', '192.0.2.5', 'high', 'title B', D1);
+    const titles = signals(db).get('a.example')!.findings.map((f) => f.title).sort();
+    expect(titles).toEqual(['title A', 'title B']);
+  });
 });
 
 describe('computeScore: CVE bucket', () => {
