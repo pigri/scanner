@@ -552,3 +552,47 @@ describe('GET /api/target score dates', () => {
     expect(d.updated_at).toBe('2026-11-02T00:00:00.000Z');
   }, 40_000);
 });
+
+describe('findings open/resolved follows tool_coverage', () => {
+  const seedCoverage = (dropTable: boolean) =>
+    seed(false, (raw) => {
+      const ins = raw.prepare(
+        `INSERT INTO findings (target, tool, severity, category, title, seen_at)
+         VALUES ('host.example', ?, 'high', 'cve', ?, ?)`,
+      );
+      ins.run('version-match', 'gone', iso(5));
+      ins.run('version-match', 'kept', iso(2));
+      ins.run('version-match', 'current', iso(1));
+      ins.run('nuclei', 'n1', iso(5));
+      ins.run('manual', 'm1', iso(10));
+      ins.run('checkdmarc', 'd1', iso(5));
+      const cov = raw.prepare('INSERT INTO tool_coverage (target, tool, seen_at, run_id) VALUES (?, ?, ?, NULL)');
+      cov.run('host.example', 'version-match', iso(1));
+      cov.run('host.example', 'manual', iso(0));
+      cov.run('host.example', 'checkdmarc', iso(1));
+      if (dropTable) raw.exec('DROP TABLE tool_coverage');
+    });
+  const statusOf = (rows: { title: string; resolved: number }[]) =>
+    Object.fromEntries(rows.map((r) => [r.title, r.resolved]));
+
+  it('closes what a conclusive run no longer reports in /api/target and /api/findings', async () => {
+    const base = await startUi(seedCoverage(false));
+    const d = (await (await fetch(`${base}/api/target?t=host.example`)).json()) as any;
+    expect(statusOf(d.findings)).toEqual({ gone: 1, kept: 1, current: 0, n1: 0, m1: 0, d1: 1 });
+    expect(d.findingsSummary).toEqual({ open: 3, resolved: 3 });
+    const open = (await (await fetch(`${base}/api/findings?status=open&limit=100`)).json()) as any;
+    expect(open.rows.map((r: any) => r.title).sort()).toEqual(['current', 'm1', 'n1']);
+    expect(open.statusCounts).toEqual({ open: 3, resolved: 3 });
+  }, 40_000);
+
+  it('answers 200 and falls back to the newest row per tool when the table is missing', async () => {
+    const base = await startUi(seedCoverage(true));
+    const r = await fetch(`${base}/api/target?t=host.example`);
+    expect(r.status).toBe(200);
+    const d = (await r.json()) as any;
+    expect(statusOf(d.findings)).toEqual({ gone: 1, kept: 1, current: 0, n1: 0, m1: 0, d1: 0 });
+    const l = await fetch(`${base}/api/findings?status=open&limit=100`);
+    expect(l.status).toBe(200);
+    expect(((await l.json()) as any).rows.map((x: any) => x.title).sort()).toEqual(['current', 'd1', 'm1', 'n1']);
+  }, 40_000);
+});
