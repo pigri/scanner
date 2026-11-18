@@ -397,3 +397,74 @@ describe('checkpointNoWait', () => {
     expect(src).not.toContain('wal_checkpoint(TRUNCATE)');
   });
 });
+
+describe('tool_coverage / recordCoverage', () => {
+  const row = (d: Db, target: string, tool = 'version-match') =>
+    d.raw.prepare('SELECT seen_at, run_id FROM tool_coverage WHERE target = ? AND tool = ?').get(target, tool);
+
+  it('upserts one row per (target, tool), skipping empty and duplicate targets', () => {
+    const at = '2026-11-01T00:00:00.000Z';
+    expect(db.recordCoverage('version-match', ['a.example', 'a.example', '', 'b.example'], at, 7)).toBe(true);
+    expect(row(db, 'a.example')).toEqual({ seen_at: at, run_id: 7 });
+    expect(row(db, 'b.example')).toEqual({ seen_at: at, run_id: 7 });
+    expect((db.raw.prepare('SELECT COUNT(*) n FROM tool_coverage').get() as { n: number }).n).toBe(2);
+  });
+
+  it('only moves the watermark forward', () => {
+    const t1 = '2026-11-01T00:00:00.000Z';
+    const t2 = '2026-11-02T00:00:00.000Z';
+    db.recordCoverage('version-match', ['a.example'], t2, 2);
+    db.recordCoverage('version-match', ['a.example'], t1, 1);
+    expect(row(db, 'a.example')).toEqual({ seen_at: t2, run_id: 2 });
+    db.recordCoverage('version-match', ['a.example'], '2026-11-03T00:00:00.000Z', 3);
+    expect(row(db, 'a.example')).toEqual({ seen_at: '2026-11-03T00:00:00.000Z', run_id: 3 });
+  });
+
+  it('keeps tools separate', () => {
+    db.recordCoverage('version-match', ['a.example'], '2026-11-01T00:00:00.000Z', 1);
+    expect(row(db, 'a.example', 'nuclei')).toBeUndefined();
+  });
+
+  it('an empty list is a no-op that returns true', () => {
+    expect(db.recordCoverage('version-match', [], '2026-11-01T00:00:00.000Z', 1)).toBe(true);
+    expect((db.raw.prepare('SELECT COUNT(*) n FROM tool_coverage').get() as { n: number }).n).toBe(0);
+  });
+
+  it('returns false, without throwing, while another connection holds the write lock', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-cov-'));
+    try {
+      const f = path.join(dir, 'scan.db');
+      const d = openDb(f);
+      d.raw.pragma('busy_timeout = 50');
+      const other = new Database(f);
+      other.exec('BEGIN IMMEDIATE');
+      try {
+        expect(d.recordCoverage('version-match', ['a.example'], '2026-11-01T00:00:00.000Z', 1)).toBe(false);
+      } finally {
+        other.exec('ROLLBACK');
+        other.close();
+      }
+      expect(d.recordCoverage('version-match', ['a.example'], '2026-11-01T00:00:00.000Z', 1)).toBe(true);
+      d.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('creates the table on a legacy DB and reopens cleanly', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-cov-legacy-'));
+    try {
+      const f = path.join(dir, 'legacy.db');
+      const first = openDb(f);
+      first.raw.exec('DROP TABLE tool_coverage');
+      first.close();
+      for (let i = 0; i < 2; i++) {
+        const d = openDb(f);
+        expect(d.raw.prepare("SELECT name FROM sqlite_master WHERE name = 'tool_coverage'").all()).toHaveLength(1);
+        d.close();
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

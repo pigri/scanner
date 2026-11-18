@@ -6,6 +6,7 @@ import { backfillRiskLatest } from './risk-latest.js';
 import { decideHostStates, type HostStateRow } from './host-state.js';
 import { retractBatchEvents } from './netinfo.js';
 import { makeQueue, type QueueEntry, type ClaimedRow, type QueueStats, type QueueOps, type QueueFilter } from './queue.js';
+import { isSqliteBusy } from './sqlite-busy.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -130,6 +131,8 @@ export interface Db {
   insertPort(row: PortRow, at: string, runId: number | null): void;
   insertHttpProbe(row: HttpProbeRow, at: string, runId: number | null): void;
   insertFinding(row: FindingInput, at: string, runId: number | null): void;
+  /** Mark `targets` as conclusively examined by `tool` at `at`. Forward-only; false when scan.db stayed busy. Never throws. */
+  recordCoverage(tool: string, targets: string[], at: string, runId: number | null): boolean;
   insertScreenshot(row: ScreenshotRow, at: string, runId: number | null): void;
   insertCertificate(row: CertInput, at: string, runId: number | null): void;
   insertDiscoveredUrl(row: DiscoveredUrlRow, at: string, runId: number | null): void;
@@ -261,6 +264,14 @@ export function openDb(dbPath: string, options: OpenDbOptions = {}): Db {
     INSERT INTO http_probes(target, url, ip, status_code, title, web_server, tech_json, content_length, hash_body, seen_at, run_id)
     VALUES(@target, @url, @ip, @status_code, @title, @web_server, @tech_json, @content_length, @hash_body, @seen_at, @run_id)
   `);
+  const upsertCoverageStmt = raw.prepare(`
+    INSERT INTO tool_coverage(target, tool, seen_at, run_id) VALUES (?, ?, ?, ?)
+    ON CONFLICT(target, tool) DO UPDATE SET seen_at = excluded.seen_at, run_id = excluded.run_id
+    WHERE excluded.seen_at > tool_coverage.seen_at
+  `);
+  const recordCoverageTx = raw.transaction((tool: string, targets: string[], at: string, runId: number | null) => {
+    for (const t of targets) upsertCoverageStmt.run(t, tool, at, runId);
+  });
   const insertFindingStmt = raw.prepare(`
     INSERT INTO findings(tool, target, category, severity, title, cve, matched_at, meta_json, seen_at, run_id, needs_review)
     VALUES(@tool, @target, @category, @severity, @title, @cve, @matched_at, @meta_json, @seen_at, @run_id, @needs_review)
@@ -371,6 +382,20 @@ export function openDb(dbPath: string, options: OpenDbOptions = {}): Db {
         seen_at: at, run_id: runId,
         needs_review: row.needsReview ? 1 : 0,
       });
+    },
+    recordCoverage(tool, targets, at, runId): boolean {
+      const uniq = [...new Set(targets.filter((t) => t !== ''))];
+      if (!uniq.length) return true;
+      for (let attempt = 1; ; attempt++) {
+        try {
+          recordCoverageTx.immediate(tool, uniq, at, runId);
+          return true;
+        } catch (e) {
+          if (isSqliteBusy(e) && attempt < 3) continue;
+          console.error(`WARN: tool_coverage write failed for ${tool} (${uniq.length} target(s)): ${e instanceof Error ? e.message : String(e)}`);
+          return false;
+        }
+      }
     },
     insertScreenshot(row, at, runId): void {
       insertShotStmt.run({
