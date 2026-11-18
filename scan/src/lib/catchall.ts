@@ -23,6 +23,7 @@ export interface CanaryProbe {
   size: number;
   body: string;
   hash: string;         // sha256 of body with URL echoes stripped
+  mitigated?: boolean;  // response carried a cf-mitigated header
 }
 
 // Strip the requested URL from a body so path-echo doesn't perturb the hash.
@@ -43,10 +44,10 @@ export async function probeUrl(
   url: string,
   timeoutSec: number,
   maxBytes = 8192
-): Promise<{ status: number; size: number; body: string } | null> {
+): Promise<{ status: number; size: number; body: string; mitigated: boolean } | null> {
   const r = await run(
     'curl',
-    ['-sk', '--max-time', String(timeoutSec), '-o', '-', '-w', '\n---meta---\n%{http_code}\n%{size_download}\n', url],
+    ['-sk', '--max-time', String(timeoutSec), '-o', '-', '-w', '\n---meta---\n%{http_code}\n%{size_download}\n%header{cf-mitigated}\n', url],
     { timeoutMs: (timeoutSec + 3) * 1000 }
   );
   if (r.code !== 0 && !r.stdout) return null;
@@ -56,8 +57,10 @@ export async function probeUrl(
   const meta = r.stdout.slice(marker + '\n---meta---\n'.length).trim().split('\n');
   const status = parseInt(meta[0] ?? '0', 10);
   const size = parseInt(meta[1] ?? '0', 10);
+  // Older curl prints the unknown %header variable literally.
+  const mitigated = !!meta[2] && !meta[2].startsWith('%');
   if (!status) return null;
-  return { status, size, body: bodyRaw.length > maxBytes ? bodyRaw.slice(0, maxBytes) : bodyRaw };
+  return { status, size, body: bodyRaw.length > maxBytes ? bodyRaw.slice(0, maxBytes) : bodyRaw, mitigated };
 }
 
 // Fetch a canary URL (unlikely-to-exist path) and record what "no such path"
@@ -68,7 +71,7 @@ export async function fetchCanary(seed: string, timeoutSec = 8): Promise<CanaryP
   const url = `${seed.replace(/\/+$/, '')}/${canaryPath}`;
   const probe = await probeUrl(url, timeoutSec);
   if (!probe) return null;
-  return { url, status: probe.status, size: probe.size, body: probe.body, hash: hashBody(probe.body, url) };
+  return { url, status: probe.status, size: probe.size, body: probe.body, hash: hashBody(probe.body, url), mitigated: probe.mitigated };
 }
 
 // Does (status, size) fall within the canary's near-cluster bucket? Both

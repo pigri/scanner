@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, requireTool, resolveOutputPath } from './lib/runner.js';
 import { openDb, type Db } from './lib/db.js';
+import { coveredTargets } from './lib/coverage.js';
 
 type Sev = 'critical' | 'high' | 'medium' | 'low' | 'info';
 
@@ -201,7 +202,7 @@ function envFileLooksReal(b: string): boolean {
   return false;
 }
 
-interface LiveUrl { target: string; seed: string }
+export interface LiveUrl { target: string; seed: string }
 
 function loadLive(db: Db, targets: readonly string[]): LiveUrl[] {
   const filter = targets.length ? `AND target IN (${targets.map(() => '?').join(',')})` : '';
@@ -221,7 +222,7 @@ function loadLive(db: Db, targets: readonly string[]): LiveUrl[] {
 
 interface Hit { target: string; url: string; sig: Sig; status: number; length: number }
 
-async function probe(seed: string, sig: Sig, timeoutMs: number, maxBytes: number): Promise<{ status: number; body: string; head: Buffer } | null> {
+export async function probe(seed: string, sig: Sig, timeoutMs: number, maxBytes: number): Promise<{ status: number; body: string; head: Buffer; mitigated: boolean } | null> {
   const url = `${seed}/${sig.path}`;
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
@@ -235,7 +236,8 @@ async function probe(seed: string, sig: Sig, timeoutMs: number, maxBytes: number
     // Only bother reading the body for statuses that could plausibly ship
     // real content. 3xx / 401 without a body are always misses here.
     if (resp.status === 0) return null;
-    if (!resp.body) return { status: resp.status, body: '', head: Buffer.alloc(0) };
+    const mitigated = resp.headers.has('cf-mitigated');
+    if (!resp.body) return { status: resp.status, body: '', head: Buffer.alloc(0), mitigated };
     const cap = sig.maxBytes ?? maxBytes;
     const reader = resp.body.getReader();
     const chunks: Uint8Array[] = [];
@@ -248,9 +250,90 @@ async function probe(seed: string, sig: Sig, timeoutMs: number, maxBytes: number
       if (received >= cap) { await reader.cancel().catch(() => {}); break; }
     }
     const buf = Buffer.concat(chunks);
-    return { status: resp.status, body: buf.toString('utf8'), head: buf.subarray(0, Math.min(buf.length, 512)) };
+    return { status: resp.status, body: buf.toString('utf8'), head: buf.subarray(0, Math.min(buf.length, 512)), mitigated };
   } catch { return null; }
   finally { clearTimeout(timer); }
+}
+
+export interface SigsOpts {
+  now: string;
+  runId: number | null;
+  timeoutSec: number;
+  maxKb: number;
+  concurrency: number;
+  hostConcurrency: number;
+  write: (line: string) => void;
+  probeFn?: typeof probe;
+}
+
+/**
+ * A host is examined when every probe got an answer that is not a rate limit,
+ * a server error or a challenge, and the answers are not one blanket 401, 403
+ * or redirect. A mixed 403/404 host is the normal WAF miss and still counts.
+ */
+function hostExamined(replies: ({ status: number; mitigated: boolean } | null)[]): boolean {
+  for (const r of replies) {
+    if (r === null || r.mitigated || r.status === 429 || r.status >= 500) return false;
+  }
+  const first = replies[0]?.status;
+  if (first === undefined || !replies.every((r) => r!.status === first)) return replies.length > 0;
+  return !(first === 401 || first === 403 || (first >= 300 && first < 400));
+}
+
+export async function scanSigs(db: Db, live: readonly LiveUrl[], o: SigsOpts): Promise<number> {
+  const { now, runId } = o;
+  const probeFn = o.probeFn ?? probe;
+  const hits: Hit[] = [];
+  const outcomes: { target: string; ok: boolean }[] = [];
+  let findings = 0;
+
+  // Per-host worker fan-out: each host runs SIGS through its own bounded
+  // pool (default 5) so we don't hammer a single host with 40 concurrent
+  // requests. Global concurrency caps the number of active hosts.
+  let hostIdx = 0;
+  async function hostWorker(): Promise<void> {
+    for (;;) {
+      const i = hostIdx++;
+      if (i >= live.length) return;
+      const h = live[i]!;
+      let sigIdx = 0;
+      const replies: Parameters<typeof hostExamined>[0] = [];
+      async function sigWorker(): Promise<void> {
+        for (;;) {
+          const j = sigIdx++;
+          if (j >= SIGS.length) return;
+          const sig = SIGS[j]!;
+          const r = await probeFn(h.seed, sig, o.timeoutSec * 1000, o.maxKb * 1024);
+          replies.push(r);
+          if (!r) continue;
+          if (!sig.match(r.body, r.head)) continue;
+          const url = `${h.seed}/${sig.path}`;
+          const hit: Hit = { target: h.target, url, sig, status: r.status, length: r.body.length };
+          hits.push(hit);
+          o.write(JSON.stringify({ target: h.target, url, path: sig.path, sev: sig.sev, status: r.status, length: r.body.length, desc: sig.desc, snippet: r.body.slice(0, 200) }) + '\n');
+          db.insertFinding({
+            tool: 'content-sigs',
+            target: h.target,
+            category: `exposure-${sig.path.replace(/[^a-zA-Z0-9._-]/g, '_')}`,
+            severity: sig.sev,
+            title: `Exposed ${sig.path} (${sig.desc}) — ${r.status} ${r.body.length}b`,
+            cve: null,
+            matched_at: url,
+            meta: { path: sig.path, status: r.status, length: r.body.length, desc: sig.desc, snippet: r.body.slice(0, 400) },
+          }, now, runId);
+          findings++;
+          console.error(`  ★ ${h.target} ${sig.path} → ${sig.sev} (${r.status}, ${r.body.length}b)`);
+        }
+      }
+      await Promise.all(Array.from({ length: Math.min(o.hostConcurrency, SIGS.length) }, sigWorker));
+      outcomes.push({ target: h.target, ok: hostExamined(replies) });
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(o.concurrency, live.length) }, hostWorker));
+  if (runId !== null && !db.recordCoverage('content-sigs', coveredTargets(outcomes), now, runId)) {
+    console.error('content-sigs: tool_coverage write failed: scan.db busy');
+  }
+  return findings;
 }
 
 async function main(): Promise<void> {
@@ -315,50 +398,7 @@ Wrapper flags (before '--'):
 
   const outFile = resolveOutputPath(opts, runId, 'content-sigs.jsonl');
   const wstream = fs.createWriteStream(outFile);
-  const hits: Hit[] = [];
-  let findings = 0;
-
-  // Per-host worker fan-out: each host runs SIGS through its own bounded
-  // pool (default 5) so we don't hammer a single host with 40 concurrent
-  // requests. Global concurrency caps the number of active hosts.
-  let hostIdx = 0;
-  async function hostWorker(): Promise<void> {
-    for (;;) {
-      const i = hostIdx++;
-      if (i >= live.length) return;
-      const h = live[i]!;
-      let sigIdx = 0;
-      async function sigWorker(): Promise<void> {
-        for (;;) {
-          const j = sigIdx++;
-          if (j >= SIGS.length) return;
-          const sig = SIGS[j]!;
-          const r = await probe(h.seed, sig, timeoutSec * 1000, maxKb * 1024);
-          if (!r) continue;
-          if (!sig.match(r.body, r.head)) continue;
-          const url = `${h.seed}/${sig.path}`;
-          const hit: Hit = { target: h.target, url, sig, status: r.status, length: r.body.length };
-          hits.push(hit);
-          wstream.write(JSON.stringify({ target: h.target, url, path: sig.path, sev: sig.sev, status: r.status, length: r.body.length, desc: sig.desc, snippet: r.body.slice(0, 200) }) + '\n');
-          db.insertFinding({
-            tool: 'content-sigs',
-            target: h.target,
-            category: `exposure-${sig.path.replace(/[^a-zA-Z0-9._-]/g, '_')}`,
-            severity: sig.sev,
-            title: `Exposed ${sig.path} (${sig.desc}) — ${r.status} ${r.body.length}b`,
-            cve: null,
-            matched_at: url,
-            meta: { path: sig.path, status: r.status, length: r.body.length, desc: sig.desc, snippet: r.body.slice(0, 400) },
-          }, now, runId);
-          findings++;
-          console.error(`  ★ ${h.target} ${sig.path} → ${sig.sev} (${r.status}, ${r.body.length}b)`);
-        }
-      }
-      await Promise.all(Array.from({ length: Math.min(hostConcurrency, SIGS.length) }, sigWorker));
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(concurrency, live.length) }, hostWorker));
-
+  const findings = await scanSigs(db, live, { now, runId, timeoutSec, maxKb, concurrency, hostConcurrency, write: (l) => wstream.write(l) });
   await new Promise<void>((res) => wstream.end(() => res()));
   db.finishRun(runId, { targetsCount: live.length, findingsCount: findings, at: new Date().toISOString() });
   db.close();
@@ -366,7 +406,10 @@ Wrapper flags (before '--'):
   console.error(`  sqlite: ${path.resolve(opts.sqlite)}`);
 }
 
-main().catch((err: unknown) => {
-  console.error('FATAL:', err instanceof Error ? err.message : String(err));
-  process.exit(1);
-});
+// Only run when invoked directly, so tests can import scanSigs.
+if (process.argv[1] && process.argv[1].endsWith('content-sigs.ts')) {
+  main().catch((err: unknown) => {
+    console.error('FATAL:', err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });
+}

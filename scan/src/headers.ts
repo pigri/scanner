@@ -4,12 +4,14 @@
 // with proper per-header severity, and covers the fields testssl doesn't:
 // CSP, HSTS-preload, X-Frame-Options, X-Content-Type-Options, Referrer-Policy,
 // Permissions-Policy, COOP, COEP, CORP.
+import { isBlockedAnswer } from './lib/real-answer.js';
 import { parseCommonCli, commonUsage, prepareTargets, requireTool, resolveOutputPath, writeLines } from './lib/runner.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { openDb, type Db } from './lib/db.js';
+import { coveredTargets } from './lib/coverage.js';
 
-interface LiveUrl { target: string; url: string; scheme: 'http' | 'https' }
+export interface LiveUrl { target: string; url: string; scheme: 'http' | 'https' }
 
 function loadLive(db: Db, targets: readonly string[]): LiveUrl[] {
   if (!targets.length) return [];
@@ -141,6 +143,84 @@ function auditHeaders(headers: Headers, scheme: 'http' | 'https'): Verdict[] {
   return out;
 }
 
+/**
+ * Only a 2xx/3xx answer says anything about the app's own headers. A 4xx/5xx
+ * is usually a WAF, rate-limit or error page that lacks them, and a Cloudflare
+ * challenge (`cf-mitigated`) is not the app at all. The status is the one
+ * reached after redirects; the HEAD body is empty, so it is not inspected.
+ */
+function coversHeaders(resp: Response, requested: string): boolean {
+  if (resp.status < 200 || resp.status >= 400 || isBlockedAnswer(resp.status, resp.headers.has('cf-mitigated'))) return false;
+  // redirect:'follow' can end on another host, whose headers are not this target's.
+  return !resp.url || new URL(resp.url).hostname === new URL(requested).hostname;
+}
+
+export interface AuditOpts {
+  now: string;
+  runId: number | null;
+  timeoutSec: number;
+  concurrency: number;
+  write: (line: string) => void;
+  fetchFn?: typeof fetch;
+}
+
+export async function auditUrls(db: Db, urls: readonly LiveUrl[], opts: AuditOpts): Promise<number> {
+  const { now, runId } = opts;
+  const fetchFn = opts.fetchFn ?? fetch;
+  const outcomes: { target: string; ok: boolean }[] = [];
+  let findings = 0;
+  let idx = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      const i = idx++;
+      if (i >= urls.length) return;
+      const u = urls[i]!;
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), opts.timeoutSec * 1000);
+      try {
+        // HEAD first — many servers omit security headers on HEAD, so fall
+        // back to a full GET if we get nothing back. Small perf cost, worth
+        // it for coverage.
+        let resp: Response;
+        try {
+          resp = await fetchFn(u.url, { method: 'HEAD', signal: ctl.signal, redirect: 'follow', headers: { 'User-Agent': 'headers-audit/1.0' } });
+          if (![...resp.headers.keys()].length) {
+            resp = await fetchFn(u.url, { method: 'GET', signal: ctl.signal, redirect: 'follow', headers: { 'User-Agent': 'headers-audit/1.0' } });
+          }
+        } catch {
+          resp = await fetchFn(u.url, { method: 'GET', signal: ctl.signal, redirect: 'follow', headers: { 'User-Agent': 'headers-audit/1.0' } });
+        }
+        const verdicts = auditHeaders(resp.headers, u.scheme);
+        opts.write(JSON.stringify({ target: u.target, url: u.url, status: resp.status, findings: verdicts }) + '\n');
+        for (const v of verdicts) {
+          db.insertFinding({
+            tool: 'headers',
+            target: u.target,
+            category: v.title.split(' ')[0]!.toLowerCase().replace(/[^a-z0-9]/g, '-'),
+            severity: v.severity,
+            title: v.title,
+            cve: null,
+            matched_at: u.url,
+            meta: v.meta ?? { status: resp.status },
+          }, now, runId);
+          findings++;
+        }
+        outcomes.push({ target: u.target, ok: coversHeaders(resp, u.url) });
+      } catch (e) {
+        outcomes.push({ target: u.target, ok: false });
+        opts.write(JSON.stringify({ target: u.target, url: u.url, error: e instanceof Error ? e.message : String(e) }) + '\n');
+      } finally {
+        clearTimeout(t);
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(opts.concurrency, urls.length) }, worker));
+  if (runId !== null && !db.recordCoverage('headers', coveredTargets(outcomes), now, runId)) {
+    console.error('headers: tool_coverage write failed: scan.db busy');
+  }
+  return findings;
+}
+
 async function main(): Promise<void> {
   const opts = parseCommonCli(process.argv);
   let concurrency = 20;
@@ -193,51 +273,7 @@ Wrapper flags (before '--'):
   const outFile = resolveOutputPath(opts, runId, 'headers.jsonl');
   const wstream = fs.createWriteStream(outFile);
 
-  let findings = 0;
-  let idx = 0;
-  async function worker(): Promise<void> {
-    for (;;) {
-      const i = idx++;
-      if (i >= urls.length) return;
-      const u = urls[i]!;
-      const ctl = new AbortController();
-      const t = setTimeout(() => ctl.abort(), timeoutSec * 1000);
-      try {
-        // HEAD first — many servers omit security headers on HEAD, so fall
-        // back to a full GET if we get nothing back. Small perf cost, worth
-        // it for coverage.
-        let resp: Response;
-        try {
-          resp = await fetch(u.url, { method: 'HEAD', signal: ctl.signal, redirect: 'follow', headers: { 'User-Agent': 'headers-audit/1.0' } });
-          if (![...resp.headers.keys()].length) {
-            resp = await fetch(u.url, { method: 'GET', signal: ctl.signal, redirect: 'follow', headers: { 'User-Agent': 'headers-audit/1.0' } });
-          }
-        } catch {
-          resp = await fetch(u.url, { method: 'GET', signal: ctl.signal, redirect: 'follow', headers: { 'User-Agent': 'headers-audit/1.0' } });
-        }
-        const verdicts = auditHeaders(resp.headers, u.scheme);
-        wstream.write(JSON.stringify({ target: u.target, url: u.url, status: resp.status, findings: verdicts }) + '\n');
-        for (const v of verdicts) {
-          db.insertFinding({
-            tool: 'headers',
-            target: u.target,
-            category: v.title.split(' ')[0]!.toLowerCase().replace(/[^a-z0-9]/g, '-'),
-            severity: v.severity,
-            title: v.title,
-            cve: null,
-            matched_at: u.url,
-            meta: v.meta ?? { status: resp.status },
-          }, now, runId);
-          findings++;
-        }
-      } catch (e) {
-        wstream.write(JSON.stringify({ target: u.target, url: u.url, error: e instanceof Error ? e.message : String(e) }) + '\n');
-      } finally {
-        clearTimeout(t);
-      }
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(concurrency, urls.length) }, worker));
+  const findings = await auditUrls(db, urls, { now, runId, timeoutSec, concurrency, write: (l) => wstream.write(l) });
   await new Promise<void>((res) => wstream.end(() => res()));
 
   db.finishRun(runId, { targetsCount: urls.length, findingsCount: findings, at: new Date().toISOString() });
@@ -247,7 +283,10 @@ Wrapper flags (before '--'):
   void writeLines;   // silence unused-import linter — kept for cross-wrapper consistency
 }
 
-main().catch((err: unknown) => {
-  console.error('FATAL:', err instanceof Error ? err.message : String(err));
-  process.exit(1);
-});
+// Only run when invoked directly, so tests can import auditUrls.
+if (process.argv[1] && process.argv[1].endsWith('headers.ts')) {
+  main().catch((err: unknown) => {
+    console.error('FATAL:', err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });
+}

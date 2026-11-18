@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, writeLines, resolveOutputPath } from './lib/runner.js';
 import { openDb, type Db } from './lib/db.js';
+import { isBlockedAnswer } from './lib/real-answer.js';
 import { fetchCanary, probeUrl, hashBody, isNearCanary } from './lib/catchall.js';
 
 // Curated wordlist. Kept short so per-host runtime stays under ~15s: one
@@ -71,7 +72,7 @@ function severityForPath(p: string): 'critical' | 'high' | 'medium' | 'low' | 'i
   return 'medium';
 }
 
-interface LiveUrl { target: string; seed: string }
+export interface LiveUrl { target: string; seed: string }
 
 function loadLive(db: Db, targets: readonly string[]): LiveUrl[] {
   if (!targets.length) return [];
@@ -90,64 +91,30 @@ function loadLive(db: Db, targets: readonly string[]): LiveUrl[] {
   return [...bySeed.values()];
 }
 
-async function main(): Promise<void> {
-  const opts = parseCommonCli(process.argv);
-  let threads = 20;
-  let timeoutSec = 8;
-  let hostTimeoutSec = 60;
-  let liveOnly = true;
-  const passthrough: string[] = [];
-  for (let i = 0; i < opts.extraArgs.length; i++) {
-    const a = opts.extraArgs[i]!;
-    const nxt = () => opts.extraArgs[++i]!;
-    if (a === '--threads' || a === '-t') threads = parseInt(nxt(), 10);
-    else if (a === '--timeout') timeoutSec = parseInt(nxt(), 10);
-    else if (a === '--host-timeout') hostTimeoutSec = parseInt(nxt(), 10);
-    else if (a === '--no-live-only') liveOnly = false;
-    else passthrough.push(a);
-  }
+const STOPPED_EARLY = /Maximum running time|Receiving spurious errors|unusual amount of 403/i;
 
-  if (opts.help || !opts.targetsFile) {
-    console.error(commonUsage('ffuf', `
-ffuf against a curated high-signal wordlist (~80 paths: .git/, .env,
-wp-config backups, phpinfo, server-status, backup archives, common admin
-panels). Runs one ffuf per live target, filters to status 200/301/302/401/403,
-dedupes by size to strip WAF-uniform 404 responses.
+export interface FfufDeps {
+  run: typeof run;
+  fetchCanary: typeof fetchCanary;
+  probeUrl: typeof probeUrl;
+}
 
-Severity per path class:
-  .git/.env/backups/private keys           high
-  phpinfo/phpmyadmin/actuator/server-info  medium
-  admin panels/graphql/build metadata      low
+export interface FfufOpts {
+  now: string;
+  runId: number | null;
+  wl: string;
+  threads: number;
+  timeoutSec: number;
+  hostTimeoutSec: number;
+  passthrough: string[];
+  outPath: (target: string) => string;
+  deps?: FfufDeps;
+}
 
-Wrapper flags (before '--'):
-  --threads/-t <N>       ffuf worker threads per host (default: 20)
-  --timeout <s>          per-request timeout (default: 8)
-  --host-timeout <s>     per-host hard cap (default: 60)
-  --no-live-only         include hosts httpx never saw alive`));
-    process.exit(opts.targetsFile ? 0 : 1);
-  }
-  await requireTool('ffuf');
-  if (!opts.sqlite) { console.error('ffuf: --sqlite is required'); process.exit(1); }
-
-  const { targets } = prepareTargets(opts);
-  if (!targets.length) { console.error('no in-scope targets'); process.exit(1); }
-
-  const now = new Date().toISOString();
-  const db = openDb(opts.sqlite);
-  const runId = db.startRun('ffuf', { targets: targets.length, wordSize: CURATED_PATHS.length, liveOnly }, now);
-
-  const live = liveOnly ? loadLive(db, targets) : targets.map((t) => ({ target: t, seed: `https://${t}` }));
-  console.error(`ffuf live-only filter: ${targets.length} → ${live.length}`);
-  if (!live.length) {
-    db.finishRun(runId, { targetsCount: 0, findingsCount: 0, at: new Date().toISOString() });
-    db.close();
-    return;
-  }
-
-  // Curated wordlist to a temp file — ffuf needs it on disk.
-  const wl = resolveOutputPath({ ...opts, outFile: null }, runId, 'ffuf-wordlist.txt');
-  writeLines(wl, [...CURATED_PATHS]);
-
+export async function ffufHosts(db: Db, live: readonly LiveUrl[], o: FfufOpts): Promise<{ findings: number; reviewFindings: number }> {
+  const { now, runId, wl, threads, timeoutSec, hostTimeoutSec, passthrough } = o;
+  const deps = o.deps ?? { run, fetchCanary, probeUrl };
+  const covered: string[] = [];
   let findings = 0;
   let reviewFindings = 0;
   for (const { target, seed } of live) {
@@ -156,12 +123,12 @@ Wrapper flags (before '--'):
     // canary tells us exactly what "no such thing" looks like there. Any ffuf
     // hit sharing the canary's (status, near-size) is marked needs_review; the
     // body is fetched and preserved for a human to confirm.
-    const canary = await fetchCanary(seed, timeoutSec);
+    const canary = await deps.fetchCanary(seed, timeoutSec);
     if (canary) {
       console.error(`  ${target}: canary ${canary.status} ${canary.size}b hash=${canary.hash.slice(0, 8)}`);
     }
 
-    const out = resolveOutputPath({ ...opts, outFile: null }, runId, `ffuf-${target.replace(/[^a-z0-9._-]/gi, '_')}.json`);
+    const out = o.outPath(target);
     const args = [
       '-u', `${seed}/FUZZ`,
       '-w', `${wl}:FUZZ`,
@@ -174,7 +141,7 @@ Wrapper flags (before '--'):
       ...passthrough,
     ];
     console.error(`ffuf ${seed}/FUZZ`);
-    const r = await run('ffuf', args, { timeoutMs: (hostTimeoutSec + 15) * 1000 });
+    const r = await deps.run('ffuf', args, { timeoutMs: (hostTimeoutSec + 15) * 1000 });
     if (r.code !== 0 && !fs.existsSync(out)) {
       console.error(`  ${target}: ffuf exited ${r.code}, no report`);
       continue;
@@ -238,7 +205,7 @@ Wrapper flags (before '--'):
         let realLeakConfirmed = false;
         if (looksFake && bodiesFetched < MAX_BODIES_PER_HOST) {
           const targetUrl = hit.url ?? `${seed}/${p}`;
-          const probe = await probeUrl(targetUrl, timeoutSec, 8192);
+          const probe = await deps.probeUrl(targetUrl, timeoutSec, 8192);
           bodiesFetched++;
           if (probe) {
             bodyStatus = probe.status;
@@ -269,7 +236,7 @@ Wrapper flags (before '--'):
           ((stInitial === 401 || stInitial === 403) || (stInitial >= 200 && stInitial < 300));
         if (wantsVerify && sensitiveProbes < MAX_SENSITIVE_PROBES_PER_HOST) {
           const targetUrl = hit.url ?? `${seed}/${p}`;
-          const probe = await probeUrl(targetUrl, timeoutSec, 8192);
+          const probe = await deps.probeUrl(targetUrl, timeoutSec, 8192);
           sensitiveProbes++;
           if (probe) {
             bodyStatus = probe.status;
@@ -335,11 +302,84 @@ Wrapper flags (before '--'):
           `(${results.length - kept.length} WAF-uniform, ${reviewFindingsThisHost} needs_review, ` +
           `${bodiesFetched} body preserved)`
       );
+      // ffuf exits 0 on -maxtime-job (partial report, notice on stderr) and on
+      // unreachable hosts (empty report); the canary rules out the latter.
+      // A blocked or rate-limited canary means ffuf's empty or uniform report
+      // came from the block, not from the app.
+      if (canary && !isBlockedAnswer(canary.status, canary.mitigated === true) && r.code === 0 && !STOPPED_EARLY.test(r.stderr)) covered.push(target);
     } catch (e) {
       console.error(`  ${target}: parse error: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
+  if (runId !== null && !db.recordCoverage('ffuf', covered, now, runId)) {
+    console.error('ffuf: tool_coverage write failed: scan.db busy');
+  }
+  return { findings, reviewFindings };
+}
 
+
+async function main(): Promise<void> {
+  const opts = parseCommonCli(process.argv);
+  let threads = 20;
+  let timeoutSec = 8;
+  let hostTimeoutSec = 60;
+  let liveOnly = true;
+  const passthrough: string[] = [];
+  for (let i = 0; i < opts.extraArgs.length; i++) {
+    const a = opts.extraArgs[i]!;
+    const nxt = () => opts.extraArgs[++i]!;
+    if (a === '--threads' || a === '-t') threads = parseInt(nxt(), 10);
+    else if (a === '--timeout') timeoutSec = parseInt(nxt(), 10);
+    else if (a === '--host-timeout') hostTimeoutSec = parseInt(nxt(), 10);
+    else if (a === '--no-live-only') liveOnly = false;
+    else passthrough.push(a);
+  }
+
+  if (opts.help || !opts.targetsFile) {
+    console.error(commonUsage('ffuf', `
+ffuf against a curated high-signal wordlist (~80 paths: .git/, .env,
+wp-config backups, phpinfo, server-status, backup archives, common admin
+panels). Runs one ffuf per live target, filters to status 200/301/302/401/403,
+dedupes by size to strip WAF-uniform 404 responses.
+
+Severity per path class:
+  .git/.env/backups/private keys           high
+  phpinfo/phpmyadmin/actuator/server-info  medium
+  admin panels/graphql/build metadata      low
+
+Wrapper flags (before '--'):
+  --threads/-t <N>       ffuf worker threads per host (default: 20)
+  --timeout <s>          per-request timeout (default: 8)
+  --host-timeout <s>     per-host hard cap (default: 60)
+  --no-live-only         include hosts httpx never saw alive`));
+    process.exit(opts.targetsFile ? 0 : 1);
+  }
+  await requireTool('ffuf');
+  if (!opts.sqlite) { console.error('ffuf: --sqlite is required'); process.exit(1); }
+
+  const { targets } = prepareTargets(opts);
+  if (!targets.length) { console.error('no in-scope targets'); process.exit(1); }
+
+  const now = new Date().toISOString();
+  const db = openDb(opts.sqlite);
+  const runId = db.startRun('ffuf', { targets: targets.length, wordSize: CURATED_PATHS.length, liveOnly }, now);
+
+  const live = liveOnly ? loadLive(db, targets) : targets.map((t) => ({ target: t, seed: `https://${t}` }));
+  console.error(`ffuf live-only filter: ${targets.length} → ${live.length}`);
+  if (!live.length) {
+    db.finishRun(runId, { targetsCount: 0, findingsCount: 0, at: new Date().toISOString() });
+    db.close();
+    return;
+  }
+
+  // Curated wordlist to a temp file — ffuf needs it on disk.
+  const wl = resolveOutputPath({ ...opts, outFile: null }, runId, 'ffuf-wordlist.txt');
+  writeLines(wl, [...CURATED_PATHS]);
+
+  const { findings, reviewFindings } = await ffufHosts(db, live, {
+    now, runId, wl, threads, timeoutSec, hostTimeoutSec, passthrough,
+    outPath: (target) => resolveOutputPath({ ...opts, outFile: null }, runId, `ffuf-${target.replace(/[^a-z0-9._-]/gi, '_')}.json`),
+  });
   db.finishRun(runId, { targetsCount: live.length, findingsCount: findings, at: new Date().toISOString() });
   db.close();
   console.error(
@@ -350,7 +390,10 @@ Wrapper flags (before '--'):
   console.error(`  review flagged findings with:  npm run query -- review --limit 50`);
 }
 
-main().catch((err: unknown) => {
-  console.error('FATAL:', err instanceof Error ? err.message : String(err));
-  process.exit(1);
-});
+// Only run when invoked directly, so tests can import ffufHosts.
+if (process.argv[1] && process.argv[1].endsWith('ffuf.ts')) {
+  main().catch((err: unknown) => {
+    console.error('FATAL:', err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });
+}

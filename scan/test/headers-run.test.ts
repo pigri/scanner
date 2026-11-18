@@ -1,0 +1,110 @@
+import { describe, it, expect } from 'vitest';
+import { openDb, type Db } from '../src/lib/db.js';
+import { auditUrls, type LiveUrl } from '../src/headers.js';
+
+const AT = '2026-11-18T10:00:00.000Z';
+const URL_A: LiveUrl = { target: 'a.example', url: 'https://a.example/', scheme: 'https' };
+
+function fetchReturning(status: number, headers: Record<string, string> = {}): typeof fetch {
+  return (async () => new Response(null, { status, headers })) as unknown as typeof fetch;
+}
+const failing: typeof fetch = (async () => { throw new TypeError('fetch failed'); }) as unknown as typeof fetch;
+
+async function audit(db: Db, urls: LiveUrl[], fetchFn: typeof fetch, withRun = true) {
+  const runId = withRun ? db.startRun('headers', {}, AT) : null;
+  return auditUrls(db, urls, { now: AT, runId, timeoutSec: 2, concurrency: 2, write: () => {}, fetchFn });
+}
+const cov = (db: Db) => db.raw.prepare('SELECT target, tool, seen_at, run_id FROM tool_coverage ORDER BY target').all();
+
+describe('auditUrls coverage', () => {
+  it('covers a target whose response carried no findings, at the findings stamp', async () => {
+    const db = openDb(':memory:');
+    const good = {
+      'strict-transport-security': 'max-age=63072000; includeSubDomains; preload',
+      'content-security-policy': "default-src 'self'; frame-ancestors 'none'",
+      'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer',
+      'permissions-policy': 'geolocation=()', 'cross-origin-opener-policy': 'same-origin',
+      'cross-origin-embedder-policy': 'require-corp',
+    };
+    expect(await audit(db, [URL_A], fetchReturning(200, good))).toBe(0);
+    expect(cov(db)).toEqual([{ target: 'a.example', tool: 'headers', seen_at: AT, run_id: 1 }]);
+  });
+
+  it('records coverage with the stamp and target the findings carry', async () => {
+    const db = openDb(':memory:');
+    expect(await audit(db, [URL_A], fetchReturning(200))).toBeGreaterThan(0);
+    const f = db.raw.prepare("SELECT DISTINCT target, seen_at FROM findings WHERE tool='headers'").all();
+    expect(f).toEqual([{ target: 'a.example', seen_at: AT }]);
+    expect(cov(db)).toEqual([{ target: 'a.example', tool: 'headers', seen_at: AT, run_id: 1 }]);
+  });
+
+  it('does not cover a target whose fetch failed', async () => {
+    const db = openDb(':memory:');
+    await audit(db, [URL_A], failing);
+    expect(cov(db)).toEqual([]);
+  });
+
+  it('covers only the targets that answered', async () => {
+    const db = openDb(':memory:');
+    const b: LiveUrl = { target: 'b.example', url: 'https://b.example/', scheme: 'https' };
+    const mixed = (async (u: string) => {
+      if (u.includes('b.example')) throw new TypeError('fetch failed');
+      return new Response(null, { status: 200, headers: { 'x-a': '1' } });
+    }) as unknown as typeof fetch;
+    await audit(db, [URL_A, b], mixed);
+    expect((cov(db) as Array<{ target: string }>).map((r) => r.target)).toEqual(['a.example']);
+  });
+
+  it.each([401, 403, 404, 429, 500, 502, 503])('does not cover a %i response', async (status) => {
+    const db = openDb(':memory:');
+    await audit(db, [URL_A], fetchReturning(status, { 'x-a': '1' }));
+    expect(cov(db)).toEqual([]);
+  });
+
+  it('does not cover a challenge page marked by cf-mitigated', async () => {
+    const db = openDb(':memory:');
+    await audit(db, [URL_A], fetchReturning(200, { 'cf-mitigated': 'challenge' }));
+    expect(cov(db)).toEqual([]);
+  });
+
+  it.each([200, 204, 301, 304])('covers a %i response', async (status) => {
+    const db = openDb(':memory:');
+    await audit(db, [URL_A], fetchReturning(status, { 'x-a': '1' }));
+    expect(cov(db)).toHaveLength(1);
+  });
+
+  it('records nothing for a null runId', async () => {
+    const db = openDb(':memory:');
+    await audit(db, [URL_A], fetchReturning(200), false);
+    expect(cov(db)).toEqual([]);
+  });
+
+  it('does not cover a redirect that ended on another host', async () => {
+    const db = openDb(':memory:');
+    const moved = (async () => {
+      const r = new Response(null, { status: 200, headers: { 'x-a': '1' } });
+      Object.defineProperty(r, 'url', { value: 'https://b.example/' });
+      return r;
+    }) as unknown as typeof fetch;
+    await audit(db, [URL_A], moved);
+    expect(cov(db)).toEqual([]);
+  });
+
+  it('covers a redirect that stayed on the same host', async () => {
+    const db = openDb(':memory:');
+    const same = (async () => {
+      const r = new Response(null, { status: 200, headers: { 'x-a': '1' } });
+      Object.defineProperty(r, 'url', { value: 'https://a.example/home' });
+      return r;
+    }) as unknown as typeof fetch;
+    await audit(db, [URL_A], same);
+    expect(cov(db)).toHaveLength(1);
+  });
+
+  it('does not cover a target whose findings insert failed', async () => {
+    const db = openDb(':memory:');
+    db.raw.exec("CREATE TRIGGER t BEFORE INSERT ON findings BEGIN SELECT RAISE(ABORT,'database is locked'); END");
+    await audit(db, [URL_A], fetchReturning(200));
+    expect(cov(db)).toEqual([]);
+  });
+});
