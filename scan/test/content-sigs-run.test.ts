@@ -6,9 +6,9 @@ const AT = '2026-11-18T10:00:00.000Z';
 const A: LiveUrl = { target: 'a.example', seed: 'https://a.example' };
 const B: LiveUrl = { target: 'b.example', seed: 'https://b.example' };
 
-type Reply = { status: number; body: string; head: Buffer } | null;
-const miss: Reply = { status: 404, body: '', head: Buffer.alloc(0) };
-const gitHead: Reply = { status: 200, body: 'ref: refs/heads/main\n', head: Buffer.from('ref: refs/heads/main\n') };
+type Reply = { status: number; body: string; head: Buffer; mitigated: boolean } | null;
+const miss: Reply = { status: 404, body: '', head: Buffer.alloc(0), mitigated: false };
+const gitHead: Reply = { status: 200, body: 'ref: refs/heads/main\n', head: Buffer.from('ref: refs/heads/main\n'), mitigated: false };
 
 type ProbeFn = NonNullable<Parameters<typeof scanSigs>[2]['probeFn']>;
 
@@ -46,13 +46,13 @@ describe('scanSigs coverage', () => {
 
   it.each([429, 500, 503])('does not cover a host with one %i probe', async (status) => {
     const db = openDb(':memory:');
-    await scan(db, [A], probes((_s, p) => (p === '.env' ? { status, body: '', head: Buffer.alloc(0) } : miss)));
+    await scan(db, [A], probes((_s, p) => (p === '.env' ? { status, body: '', head: Buffer.alloc(0), mitigated: false } : miss)));
     expect(cov(db)).toEqual([]);
   });
 
   it('covers a host whose probes got 403 and 404 answers', async () => {
     const db = openDb(':memory:');
-    await scan(db, [A], probes((_s, p) => ({ status: p === '.env' ? 403 : 404, body: '', head: Buffer.alloc(0) })));
+    await scan(db, [A], probes((_s, p) => ({ status: p === '.env' ? 403 : 404, body: '', head: Buffer.alloc(0), mitigated: false })));
     expect(cov(db)).toHaveLength(1);
   });
 
@@ -65,6 +65,25 @@ describe('scanSigs coverage', () => {
   it('records nothing for a null runId', async () => {
     const db = openDb(':memory:');
     await scan(db, [A], probes(() => miss), false);
+    expect(cov(db)).toEqual([]);
+  });
+
+  it.each([401, 403, 301, 302])('does not cover a host that answered every probe with %i', async (status) => {
+    const db = openDb(':memory:');
+    await scan(db, [A], probes(() => ({ status, body: '', head: Buffer.alloc(0), mitigated: false })));
+    expect(cov(db)).toEqual([]);
+  });
+
+  it('does not cover a host with one cf-mitigated probe', async () => {
+    const db = openDb(':memory:');
+    await scan(db, [A], probes((_s, p) => (p === '.env' ? { ...miss!, status: 403, mitigated: true } : miss)));
+    expect(cov(db)).toEqual([]);
+  });
+
+  it('rejects and records no coverage when a findings insert fails', async () => {
+    const db = openDb(':memory:');
+    db.raw.exec("CREATE TRIGGER t BEFORE INSERT ON findings BEGIN SELECT RAISE(ABORT,'database is locked'); END");
+    await expect(scan(db, [A], probes((_s, p) => (p === '.git/HEAD' ? gitHead : miss)))).rejects.toThrow();
     expect(cov(db)).toEqual([]);
   });
 });

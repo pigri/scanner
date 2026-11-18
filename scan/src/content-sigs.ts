@@ -222,7 +222,7 @@ function loadLive(db: Db, targets: readonly string[]): LiveUrl[] {
 
 interface Hit { target: string; url: string; sig: Sig; status: number; length: number }
 
-export async function probe(seed: string, sig: Sig, timeoutMs: number, maxBytes: number): Promise<{ status: number; body: string; head: Buffer } | null> {
+export async function probe(seed: string, sig: Sig, timeoutMs: number, maxBytes: number): Promise<{ status: number; body: string; head: Buffer; mitigated: boolean } | null> {
   const url = `${seed}/${sig.path}`;
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
@@ -236,7 +236,8 @@ export async function probe(seed: string, sig: Sig, timeoutMs: number, maxBytes:
     // Only bother reading the body for statuses that could plausibly ship
     // real content. 3xx / 401 without a body are always misses here.
     if (resp.status === 0) return null;
-    if (!resp.body) return { status: resp.status, body: '', head: Buffer.alloc(0) };
+    const mitigated = resp.headers.has('cf-mitigated');
+    if (!resp.body) return { status: resp.status, body: '', head: Buffer.alloc(0), mitigated };
     const cap = sig.maxBytes ?? maxBytes;
     const reader = resp.body.getReader();
     const chunks: Uint8Array[] = [];
@@ -249,7 +250,7 @@ export async function probe(seed: string, sig: Sig, timeoutMs: number, maxBytes:
       if (received >= cap) { await reader.cancel().catch(() => {}); break; }
     }
     const buf = Buffer.concat(chunks);
-    return { status: resp.status, body: buf.toString('utf8'), head: buf.subarray(0, Math.min(buf.length, 512)) };
+    return { status: resp.status, body: buf.toString('utf8'), head: buf.subarray(0, Math.min(buf.length, 512)), mitigated };
   } catch { return null; }
   finally { clearTimeout(timer); }
 }
@@ -266,12 +267,17 @@ export interface SigsOpts {
 }
 
 /**
- * A probe that failed, or that met a rate limit or a server error, says
- * nothing about whether the artefact exists. A 403/404 is the answer WAFs give
- * for a miss, so it counts.
+ * A host is examined when every probe got an answer that is not a rate limit,
+ * a server error or a challenge, and the answers are not one blanket 401, 403
+ * or redirect. A mixed 403/404 host is the normal WAF miss and still counts.
  */
-function answered(r: { status: number } | null): boolean {
-  return r !== null && r.status !== 429 && r.status < 500;
+function hostExamined(replies: ({ status: number; mitigated: boolean } | null)[]): boolean {
+  for (const r of replies) {
+    if (r === null || r.mitigated || r.status === 429 || r.status >= 500) return false;
+  }
+  const first = replies[0]?.status;
+  if (first === undefined || !replies.every((r) => r!.status === first)) return replies.length > 0;
+  return !(first === 401 || first === 403 || (first >= 300 && first < 400));
 }
 
 export async function scanSigs(db: Db, live: readonly LiveUrl[], o: SigsOpts): Promise<number> {
@@ -291,13 +297,14 @@ export async function scanSigs(db: Db, live: readonly LiveUrl[], o: SigsOpts): P
       if (i >= live.length) return;
       const h = live[i]!;
       let sigIdx = 0;
+      const replies: Parameters<typeof hostExamined>[0] = [];
       async function sigWorker(): Promise<void> {
         for (;;) {
           const j = sigIdx++;
           if (j >= SIGS.length) return;
           const sig = SIGS[j]!;
           const r = await probeFn(h.seed, sig, o.timeoutSec * 1000, o.maxKb * 1024);
-          outcomes.push({ target: h.target, ok: answered(r) });
+          replies.push(r);
           if (!r) continue;
           if (!sig.match(r.body, r.head)) continue;
           const url = `${h.seed}/${sig.path}`;
@@ -319,6 +326,7 @@ export async function scanSigs(db: Db, live: readonly LiveUrl[], o: SigsOpts): P
         }
       }
       await Promise.all(Array.from({ length: Math.min(o.hostConcurrency, SIGS.length) }, sigWorker));
+      outcomes.push({ target: h.target, ok: hostExamined(replies) });
     }
   }
   await Promise.all(Array.from({ length: Math.min(o.concurrency, live.length) }, hostWorker));
