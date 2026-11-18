@@ -1,3 +1,4 @@
+import { riskToolKey } from './nuclei-tool.js';
 export interface Finding {
   tool: string;
   severity: string | null;
@@ -135,7 +136,7 @@ export function computeScore(s: TargetSignals, o: ScoreOptions = {}): ScoreResul
   const dedupedFindings: typeof s.findings = [];
   const seen = new Set<string>();
   for (const f of s.findings) {
-    const key = `${f.tool}|${f.severity ?? ''}|${(f.title || '').toLowerCase()}|${f.cve ?? ''}`;
+    const key = `${riskToolKey(f.tool)}|${f.severity ?? ''}|${(f.title || '').toLowerCase()}|${f.cve ?? ''}`;
     if (seen.has(key)) continue;
     seen.add(key);
     dedupedFindings.push(f);

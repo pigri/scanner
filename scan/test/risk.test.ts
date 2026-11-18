@@ -32,6 +32,16 @@ describe('matchesRiskKeyword', () => {
 });
 
 describe('computeScore', () => {
+  it('counts a finding both nuclei passes report once', () => {
+    const f = (tool: string) => ({ tool, severity: 'critical', title: 'PHP-FPM RCE', cve: 'CVE-2019-11043', needsReview: false });
+    const both = empty();
+    both.findings = [f('nuclei'), f('nuclei-url')];
+    const one = empty();
+    one.findings = [f('nuclei')];
+    expect(computeScore(both).breakdown.critical).toBe(1);
+    expect(computeScore(both).score).toBe(computeScore(one).score);
+  });
+
   it('zero for host with no signals', () => {
     const r = computeScore(empty());
     expect(r.score).toBe(0);

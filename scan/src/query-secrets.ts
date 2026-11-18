@@ -22,6 +22,7 @@
 
 import fs from 'node:fs';
 import { openDb, type Db } from './lib/db.js';
+import { NUCLEI_URL_TOOL } from './lib/nuclei-tool.js';
 
 interface Row {
   host: string;
@@ -41,7 +42,7 @@ const QUERY = `
   SELECT target AS host, tool, category, severity, title, matched_at, seen_at, needs_review
     FROM findings
    WHERE tool IN ('secrets', 'vendor-key-enrich', 'gapi-key-check')
-      OR (tool IN ('nuclei', 'nuclei-url') AND (
+      OR (tool IN ('nuclei', '${NUCLEI_URL_TOOL}') AND (
              category LIKE '%api-key%'
           OR category LIKE '%exposure%'
           OR category LIKE '%wp-config%'
