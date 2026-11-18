@@ -30,7 +30,7 @@ const byTitle = (rows: Row[]) => Object.fromEntries(rows.map((r) => [`${r.target
 describe('currentFindingsSelect (rule 3: watermark = MAX(seen_at) per target, tool)', () => {
   it('resolves a finding last seen before its tool latest row and keeps the latest open', () => {
     const raw = seed();
-    const rows = raw.prepare(currentFindingsSelect({ coverage: false })).all() as Row[];
+    const rows = raw.prepare(currentFindingsSelect({ coverage: false, partial: false })).all() as Row[];
     expect(byTitle(rows)).toEqual({
       'host.example/gone': 1,
       'host.example/kept': 0,
@@ -41,10 +41,10 @@ describe('currentFindingsSelect (rule 3: watermark = MAX(seen_at) per target, to
 
   it('per-target variant equals the global one for that target', () => {
     const raw = seed();
-    const global = (raw.prepare(currentFindingsSelect({ coverage: false })).all() as Row[])
+    const global = (raw.prepare(currentFindingsSelect({ coverage: false, partial: false })).all() as Row[])
       .filter((r) => r.target === 'host.example');
     const scoped = raw
-      .prepare(currentFindingsSelect({ coverage: false, targetParam: '@t' }))
+      .prepare(currentFindingsSelect({ coverage: false, partial: false, targetParam: '@t' }))
       .all({ t: 'host.example' }) as Row[];
     const key = (r: Row) => `${r.tool}|${r.title}`;
     expect(scoped.map(key).sort()).toEqual(global.map(key).sort());
@@ -61,7 +61,7 @@ describe('currentFindingsSelect (rules 1 and 2: sticky tools and tool_coverage)'
       .prepare('INSERT INTO tool_coverage (target, tool, seen_at, run_id) VALUES (?, ?, ?, NULL)')
       .run(target, tool, at);
   const open = (raw: ReturnType<typeof seed>, coverage = true) =>
-    byTitle(raw.prepare(currentFindingsSelect({ coverage })).all() as Row[]);
+    byTitle(raw.prepare(currentFindingsSelect({ coverage, partial: false })).all() as Row[]);
 
   it('resolves every row of a tool that a newer coverage record outlasts', () => {
     const raw = seed();
@@ -110,7 +110,7 @@ describe('currentFindingsSelect (rules 1 and 2: sticky tools and tool_coverage)'
     cover(raw, 'host.example', 'version-match', '2026-11-10T13:00:00.000Z');
     cover(raw, 'other.example', 'version-match', '2026-11-10T13:00:00.000Z');
     const rows = raw
-      .prepare(currentFindingsSelect({ coverage: true, targetParam: '@t' }))
+      .prepare(currentFindingsSelect({ coverage: true, partial: false, targetParam: '@t' }))
       .all({ t: 'host.example' }) as Row[];
     expect(byTitle(rows)).toEqual({
       'host.example/gone': 1,

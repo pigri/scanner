@@ -5,7 +5,7 @@ import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, writeLines, resolveOutputPath } from './lib/runner.js';
 import { parseNmapXml, vulnersCoveredTargets, hostTarget } from './lib/nmap-parse.js';
 import { openDb } from './lib/db.js';
-import { tableExists, watermarkSelect } from './lib/current-findings.js';
+import { findingsRuleOpts, watermarkSelect } from './lib/current-findings.js';
 
 // Data-store ports that fall OUTSIDE nmap's top-1000 (all rank by open-frequency,
 // and the NoSQL/cache/graph stores sit well under the top-1000 cutoff of
@@ -49,7 +49,7 @@ function topTcpPorts(n: number): number[] | null {
 function openVulnersPorts(raw: Database.Database, targets: readonly string[]): Map<string, Set<number>> {
   const stmt = raw.prepare(
     `SELECT DISTINCT json_extract(f.meta_json, '$.port') AS port
-     FROM findings f JOIN (${watermarkSelect({ coverage: tableExists(raw, 'tool_coverage'), targetParam: '@t' })}) wm
+     FROM findings f JOIN (${watermarkSelect({ ...findingsRuleOpts(raw), targetParam: '@t' })}) wm
        ON wm.target = f.target AND wm.tool = f.tool
      WHERE f.target = @t AND f.tool = 'nmap-vulners' AND f.seen_at >= wm.w`,
   );

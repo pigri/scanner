@@ -7,7 +7,7 @@ import { recordRiskScores } from './lib/risk-latest.js';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
 import { buildTargetResolver } from './lib/identity.js';
 import { loadNetworkSignals, type NetworkSignal } from './lib/risk-network.js';
-import { currentFindingRowsSelect, tableExists } from './lib/current-findings.js';
+import { currentFindingRowsSelect, findingsRuleOpts } from './lib/current-findings.js';
 
 export interface Opts {
   db: string;
@@ -131,7 +131,7 @@ export function loadRiskSignals(raw: Database.Database, opts: SignalOpts, now: s
   const findingsByTarget = new Map<string, Finding[]>();
   const findingsSql = (opts.findingsRule ?? 'current') === 'all'
     ? 'SELECT target, tool, severity, title, cve, needs_review FROM findings'
-    : currentFindingRowsSelect({ coverage: tableExists(raw, 'tool_coverage') });
+    : currentFindingRowsSelect(findingsRuleOpts(raw));
   const findingRows = raw.prepare(findingsSql)
     .all() as { target: string; tool: string; severity: string | null; title: string; cve: string | null; needs_review: number }[];
   for (const r of findingRows) {

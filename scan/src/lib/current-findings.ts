@@ -10,10 +10,19 @@ export function tableExists(db: Database.Database, name: string): boolean {
 }
 
 export interface CurrentFindingsOpts {
-  /** Join tool_coverage for the watermark. Callers pass tableExists(db, 'tool_coverage'). */
+  /** Join tool_coverage for the watermark. Callers get it from findingsRuleOpts(db). */
   coverage: boolean;
+  /** Skip rows of partial runs when picking the watermark. Callers get it from findingsRuleOpts(db). */
+  partial: boolean;
   /** Named SQL parameter (e.g. '@t') that limits the result to one target. */
   targetParam?: string;
+}
+
+/** The options every reader of the closing rule passes, probed at query time. */
+export type FindingsRuleOpts = Omit<CurrentFindingsOpts, 'targetParam'>;
+
+export function findingsRuleOpts(db: Database.Database): FindingsRuleOpts {
+  return { coverage: tableExists(db, 'tool_coverage'), partial: false };
 }
 
 /**

@@ -45,7 +45,7 @@ describe('targetRowsSql', () => {
     db.prepare(
       `INSERT INTO risk_latest (target, score, created_at, updated_at) VALUES ('a.example', 77, '2026-11-01T00:00:00Z', '2026-11-09T00:00:00Z')`,
     ).run();
-    const rows = db.prepare(targetRowsSql(false)).all() as Record<string, unknown>[];
+    const rows = db.prepare(targetRowsSql({ coverage: false, partial: false })).all() as Record<string, unknown>[];
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       target: 'a.example',
@@ -67,9 +67,9 @@ describe('targetRowsSql', () => {
     fd.run('version-match', 'old', 'CVE-1', '2026-11-10T00:00:00.000Z');
     fd.run('nuclei', 'n', 'CVE-2', '2026-11-10T00:00:00.000Z');
     db.prepare(`INSERT INTO tool_coverage (target, tool, seen_at) VALUES ('c.example', 'version-match', '2026-11-11T00:00:00.000Z')`).run();
-    const open = db.prepare(targetRowsSql(true)).all() as Record<string, unknown>[];
+    const open = db.prepare(targetRowsSql({ coverage: true, partial: false })).all() as Record<string, unknown>[];
     expect(open[0]).toMatchObject({ high: 1, findings: 1, cves: 1, versionMatch: 0 });
-    const all = db.prepare(targetRowsSql(false)).all() as Record<string, unknown>[];
+    const all = db.prepare(targetRowsSql({ coverage: false, partial: false })).all() as Record<string, unknown>[];
     expect(all[0]).toMatchObject({ high: 2, findings: 2, cves: 2, versionMatch: 1 });
   });
 
@@ -80,7 +80,7 @@ describe('targetRowsSql', () => {
     const sc = db.prepare(`INSERT INTO risk_scores (target, score, breakdown_json, computed_at) VALUES (?, 1, '{}', 'c')`);
     const fd = db.prepare(`INSERT INTO findings (tool, target, category, severity, title, seen_at) VALUES ('nuclei', ?, 'x', 'high', 't', 's')`);
     for (const u of ['http://b.example', 'https://b.example']) { sc.run(u); fd.run(u); }
-    const rows = db.prepare(targetRowsSql(false)).all() as { target: string; versionMatch: number; findings: number }[];
+    const rows = db.prepare(targetRowsSql({ coverage: false, partial: false })).all() as { target: string; versionMatch: number; findings: number }[];
     expect(rows.map((r) => r.target)).toEqual(['b.example']);
     expect(rows[0]).toMatchObject({ versionMatch: 0, findings: 0 });
   });

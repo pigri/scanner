@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
 import { openDb } from './lib/db.js';
-import { tableExists, watermarkSelect } from './lib/current-findings.js';
+import { findingsRuleOpts, tableExists, watermarkSelect } from './lib/current-findings.js';
 
 /** The only tables retention deletes rows from. */
 const PRUNABLE_TABLES = ['findings', 'ports', 'http_probes', 'screenshots'] as const;
@@ -112,9 +112,8 @@ function planRows(raw: Database.Database, cutoffIso: string, riskCutoffIso: stri
   // when a later run superseded its run. The watermark is keyed on the row's own
   // findings.tool (nmap runs write 'nmap-vulners'), while supersession stays
   // keyed on runs.tool.
-  const coverage = tableExists(raw, 'tool_coverage');
   raw.exec(`CREATE TEMP TABLE ret_wm(target TEXT NOT NULL, tool TEXT NOT NULL, w TEXT NOT NULL, PRIMARY KEY(target, tool)) WITHOUT ROWID;
-    INSERT INTO temp.ret_wm ${watermarkSelect({ coverage })}`);
+    INSERT INTO temp.ret_wm ${watermarkSelect(findingsRuleOpts(raw))}`);
   // Latest superseding run per (table, target, tool): newer = later started_at, then higher id.
   // Only a finished run with a parseable started_at may supersede, so a worker killed
   // mid-run never displaces the last complete evidence.
