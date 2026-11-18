@@ -101,4 +101,23 @@ describe('applyPrune and tool_coverage', () => {
     applyPrune(db.raw, [bad]);
     expect(cov(db.raw)).toEqual([{ target: 'b.example.com', tool: 'nmap', run_id: other }]);
   });
+
+  it('keeps a newer run’s stamp on the same target and tool', () => {
+    const { db, bad } = seed();
+    const newer = db.startRun('nmap', {}, '2026-01-04T00:00:00Z');
+    db.recordCoverage('nmap', ['a.example.com'], '2026-01-04T00:00:00Z', newer);
+    applyPrune(db.raw, [bad]);
+    expect(cov(db.raw)).toContainEqual({ target: 'a.example.com', tool: 'nmap', run_id: newer });
+    expect(resolved(db.raw)).toEqual(['old:1']);
+  });
+
+  it('drops the pair’s coverage, not back to an older stamp, when the pruned run held it', () => {
+    const db = openDb(':memory:');
+    const older = db.startRun('nmap', {}, '2026-01-01T00:00:00Z');
+    const bad = db.startRun('nmap', {}, '2026-01-02T00:00:00Z');
+    db.recordCoverage('nmap', ['a.example.com'], '2026-01-01T00:00:00Z', older);
+    db.recordCoverage('nmap', ['a.example.com'], '2026-01-02T00:00:00Z', bad);
+    applyPrune(db.raw, [bad]);
+    expect(cov(db.raw)).toEqual([]);
+  });
 });
