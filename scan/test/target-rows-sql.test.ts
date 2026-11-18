@@ -5,7 +5,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, rmSync } from 'node:fs';
 import Database from 'better-sqlite3';
-import { TARGET_ROWS_SQL, riskLatestMissingMessage } from '../src/lib/target-rows-sql.js';
+import { targetRowsSql, riskLatestMissingMessage } from '../src/lib/target-rows-sql.js';
 
 const SCHEMA = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '../src/lib/schema.sql'),
@@ -31,11 +31,11 @@ afterEach(() => {
 function seedFinding(db: Database.Database, target: string, cve: string): void {
   db.prepare(
     `INSERT INTO findings (tool, target, severity, title, cve, seen_at)
-     VALUES ('version-match', ?, 'high', 't', ?, '2026-11-10T00:00:00Z')`,
-  ).run(target, cve);
+     VALUES ('version-match', ?, 'high', ?, ?, '2026-11-10T00:00:00.000Z')`,
+  ).run(target, cve, cve);
 }
 
-describe('TARGET_ROWS_SQL', () => {
+describe('targetRowsSql', () => {
   it('reads score and times from risk_latest and carries versionMatch through', () => {
     const db = newDb();
     seedFinding(db, 'a.example', 'CVE-2024-0001');
@@ -45,7 +45,7 @@ describe('TARGET_ROWS_SQL', () => {
     db.prepare(
       `INSERT INTO risk_latest (target, score, created_at, updated_at) VALUES ('a.example', 77, '2026-11-01T00:00:00Z', '2026-11-09T00:00:00Z')`,
     ).run();
-    const rows = db.prepare(TARGET_ROWS_SQL).all() as Record<string, unknown>[];
+    const rows = db.prepare(targetRowsSql(false)).all() as Record<string, unknown>[];
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       target: 'a.example',
@@ -60,6 +60,19 @@ describe('TARGET_ROWS_SQL', () => {
     });
   });
 
+  it('counts open findings and honours coverage', () => {
+    const db = newDb();
+    db.prepare(`INSERT INTO risk_latest (target, score, created_at, updated_at) VALUES ('c.example', 1, 'c', 'u')`).run();
+    const fd = db.prepare(`INSERT INTO findings (tool, target, severity, title, cve, seen_at) VALUES (?, 'c.example', 'high', ?, ?, ?)`);
+    fd.run('version-match', 'old', 'CVE-1', '2026-11-10T00:00:00.000Z');
+    fd.run('nuclei', 'n', 'CVE-2', '2026-11-10T00:00:00.000Z');
+    db.prepare(`INSERT INTO tool_coverage (target, tool, seen_at) VALUES ('c.example', 'version-match', '2026-11-11T00:00:00.000Z')`).run();
+    const open = db.prepare(targetRowsSql(true)).all() as Record<string, unknown>[];
+    expect(open[0]).toMatchObject({ high: 1, findings: 1, cves: 1, versionMatch: 0 });
+    const all = db.prepare(targetRowsSql(false)).all() as Record<string, unknown>[];
+    expect(all[0]).toMatchObject({ high: 2, findings: 2, cves: 2, versionMatch: 1 });
+  });
+
   it('excludes URL targets and defaults the aggregate columns to 0', () => {
     const db = newDb();
     // URL targets only reach risk_scores/findings; writers never put them in risk_latest.
@@ -67,7 +80,7 @@ describe('TARGET_ROWS_SQL', () => {
     const sc = db.prepare(`INSERT INTO risk_scores (target, score, breakdown_json, computed_at) VALUES (?, 1, '{}', 'c')`);
     const fd = db.prepare(`INSERT INTO findings (tool, target, category, severity, title, seen_at) VALUES ('nuclei', ?, 'x', 'high', 't', 's')`);
     for (const u of ['http://b.example', 'https://b.example']) { sc.run(u); fd.run(u); }
-    const rows = db.prepare(TARGET_ROWS_SQL).all() as { target: string; versionMatch: number; findings: number }[];
+    const rows = db.prepare(targetRowsSql(false)).all() as { target: string; versionMatch: number; findings: number }[];
     expect(rows.map((r) => r.target)).toEqual(['b.example']);
     expect(rows[0]).toMatchObject({ versionMatch: 0, findings: 0 });
   });
