@@ -640,3 +640,57 @@ describe('overview and targets count open findings', () => {
     expect(t.rows.find((r: any) => r.target === 'host.example')).toMatchObject({ critical: 1, high: 1, findings: 2 });
   }, 40_000);
 });
+
+describe('CVE lists follow cves.open', () => {
+  const seedCves = (dropColumn: boolean) =>
+    seed(false, (raw) => {
+      const ins = raw.prepare(
+        `INSERT INTO cves (target, cve_id, severity, cvss, tools, hit_count, first_seen, last_seen, exploit, open)
+         VALUES (?, ?, 'high', 7.5, 'nuclei', 1, ?, ?, ?, ?)`,
+      );
+      ins.run('host.example', 'CVE-2026-0101', iso(9), iso(1), 1, 1);
+      ins.run('host.example', 'CVE-2026-0102', iso(9), iso(5), 0, 0);
+      ins.run('other.example', 'CVE-2026-0103', iso(9), iso(1), 0, 1);
+      if (dropColumn) raw.exec('ALTER TABLE cves DROP COLUMN open');
+    });
+  const ids = (d: any) => d.rows.map((r: any) => r.cve_id).sort();
+
+  it('lists open CVEs by default and honours status=resolved and status=all', async () => {
+    const base = await startUi(seedCves(false));
+    const def = (await (await fetch(`${base}/api/cves?limit=100`)).json()) as any;
+    expect(ids(def)).toEqual(['CVE-2026-0101', 'CVE-2026-0103']);
+    expect(def.total).toBe(2);
+    expect(def.exploitCounts).toEqual({ yes: 1, no: 1 });
+    const res = (await (await fetch(`${base}/api/cves?status=resolved&limit=100`)).json()) as any;
+    expect(ids(res)).toEqual(['CVE-2026-0102']);
+    expect(res.total).toBe(1);
+    const all = (await (await fetch(`${base}/api/cves?status=all&limit=100`)).json()) as any;
+    expect(ids(all)).toEqual(['CVE-2026-0101', 'CVE-2026-0102', 'CVE-2026-0103']);
+    expect(all.total).toBe(3);
+  }, 40_000);
+
+  it('counts and the target page show open CVEs only', async () => {
+    const base = await startUi(seedCves(false));
+    const o = (await (await fetch(`${base}/api/overview`)).json()) as any;
+    expect(o.counts.cves).toBe(2);
+    expect(o.exploitable).toMatchObject({ issues: 1, cves: 1, targets: 1 });
+    const t = (await (await fetch(`${base}/api/target?t=host.example`)).json()) as any;
+    expect(t.cves.map((c: any) => c.cve_id)).toEqual(['CVE-2026-0101']);
+  }, 40_000);
+
+  it('answers 200 and lists every row when the cves table has no open column', async () => {
+    const base = await startUi(seedCves(true));
+    const r = await fetch(`${base}/api/cves?limit=100`);
+    expect(r.status).toBe(200);
+    const d = (await r.json()) as any;
+    expect(d.total).toBe(3);
+    const rs = await fetch(`${base}/api/cves?status=resolved&limit=100`);
+    expect(rs.status).toBe(200);
+    expect(((await rs.json()) as any).total).toBe(0);
+    const o = await fetch(`${base}/api/overview`);
+    expect(o.status).toBe(200);
+    expect(((await o.json()) as any).counts.cves).toBe(3);
+    expect((await fetch(`${base}/api/target?t=host.example`)).status).toBe(200);
+    expect((await fetch(`${base}/api/attackPaths`)).status).toBe(200);
+  }, 40_000);
+});

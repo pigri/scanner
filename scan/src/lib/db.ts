@@ -238,6 +238,16 @@ export function openDb(dbPath: string, options: OpenDbOptions = {}): Db {
     }
   }
 
+  // cves.open: whether a current finding still carries the CVE. Old rows read
+  // as open until the next cve-rollup run recomputes them.
+  const hasCvesOpen = () =>
+    (raw.prepare('PRAGMA table_info(cves)').all() as { name: string }[]).some((r) => r.name === 'open');
+  if (!hasCvesOpen()) {
+    raw.transaction(() => {
+      if (!hasCvesOpen()) raw.exec('ALTER TABLE cves ADD COLUMN open INTEGER NOT NULL DEFAULT 1');
+    }).immediate();
+  }
+
   // Queue claim ownership: who holds an in_progress row and when it last proved
   // it is alive, so abandoned rows can be reset (see queue.ts reapStale).
   for (const table of ['scan_queue', 'report_queue'] as const) {
