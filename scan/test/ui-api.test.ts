@@ -596,3 +596,47 @@ describe('findings open/resolved follows tool_coverage', () => {
     expect(((await l.json()) as any).rows.map((x: any) => x.title).sort()).toEqual(['current', 'd1', 'm1', 'n1']);
   }, 40_000);
 });
+
+describe('overview and targets count open findings', () => {
+  const seedCounts = (dropTable: boolean) =>
+    seed(false, (raw) => {
+      const ins = raw.prepare(
+        `INSERT INTO findings (target, tool, severity, category, title, cve, seen_at)
+         VALUES ('host.example', ?, ?, 'cve', ?, ?, ?)`,
+      );
+      ins.run('nuclei', 'critical', 'old', 'CVE-2026-0001', iso(5));
+      ins.run('nuclei', 'high', 'kept', 'CVE-2026-0002', iso(5));
+      ins.run('nuclei', 'high', 'kept', 'CVE-2026-0002', iso(1));
+      ins.run('version-match', 'critical', 'covered', 'CVE-2026-0003', iso(5));
+      raw.prepare('INSERT INTO tool_coverage (target, tool, seen_at, run_id) VALUES (?, ?, ?, NULL)')
+        .run('host.example', 'version-match', iso(1));
+      raw.prepare(
+        `INSERT INTO findings (target, tool, severity, category, title, cve, seen_at)
+         VALUES ('other.example', 'nuclei', 'low', 'cve', 'o1', NULL, ?)`,
+      ).run(iso(0));
+      if (dropTable) raw.exec('DROP TABLE tool_coverage');
+    });
+
+  it('shows open counts in /api/overview and /api/targets', async () => {
+    const base = await startUi(seedCounts(false));
+    const o = (await (await fetch(`${base}/api/overview`)).json()) as any;
+    expect(o.severity).toMatchObject({ critical: 0, high: 1, low: 1 });
+    expect(o.counts.findings).toBe(2);
+    const recent = (n: string) => o.recentTargets.find((t: any) => t.target === n);
+    expect(recent('host.example')).toMatchObject({ critical: 0, high: 1, findings: 1 });
+    expect(recent('other.example')).toMatchObject({ critical: 0, high: 0, findings: 1 });
+    const t = (await (await fetch(`${base}/api/targets?limit=100`)).json()) as any;
+    expect(t.rows.find((r: any) => r.target === 'host.example')).toMatchObject({ critical: 0, high: 1, findings: 1, cves: 1 });
+  }, 40_000);
+
+  it('answers 200 with rule 3 counts when tool_coverage is missing', async () => {
+    const base = await startUi(seedCounts(true));
+    const o = await fetch(`${base}/api/overview`);
+    expect(o.status).toBe(200);
+    const od = (await o.json()) as any;
+    expect(od.severity).toMatchObject({ critical: 1, high: 1, low: 1 });
+    expect(od.counts.findings).toBe(3);
+    const t = (await (await fetch(`${base}/api/targets?limit=100`)).json()) as any;
+    expect(t.rows.find((r: any) => r.target === 'host.example')).toMatchObject({ critical: 1, high: 1, findings: 2 });
+  }, 40_000);
+});

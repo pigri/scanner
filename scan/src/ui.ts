@@ -14,7 +14,7 @@ import Database from 'better-sqlite3';
 import { resolveDbArg } from './lib/db-arg.js';
 import { filterAndFacet } from './lib/target-filter.js';
 import { buildNewsSql } from './lib/news-sql.js';
-import { TARGET_ROWS_SQL, riskLatestMissingMessage } from './lib/target-rows-sql.js';
+import { targetRowsSql, riskLatestMissingMessage } from './lib/target-rows-sql.js';
 import { NO_URL, latestRiskRow } from './lib/risk-latest.js';
 import { currentFindingsSelect, tableExists } from './lib/current-findings.js';
 import {
@@ -184,7 +184,7 @@ function targetRows(): TargetRow[] {
   const now = Date.now();
   if (targetsCache && now - targetsCache.at < 60000) return targetsCache.rows;
   const rows = scan
-    .prepare(TARGET_ROWS_SQL)
+    .prepare(targetRowsSql(tableExists(scan, 'tool_coverage')))
     .all() as TargetRow[];
   const nets = tableExists(scan, 'target_network')
     ? tableExists(scan, 'scan_queue')
@@ -290,11 +290,13 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
       tableExists(scan, t)
         ? (scan.prepare(`SELECT COUNT(*) c FROM ${t}`).get() as { c: number }).c
         : 0;
-    const severity = scan
-      .prepare(
-        `SELECT severity, COUNT(*) c FROM findings GROUP BY severity`,
-      )
-      .all() as { severity: string | null; c: number }[];
+    const open = logicalFindings().filter((f) => f.resolved === 0);
+    const severity: { severity: string | null; c: number }[] = [];
+    for (const f of open) {
+      const row = severity.find((r) => r.severity === f.severity);
+      if (row) row.c++;
+      else severity.push({ severity: f.severity, c: 1 });
+    }
     const sevMap: Record<string, number> = {};
     for (const s of SEVERITY_ORDER) sevMap[s] = 0;
     for (const r of severity) sevMap[r.severity ?? 'info'] = r.c;
@@ -310,18 +312,25 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
       .all();
     // Recently scanned hosts: last time each target produced any finding
     // (varies per host, unlike risk_scores.computed_at which is stamped in one
-    // batch). Correlated subqueries run only for the 12 output rows.
-    const recentTargets = scan
-      .prepare(
-        `SELECT t.target, t.last_scan,
-           (SELECT score FROM risk_latest WHERE target=t.target) score,
-           (SELECT COUNT(*) FROM findings f WHERE f.target=t.target AND f.severity='critical') critical,
-           (SELECT COUNT(*) FROM findings f WHERE f.target=t.target AND f.severity='high') high,
-           (SELECT COUNT(*) FROM findings f WHERE f.target=t.target) findings
-         FROM (SELECT target, MAX(seen_at) last_scan FROM findings GROUP BY target
-               ORDER BY last_scan DESC LIMIT 12) t`,
-      )
-      .all();
+    // batch). Counts come from the open logical findings, like the Targets list.
+    const recentTargets = (
+      scan
+        .prepare(
+          `SELECT t.target, t.last_scan,
+             (SELECT score FROM risk_latest WHERE target=t.target) score
+           FROM (SELECT target, MAX(seen_at) last_scan FROM findings GROUP BY target
+                 ORDER BY last_scan DESC LIMIT 12) t`,
+        )
+        .all() as { target: string; last_scan: string; score: number | null }[]
+    ).map((t) => {
+      const mine = open.filter((f) => f.target === t.target);
+      return {
+        ...t,
+        critical: mine.filter((f) => f.severity === 'critical').length,
+        high: mine.filter((f) => f.severity === 'high').length,
+        findings: mine.length,
+      };
+    });
     const queue = tableExists(scan, 'scan_queue')
       ? scan
           .prepare(`SELECT status, COUNT(*) c FROM scan_queue GROUP BY status`)
@@ -364,7 +373,7 @@ const api: Record<string, (q: URLSearchParams) => Json> = {
         runs: count('runs'),
         ports: count('ports'),
         http_probes: count('http_probes'),
-        findings: count('findings'),
+        findings: open.length,
         cves: count('cves'),
         certificates: count('certificates'),
         dns_records: count('dns_records'),
