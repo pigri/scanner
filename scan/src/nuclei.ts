@@ -159,7 +159,10 @@ Everything after '--' is passed to nuclei verbatim.`));
     console.error(`--from-urls: pulled ${urlSample.length} katana URLs across ${targets.length} target(s) (cap ${urlsPerHost}/host)`);
   }
 
-  const runId = db ? db.startRun('nuclei', {
+  // The URL pass cannot repeat network-only matches of the host pass, so it keeps
+  // its own tool name: the open/resolved rule compares rows per (target, tool).
+  const toolName = fromUrls ? 'nuclei-url' : 'nuclei';
+  const runId = db ? db.startRun(toolName, {
     targets: targets.length, urlSample: urlSample.length,
     liveOnly, severity, concurrency, rateLimit,
     timeout: templateTimeout, retries, fromUrls, urlsPerHost, extraArgs: passthrough,
@@ -276,7 +279,7 @@ Everything after '--' is passed to nuclei verbatim.`));
         };
         for (const cveId of cveIdsFor(cves)) {
           db.insertFinding({
-            tool: 'nuclei',
+            tool: toolName,
             target: targetHost,
             category: tid,
             severity: isSuspect ? 'info' : (row.info?.severity ?? null),

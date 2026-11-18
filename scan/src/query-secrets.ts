@@ -8,8 +8,8 @@
 //   - `secrets`          — gitleaks + trufflehog raw hits
 //   - `vendor-key-enrich`— per-vendor capability enumeration (github/slack/aws/openai/anthropic)
 //   - `gapi-key-check`   — Google API surface enumeration
-//   - `nuclei`           — templates that flag exposed configs, backups,
-//                          debug pages, embedded API keys
+//   - `nuclei`, `nuclei-url` — templates that flag exposed configs, backups,
+//                          debug pages, embedded API keys (host pass, URL pass)
 //   - `content-sigs`     — bytewise signatures for docker-compose / .env / etc.
 //   - `ffuf`             — sensitive-path hits (`.git/`, `.svn/`, `.env`,
 //                          wp-config backups, credentials.json…). Downgraded
@@ -41,7 +41,7 @@ const QUERY = `
   SELECT target AS host, tool, category, severity, title, matched_at, seen_at, needs_review
     FROM findings
    WHERE tool IN ('secrets', 'vendor-key-enrich', 'gapi-key-check')
-      OR (tool = 'nuclei' AND (
+      OR (tool IN ('nuclei', 'nuclei-url') AND (
              category LIKE '%api-key%'
           OR category LIKE '%exposure%'
           OR category LIKE '%wp-config%'
