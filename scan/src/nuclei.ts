@@ -6,7 +6,7 @@ import { openDb, type Db } from './lib/db.js';
 import { fetchCanary, probeUrl, hashBody, isNearCanary, type CanaryProbe } from './lib/catchall.js';
 import { cveIdsFor } from './lib/nuclei-cve.js';
 import { NUCLEI_URL_TOOL } from './lib/nuclei-tool.js';
-import { hostOf, nucleiCoveredTargets } from './lib/nuclei-coverage.js';
+import { hostOf, nucleiCoveredTargets, nucleiSkippedHosts, type NucleiRowEvidence } from './lib/nuclei-coverage.js';
 
 // Nuclei templates whose semantics are "did the server return a page for this
 // path?" — these fire false positives on catch-all responders that return the
@@ -165,6 +165,8 @@ Everything after '--' is passed to nuclei verbatim.`));
   const tmp = resolveOutputPath({ ...opts, outFile: null }, runId, 'nuclei-targets.txt');
   writeLines(tmp, [...targets, ...urlSample]);
   const outFile = resolveOutputPath(opts, runId, 'nuclei.jsonl');
+  // nuclei exits 0 when -mhe skips a host; its error log and stderr show which.
+  const errorLog = fromUrls ? resolveOutputPath({ ...opts, outFile: null }, runId, 'nuclei-errors.jsonl') : null;
   const args = [
     '-l', tmp, '-jsonl', '-o', outFile,
     '-severity', severity,
@@ -180,6 +182,7 @@ Everything after '--' is passed to nuclei verbatim.`));
     // vuln scanner never chases an off-scope external redirect (e.g. to an SSO).
     '-fhr',
     '-stats',
+    ...(errorLog ? ['-elog', errorLog] : []),
     ...passthrough,
   ];
   console.error(`nuclei ${args.join(' ')} (scan-timeout ${scanTimeoutSec}s)`);
@@ -209,16 +212,18 @@ Everything after '--' is passed to nuclei verbatim.`));
 
     let count = 0;
     let reviewCount = 0;
-    const coverageRows: { type?: string | undefined; 'matched-at'?: string | undefined }[] = [];
+    const evidence: NucleiRowEvidence[] = [];
     for (const line of fs.readFileSync(outFile, 'utf8').split('\n')) {
       if (!line.trim()) continue;
+      let ev: NucleiRowEvidence | null = null;
       try {
         const row = JSON.parse(line) as {
           'template-id'?: string; template_id?: string;
           info?: { name?: string; severity?: string; classification?: { 'cve-id'?: string[] } };
           host?: string; 'matched-at'?: string; type?: string;
         };
-        coverageRows.push({ type: row.type, 'matched-at': row['matched-at'] });
+        ev = { type: row.type, 'matched-at': row['matched-at'], stored: true };
+        evidence.push(ev);
         const tid = row['template-id'] ?? row.template_id ?? 'unknown';
         const cves = row.info?.classification?.['cve-id'];
         const targetHost = row.host ?? hostOf(row['matched-at']) ?? '';
@@ -274,24 +279,29 @@ Everything after '--' is passed to nuclei verbatim.`));
             : undefined,
         };
         for (const cveId of cveIdsFor(cves)) {
-          db.insertFinding({
-            tool: toolName,
-            target: targetHost,
-            category: tid,
-            severity: isSuspect ? 'info' : (row.info?.severity ?? null),
-            title: `${titlePrefix}${baseTitle}${reviewNote}`,
-            cve: cveId,
-            matched_at: row['matched-at'] ?? null,
-            meta,
-            needsReview: isSuspect,
-          }, now, runId);
-          count++;
+          // A failed insert (SQLITE_BUSY past busy_timeout) must not leave the host covered.
+          try {
+            db.insertFinding({
+              tool: toolName,
+              target: targetHost,
+              category: tid,
+              severity: isSuspect ? 'info' : (row.info?.severity ?? null),
+              title: `${titlePrefix}${baseTitle}${reviewNote}`,
+              cve: cveId,
+              matched_at: row['matched-at'] ?? null,
+              meta,
+              needsReview: isSuspect,
+            }, now, runId);
+            count++;
+          } catch (e) { ev.stored = false; throw e; }
         }
         if (isSuspect) reviewCount++;
       } catch { /* ignore */ }
     }
     const notes: string[] = [];
-    const covered = nucleiCoveredTargets(targets, coverageRows, { fromUrls, exitCode: r.code });
+    const elogLines = errorLog && fs.existsSync(errorLog) ? fs.readFileSync(errorLog, 'utf8').split('\n') : [];
+    const skipped = nucleiSkippedHosts(r.stderr, elogLines, Math.max(maxHostError, concurrency));
+    const covered = nucleiCoveredTargets(targets, evidence, { fromUrls, exitCode: r.code, skipped });
     if (covered.length && !db.recordCoverage(toolName, covered, now, runId)) {
       notes.push('tool_coverage write failed: scan.db busy');
     }
