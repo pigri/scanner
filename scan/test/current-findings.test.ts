@@ -125,3 +125,16 @@ describe('currentFindingsSelect (rules 1 and 2: sticky tools and tool_coverage)'
     expect(open(raw, false)).toMatchObject({ 'host.example/gone': 1, 'host.example/kept': 0 });
   });
 });
+
+describe('helpers', () => {
+  it('tableExists probes sqlite_master', () => {
+    const db = new Database(':memory:');
+    db.exec('CREATE TABLE a(x)');
+    expect(tableExists(db, 'a')).toBe(true);
+    expect(tableExists(db, 'b')).toBe(false);
+  });
+
+  it('STICKY_TOOLS lists the tools that never close', () => {
+    expect([...STICKY_TOOLS].sort()).toEqual(['manual', 'manual-triage', 'synthesize-eol']);
+  });
+});
