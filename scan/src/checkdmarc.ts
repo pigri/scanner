@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, resolveOutputPath } from './lib/runner.js';
 import { openDb } from './lib/db.js';
+import { checkdmarcCoveredTargets } from './lib/checkdmarc-coverage.js';
 
 interface CheckdmarcResult {
   domain?: string;
@@ -257,7 +258,12 @@ Wrapper flags (before '--'):
     }
   }
 
-  db.finishRun(runId, { targetsCount: rows.length, findingsCount: findings, at: new Date().toISOString() });
+  const coverageWritten = db.recordCoverage('checkdmarc', checkdmarcCoveredTargets(rows), now, runId);
+  db.finishRun(runId, {
+    targetsCount: rows.length, findingsCount: findings,
+    ...(coverageWritten ? {} : { notes: 'tool_coverage write failed: scan.db busy' }),
+    at: new Date().toISOString(),
+  });
   db.close();
   console.error(`  sqlite: ${path.resolve(opts.sqlite!)} (+${findings} findings across ${rows.length} domains, run #${runId})`);
 }
