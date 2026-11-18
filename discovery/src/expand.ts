@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { pool } from './lib/pool.js';
+import { writeFileAtomic } from './lib/atomic-write.js';
 import { zoneOf } from './lib/hostname.js';
 import { minePatterns } from './lib/patterns.js';
 import { permute } from './lib/permute.js';
@@ -65,7 +66,7 @@ function readLines(p: string): string[] {
 
 function mergeInto(file: string, add: Iterable<string>): void {
   const merged = new Set([...readLines(file), ...add]);
-  fs.writeFileSync(path.resolve(file), [...merged].sort().join('\n') + '\n');
+  writeFileAtomic(path.resolve(file), [...merged].sort().join('\n') + '\n');
 }
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));

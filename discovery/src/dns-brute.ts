@@ -4,6 +4,7 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { openDb } from './lib/db.js';
+import { writeFileAtomic } from './lib/atomic-write.js';
 import { digShort } from './lib/dns.js';
 import { wildcardProbeHosts, classifyWildcard } from './lib/wildcard.js';
 
@@ -200,7 +201,7 @@ async function main(): Promise<void> {
     );
     const before = existing.size;
     for (const h of sorted) existing.add(h);
-    fs.writeFileSync(mergePath, [...existing].sort().join('\n') + '\n');
+    writeFileAtomic(mergePath, [...existing].sort().join('\n') + '\n');
     console.error(`  merged into ${mergePath}: was ${before}, now ${existing.size} (+${existing.size - before})`);
   }
 }
