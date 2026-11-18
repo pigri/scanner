@@ -136,3 +136,17 @@ describe('targetAggSql open findings', () => {
     expect(aggOf(db, false, 'x')).toMatchObject({ high: 1, findings: 1, cves: 1 });
   });
 });
+
+describe('targetAggSql with partial runs', () => {
+  it('keeps the counts of a finding that a later partial run did not report', () => {
+    const db = newDb();
+    ins(db, { target: 'x', tool: 'nuclei', severity: 'critical', title: 'old', cve: 'CVE-1', seen_at: T1 });
+    ins(db, { target: 'x', tool: 'nuclei', severity: 'low', title: 'new', seen_at: T2 });
+    db.prepare("INSERT INTO partial_stamps (tool, seen_at, run_id) VALUES ('nuclei', ?, 7)").run(T2);
+    const rule = { coverage: true, partial: true };
+    const row = (db.prepare(targetAggSql(rule)).all() as Agg[]).find((r) => r.target === 'x');
+    expect(row).toMatchObject({ critical: 1, low: 1, findings: 2, cves: 1 });
+    const legacy = (db.prepare(targetAggSql({ coverage: true, partial: false })).all() as Agg[]).find((r) => r.target === 'x');
+    expect(legacy).toMatchObject({ critical: 0, low: 1, findings: 1 });
+  });
+});

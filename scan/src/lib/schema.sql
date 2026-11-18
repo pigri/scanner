@@ -346,3 +346,15 @@ CREATE TABLE IF NOT EXISTS tool_coverage (
   run_id  INTEGER,
   PRIMARY KEY (target, tool)
 );
+
+-- One row per (tool, seen_at, run_id) of a run that has written findings and not
+-- yet finished cleanly. Rule 3 of the closing rule ignores these stamps when it
+-- picks a pair's watermark, so a killed or failed run cannot close older findings
+-- it never reached. See Db.insertFinding / Db.finishRun.
+CREATE TABLE IF NOT EXISTS partial_stamps (
+  tool    TEXT NOT NULL,
+  seen_at TEXT NOT NULL,
+  run_id  INTEGER NOT NULL,
+  PRIMARY KEY (tool, seen_at, run_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_partial_stamps_run ON partial_stamps(run_id);

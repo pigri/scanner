@@ -138,3 +138,88 @@ describe('helpers', () => {
     expect([...STICKY_TOOLS].sort()).toEqual(['manual', 'manual-triage', 'synthesize-eol']);
   });
 });
+
+describe('currentFindingsSelect with partial:true (partial runs leave the watermark alone)', () => {
+  const T3 = '2026-11-10T13:00:00.000Z';
+  const fresh = () => openDb(':memory:').raw;
+  const add = (raw: Database.Database, title: string, at: string, tool = 'nuclei', target = 'host.example') =>
+    raw
+      .prepare(
+        `INSERT INTO findings (target, tool, severity, category, title, seen_at)
+         VALUES (?, ?, 'high', 'cve', ?, ?)`,
+      )
+      .run(target, tool, title, at);
+  const mark = (raw: Database.Database, at: string, tool = 'nuclei', run = 7) =>
+    raw.prepare('INSERT INTO partial_stamps (tool, seen_at, run_id) VALUES (?, ?, ?)').run(tool, at, run);
+  const sel = (raw: Database.Database, partial: boolean, coverage = false) =>
+    byTitle(raw.prepare(currentFindingsSelect({ coverage, partial })).all() as Row[]);
+
+  function oneComplete() {
+    const raw = fresh();
+    add(raw, 'old', T0);
+    add(raw, 'new', T2);
+    mark(raw, T2);
+    return raw;
+  }
+
+  it('a later partial row does not resolve an older row', () => {
+    const raw = oneComplete();
+    expect(sel(raw, true)).toEqual({ 'host.example/old': 0, 'host.example/new': 0 });
+  });
+
+  it('partial:false keeps the legacy result on the same data (control)', () => {
+    const raw = oneComplete();
+    expect(sel(raw, false)).toEqual({ 'host.example/old': 1, 'host.example/new': 0 });
+  });
+
+  it('keeps every row open when all of a pair are partial', () => {
+    const raw = fresh();
+    add(raw, 'a', T0);
+    add(raw, 'b', T2);
+    mark(raw, T0, 'nuclei', 6);
+    mark(raw, T2);
+    expect(sel(raw, true)).toEqual({ 'host.example/a': 0, 'host.example/b': 0 });
+  });
+
+  it('a later complete run resolves both older rows', () => {
+    const raw = oneComplete();
+    add(raw, 'latest', T3);
+    expect(sel(raw, true)).toEqual({ 'host.example/old': 1, 'host.example/new': 1, 'host.example/latest': 0 });
+  });
+
+  it("another tool's marker at the same stamp changes nothing", () => {
+    const raw = fresh();
+    add(raw, 'old', T0);
+    add(raw, 'new', T2);
+    mark(raw, T2, 'ffuf');
+    expect(sel(raw, true)).toEqual({ 'host.example/old': 1, 'host.example/new': 0 });
+  });
+
+  it('coverage wins over a marker', () => {
+    const raw = oneComplete();
+    raw.prepare('INSERT INTO tool_coverage (target, tool, seen_at, run_id) VALUES (?, ?, ?, NULL)').run('host.example', 'nuclei', T3);
+    expect(sel(raw, true, true)).toEqual({ 'host.example/old': 1, 'host.example/new': 1 });
+  });
+
+  it('scoped to one target gives the global answer for that target', () => {
+    const raw = oneComplete();
+    add(raw, 'solo', T0, 'nuclei', 'other.example');
+    const global = (raw.prepare(currentFindingsSelect({ coverage: false, partial: true })).all() as Row[])
+      .filter((r) => r.target === 'host.example');
+    const scoped = raw
+      .prepare(currentFindingsSelect({ coverage: false, partial: true, targetParam: '@t' }))
+      .all({ t: 'host.example' }) as Row[];
+    expect(byTitle(scoped)).toEqual(byTitle(global));
+    expect(byTitle(scoped)).toEqual({ 'host.example/old': 0, 'host.example/new': 0 });
+  });
+
+  it('keeps sticky tools open', () => {
+    const raw = fresh();
+    for (const tool of STICKY_TOOLS) {
+      add(raw, `${tool}-old`, T0, tool);
+      add(raw, `${tool}-new`, T2, tool);
+      mark(raw, T2, tool);
+    }
+    for (const v of Object.values(sel(raw, true))) expect(v).toBe(0);
+  });
+});

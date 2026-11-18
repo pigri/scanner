@@ -76,6 +76,7 @@ export function applyPrune(raw: Database.Database, runs: number[]): void {
     raw.prepare(`DELETE FROM findings WHERE run_id IN (${placeholders})`).run(...runs);
     deleteRiskScoresForRuns(raw, runs);
     raw.prepare(`DELETE FROM tool_coverage WHERE run_id IN (${placeholders})`).run(...runs);
+    raw.prepare(`DELETE FROM partial_stamps WHERE run_id IN (${placeholders})`).run(...runs);
     raw.prepare(`DELETE FROM runs WHERE id IN (${placeholders})`).run(...runs);
   }).immediate();
 }

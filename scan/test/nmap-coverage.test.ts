@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { openDb } from '../src/lib/db.js';
+import { currentFindingsSelect, findingsRuleOpts } from '../src/lib/current-findings.js';
 
 const scanDir = path.resolve(__dirname, '..');
 const tsx = path.join(scanDir, 'node_modules', '.bin', 'tsx');
@@ -150,5 +151,27 @@ describe('nmap vulners coverage', () => {
     const r = await runNmap({ seed: (db) => db.raw.exec("CREATE TRIGGER t_lock BEFORE INSERT ON findings BEGIN SELECT RAISE(ABORT, 'database is locked'); END") });
     expect(r.code).toBe(1);
     expect(coverage(r.db).cov).toEqual([]);
+  }, 100_000);
+});
+
+describe('nmap partial runs', () => {
+  const resolved = (dbPath: string, title: string) => {
+    const db = openDb(dbPath);
+    const rows = db.raw.prepare(currentFindingsSelect(findingsRuleOpts(db.raw))).all() as { title: string; resolved: number }[];
+    db.close();
+    return rows.find((r) => r.title === title)?.resolved;
+  };
+  const prior = (db: ReturnType<typeof openDb>) => priorFinding(8080)(db);
+  const title = `CVE-2020-0001 on nginx (${HOST}:8080)`;
+
+  it('keeps a prior finding open when nmap exits 1', async () => {
+    const r = await runNmap({ exit: 1, seed: prior });
+    expect(resolved(r.db, title)).toBe(0);
+  }, 100_000);
+
+  it('resolves the prior finding when nmap exits 0 (control)', async () => {
+    const r = await runNmap({ seed: prior });
+    expect(r.code, r.stderr).toBe(0);
+    expect(resolved(r.db, title)).toBe(1);
   }, 100_000);
 });

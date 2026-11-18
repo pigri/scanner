@@ -312,7 +312,14 @@ Everything after '--' is passed to nuclei verbatim.`));
     if (covered.length && !db.recordCoverage(toolName, covered, now, runId)) {
       notes.push('tool_coverage write failed: scan.db busy');
     }
-    db.finishRun(runId, { targetsCount: targets.length, findingsCount: count, ...(notes.length ? { notes: notes.join('; ') } : {}), at: new Date().toISOString() });
+    const notStored = evidence.filter((e) => !e.stored).length;
+    const why: string[] = [];
+    if (r.code !== 0) why.push(`exit ${r.code}`);
+    if (unparseable) why.push(`${unparseable} unparseable row(s)`);
+    if (skipped.size) why.push(`${skipped.size} skipped host(s)`);
+    if (notStored) why.push(`${notStored} row(s) not stored`);
+    if (why.length) notes.push(`partial run: ${why.join(', ')}`);
+    db.finishRun(runId, { targetsCount: targets.length, findingsCount: count, ...(notes.length ? { notes: notes.join('; ') } : {}), at: new Date().toISOString(), partial: why.length > 0 });
     db.close();
     console.error(
       `  sqlite: ${path.resolve(opts.sqlite!)} (+${count} findings, ${reviewCount} needs_review, run #${runId})`

@@ -207,11 +207,12 @@ export function runRetention(raw: Database.Database, opts: RetentionOpts): Reten
     // No row references these runs any more. Skip FK enforcement for the delete:
     // with no index on any child run_id, each deleted run would scan every child table.
     const delRun = raw.prepare('DELETE FROM runs WHERE id = ?');
+    const delMarks = tableExists(raw, 'partial_stamps') ? raw.prepare('DELETE FROM partial_stamps WHERE run_id = ?') : null;
     raw.pragma('foreign_keys = OFF');
     try {
       for (let i = 0; i < runs.length; i += chunk) {
         const part = runs.slice(i, i + chunk);
-        raw.transaction(() => { for (const id of part) delRun.run(id); }).immediate();
+        raw.transaction(() => { for (const id of part) { delMarks?.run(id); delRun.run(id); } }).immediate();
       }
     } finally {
       raw.pragma('foreign_keys = ON');
