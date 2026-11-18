@@ -69,8 +69,8 @@ function usage(): void {
 Prune superseded rows of findings, ports, http_probes and screenshots. A row is
 pruned only when its run is older than --older-than days AND the same target has
 a newer, finished run of the same tool with rows in the same table. A target's latest evidence per tool is never
-pruned, however old. A findings row that is still current (not resolved by a later
-conclusive run) and any sticky finding (synthesize-eol, manual) is never pruned. With --risk-older-than, risk_scores rows older than N days are
+pruned, however old. A findings row that is current under the shared rule (sticky tool,
+at or after its coverage stamp, or the newest of its tool for the target) is never pruned. With --risk-older-than, risk_scores rows older than N days are
 pruned too, except each target's latest row. A run and its output directory are removed only once no
 row in any table references the run. Other tables are never touched.
 
@@ -111,14 +111,10 @@ function planRows(raw: Database.Database, cutoffIso: string, riskCutoffIso: stri
   // A findings row that is current under the shared rule is never pruned, even
   // when a later run superseded its run. The watermark is keyed on the row's own
   // findings.tool (nmap runs write 'nmap-vulners'), while supersession stays
-  // keyed on runs.tool. Without a coverage row, today's pruning stands: only a
-  // coverage stamp or a sticky tool protects a row.
+  // keyed on runs.tool.
   const coverage = tableExists(raw, 'tool_coverage');
   raw.exec(`CREATE TEMP TABLE ret_wm(target TEXT NOT NULL, tool TEXT NOT NULL, w TEXT NOT NULL, PRIMARY KEY(target, tool)) WITHOUT ROWID;
     INSERT INTO temp.ret_wm ${watermarkSelect({ coverage })}`);
-  const stamped = coverage
-    ? ' OR EXISTS (SELECT 1 FROM tool_coverage c WHERE c.target = w.target AND c.tool = w.tool)'
-    : '';
   // Latest superseding run per (table, target, tool): newer = later started_at, then higher id.
   // Only a finished run with a parseable started_at may supersede, so a worker killed
   // mid-run never displaces the last complete evidence.
@@ -134,7 +130,7 @@ function planRows(raw: Database.Database, cutoffIso: string, riskCutoffIso: stri
       ) WHERE rn = 1
     `);
     const keepCurrent = t === 'findings'
-      ? ` AND NOT EXISTS (SELECT 1 FROM temp.ret_wm w WHERE w.target = t.target AND w.tool = t.tool AND t.seen_at >= w.w AND (w.w = ''${stamped}))`
+      ? ` AND NOT EXISTS (SELECT 1 FROM temp.ret_wm w WHERE w.target = t.target AND w.tool = t.tool AND t.seen_at >= w.w)`
       : '';
     raw.prepare(`
       INSERT INTO temp.ret_rows(tbl, id, run_id)

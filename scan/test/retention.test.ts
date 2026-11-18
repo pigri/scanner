@@ -14,8 +14,9 @@ const port = (db: Db, target: string, run: number, at: string, p = 80) =>
   db.insertPort({ target, ip: null, port: p, protocol: 'tcp', service: null, product: null, version: null, tunnel: null, extrainfo: null }, at, run);
 const probe = (raw: Database.Database, target: string, run: number | null) =>
   raw.prepare('INSERT INTO http_probes(target, url, seen_at, run_id) VALUES(?, ?, ?, ?)').run(target, `http://${target}/`, OLD, run);
+// Stamped with its run's started_at, as the tools do; OLD when there is no run.
 const finding = (raw: Database.Database, target: string, run: number | null) =>
-  raw.prepare("INSERT INTO findings(tool, target, title, seen_at, run_id) VALUES('nuclei', ?, 't', ?, ?)").run(target, OLD, run);
+  raw.prepare("INSERT INTO findings(tool, target, title, seen_at, run_id) VALUES('nuclei', ?, 't', COALESCE((SELECT started_at FROM runs WHERE id = ?), ?), ?)").run(target, run, OLD, run);
 const shot = (raw: Database.Database, target: string, run: number | null) =>
   raw.prepare("INSERT INTO screenshots(target, url, path, seen_at, run_id) VALUES(?, ?, 'p.png', ?, ?)").run(target, `http://${target}/`, OLD, run);
 const count = (raw: Database.Database, table: string, where = '1=1'): number =>
@@ -502,6 +503,17 @@ describe('runRetention keeps findings that are still current', () => {
     cover(db.raw, 'nuclei', 'a.example.com', F_OLD);
     expect(runRetention(db.raw, opts({ apply: false })).rows.findings).toBe(1);
     expect(count(db.raw, 'findings')).toBe(4);
+  });
+
+  it('keeps a row that is the newest of its tool when a tied later run supersedes its run', () => {
+    const db = openDb(':memory:');
+    const r1 = mk(db, 'nuclei', OLD);
+    const r2 = mk(db, 'nuclei', OLD);
+    const a = row(db.raw, 'nuclei', 'a.example.com', r1, F_OLD);
+    const b = row(db.raw, 'nuclei', 'a.example.com', r2, F_OLD);
+    const res = runRetention(db.raw, opts());
+    expect(res.rows.findings).toBe(0);
+    expect(ids(db.raw)).toEqual([a, b]);
   });
 
   it('without tool_coverage prunes exactly the same rows as with an empty one', () => {
