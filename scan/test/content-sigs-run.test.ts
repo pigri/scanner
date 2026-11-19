@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { openDb, type Db } from '../src/lib/db.js';
 import { currentFindingsSelect, findingsRuleOpts } from '../src/lib/current-findings.js';
-import { scanSigs, type LiveUrl } from '../src/content-sigs.js';
+import { scanSigs, finishSigsRun, type LiveUrl } from '../src/content-sigs.js';
 
 const AT = '2026-11-18T10:00:00.000Z';
 const A: LiveUrl = { target: 'a.example', seed: 'https://a.example' };
@@ -176,5 +176,54 @@ describe('scanSigs keeps an open finding open once the pair has a coverage row',
     seed(db, 'https://a.example/.env');
     await scan(db, [A], probes((_s, p) => (p === '.git/HEAD' ? gitHead : miss)), true, undefined, T2);
     expect(state(db)).toEqual({ f: 1, cov: [T2] });
+  });
+});
+
+describe('scanSigs marks the run partial for a host with rows and no coverage', () => {
+  const T1 = '2026-11-10T10:00:00.000Z';
+  const T2 = '2026-11-18T10:00:00.000Z';
+  const F = (db: Db, withCoverage = false) => {
+    db.insertFinding({ tool: 'content-sigs', target: 'a.example', category: 'exposure-.env', severity: 'high', title: 'F', matched_at: 'https://a.example/.env', meta: {} }, T1, null);
+    if (withCoverage) db.recordCoverage('content-sigs', ['a.example'], T1, null);
+  };
+  async function runAndFinish(db: Db, live: LiveUrl[], probeFn: ProbeFn) {
+    const runId = db.startRun('content-sigs', {}, T2);
+    const notes: string[] = [];
+    const stats = { incomplete: 0 };
+    const n = await scanSigs(db, live, { now: T2, runId, timeoutSec: 2, maxKb: 8, concurrency: 2, hostConcurrency: 4, write: () => {}, probeFn, notes, stats });
+    finishSigsRun(db, runId, live.length, n, stats, T2, notes);
+    return {
+      notes: (db.raw.prepare('SELECT notes FROM runs WHERE id = ?').get(runId) as { notes: string | null }).notes,
+      marks: db.raw.prepare('SELECT run_id FROM partial_stamps').all().length,
+      f: (db.raw.prepare(currentFindingsSelect(findingsRuleOpts(db.raw))).all() as { title: string; resolved: number }[]).find((r) => r.title === 'F')?.resolved,
+    };
+  }
+
+  it('keeps F open when the .env probe failed and .git/HEAD hit (case A)', async () => {
+    const db = openDb(':memory:');
+    F(db);
+    const r = await runAndFinish(db, [A], probes((_s, p) => (p === '.env' ? null : p === '.git/HEAD' ? gitHead : miss)));
+    expect(r).toEqual({ notes: 'partial run: 1 host(s) incomplete', marks: 1, f: 0 });
+  });
+
+  it('closes F through coverage for a covered host, and the run is not partial', async () => {
+    const db = openDb(':memory:');
+    F(db, true);
+    const r = await runAndFinish(db, [A], probes((_s, p) => (p === '.git/HEAD' ? gitHead : miss)));
+    expect(r).toEqual({ notes: null, marks: 0, f: 1 });
+  });
+
+  it('is not partial when every host with rows is covered', async () => {
+    const db = openDb(':memory:');
+    const r = await runAndFinish(db, [A, B], probes((_s, p) => (p === '.git/HEAD' ? gitHead : miss)));
+    expect(r.notes).toBeNull();
+    expect(r.marks).toBe(0);
+  });
+
+  it('is not partial for a host with no rows and no coverage', async () => {
+    const db = openDb(':memory:');
+    const r = await runAndFinish(db, [A], probes(() => null));
+    expect(r.notes).toBeNull();
+    expect(r.marks).toBe(0);
   });
 });

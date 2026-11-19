@@ -308,13 +308,13 @@ If `tool_coverage` or `partial_stamps` is missing (an old DB), the readers skip 
 
 | Tool (`findings.tool`) | Records coverage | Marks the run partial when |
 |---|---|---|
-| `nuclei`, `nuclei-url` | `nuclei-url` only (the `--from-urls` pass) | non-zero exit, unparseable row, skipped host, row not stored |
-| `nmap-vulners` | yes, per host (needs `--vulners`) | non-zero exit, timed-out host with rows, narrowed port scan |
+| `nuclei`, `nuclei-url` | `nuclei-url` only (the `--from-urls` pass) | non-zero exit, unparseable row, skipped host, row not stored, `nuclei-url` host with rows but no coverage |
+| `nmap-vulners` | yes, per host (needs `--vulners`) | non-zero exit, timed-out host with rows, narrowed port scan, `--vulners` host with rows but no coverage |
 | `version-match` | yes, per target (NVD lookup available, not a dry run) | insert skipped because the DB was busy, failed target |
 | `checkdmarc` | yes, per domain with a conclusive row | non-zero exit or an inconclusive row, with rows written |
 | `sslyze` | yes, per host whose scan and commands all completed | non-zero exit, incomplete host, ingest error |
 | `ffuf` | yes, per host | host with rows but no coverage |
-| `headers`, `content-sigs` | yes, per target | never (a crash is covered by the markers) |
+| `headers`, `content-sigs` | yes, per target | target with rows but no coverage (a crash is covered by the markers) |
 | `takeover`, `wpscan`, `testssl`, `kiterunner`, `secrets`, SMB wrappers | no | a failure signal of the wrapper with rows written (non-zero exit, unreadable output, skipped or unfetched target) |
 
 A tool that records no coverage keeps rule 3.
@@ -332,7 +332,7 @@ A tool that records no coverage keeps rule 3.
 
 The seed is one http(s) URL per target from `http_probes`, chosen the same way on every run: https before http, a default port before an explicit one, then the lowest URL. A finding with no readable `matched_at` counts as outside.
 
-A blocked pair records no coverage and its findings stay open. They stay open until a run examines their source again. For `ffuf`, a blocked host that stored rows also makes the run partial (`partial run: N host(s) incomplete`), so the run's own rows close nothing by rule 3 either: none of that host's ffuf findings close until its seed returns to their origin, or they are triaged by hand. The other three tools withhold coverage only, so a pair that was never covered still follows rule 3. The run note names the cause: `N target(s) not covered: an open finding came from a URL outside this run` (`nuclei-url`), `...from an origin outside this run` (the others), or `coverage skipped: cannot read open <tool> findings`.
+A blocked pair records no coverage and its findings stay open. They stay open until a run examines their source again. For `ffuf`, a blocked host that stored rows also makes the run partial (`partial run: N host(s) incomplete`), so the run's own rows close nothing by rule 3 either: none of that host's ffuf findings close until its seed returns to their origin, or they are triaged by hand. `nuclei-url`, `nmap-vulners`, `headers` and `content-sigs` do the same, so a host that stored rows without coverage closes nothing of its own. The run note names the cause: `N target(s) not covered: an open finding came from a URL outside this run` (`nuclei-url`), `...from an origin outside this run` (the others), or `coverage skipped: cannot read open <tool> findings`.
 
 **Same finding, two nuclei passes.** The host pass writes `tool='nuclei'` and the `--from-urls` pass writes `tool='nuclei-url'`. Every reader folds them into `nuclei`: a match both passes report is one finding, with summed occurrences, and it is open if either pass still has it open. Each pass keeps its own watermark. News and the digest key on the folded tool, so a URL-pass finding is not announced again as new.
 
