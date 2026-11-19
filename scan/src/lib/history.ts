@@ -10,7 +10,6 @@
 // (window.tool === key.tool, or window.tool === 'scan-all' which acts as a
 // wildcard for the orchestrator's umbrella row).
 import { keyOf, type Key } from './resolved.js';
-import { riskToolKey } from './nuclei-tool.js';
 
 export interface Observation {
   tool: string;
@@ -71,8 +70,13 @@ function assertChronological(windows: readonly ScanWindow[]): void {
   }
 }
 
-function windowAppliesToKey(w: ScanWindow, keyTool: string): boolean {
-  return w.tool === 'scan-all' || riskToolKey(w.tool) === riskToolKey(keyTool);
+function windowAppliesToKey(w: ScanWindow, tools: ReadonlySet<string>): boolean {
+  return w.tool === 'scan-all' || tools.has(w.tool);
+}
+
+/** The observations that make up one merged key, whichever pass saw them. */
+export function observationsForKey(observations: readonly Observation[], key: Key): Observation[] {
+  return observations.filter((o) => keyOf(o) === key);
 }
 
 function computeStatus(applicable: PresenceState[]): Status {
@@ -131,8 +135,9 @@ export function computeAttendance(
   const out: KeyAttendance[] = [];
   for (const [k, obsList] of byKey) {
     const first = obsList[0]!;
+    const tools = new Set(obsList.map((o) => o.tool));
     const presence: PresenceState[] = windows.map((w) =>
-      windowAppliesToKey(w, first.tool) ? 'absent' : 'n/a',
+      windowAppliesToKey(w, tools) ? 'absent' : 'n/a',
     );
     const severityPerWindow: (string | null)[] = windows.map(() => null);
     let firstSeen = first.seen_at;
@@ -145,7 +150,7 @@ export function computeAttendance(
       worstSeverity = worse(worstSeverity, o.severity);
       for (let i = 0; i < windows.length; i++) {
         const w = windows[i]!;
-        if (!windowAppliesToKey(w, first.tool)) continue;
+        if (!windowAppliesToKey(w, tools)) continue;
         if (o.seen_at >= w.startedAt && o.seen_at <= w.finishedAt) {
           presence[i] = 'present';
           severityPerWindow[i] = worse(severityPerWindow[i]!, o.severity);

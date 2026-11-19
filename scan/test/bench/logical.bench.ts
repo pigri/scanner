@@ -4,6 +4,7 @@
 // `bench-`: the file is read, and the second suite adds rows to it.
 // The `before` queries are the SQL as it was before the change, inlined.
 import { describe, bench, afterAll } from 'vitest';
+import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { currentFindingsSelect, currentRowsFrom, tableExists, watermarkSelect } from '../../src/lib/current-findings.js';
@@ -11,8 +12,20 @@ import { buildNewsSql, newSinceSql } from '../../src/lib/news-sql.js';
 import { targetAggSql } from '../../src/lib/target-agg.js';
 
 const dbPath = process.env.BENCH_DB;
-const enabled = !!dbPath && path.basename(dbPath).startsWith('bench-');
-if (dbPath && !enabled) throw new Error(`BENCH_DB basename must start with "bench-": ${dbPath}`);
+// The real path is checked: a `bench-x.db` symlink to a live db must not pass.
+let enabled = false;
+if (dbPath) {
+  let real: string;
+  try {
+    real = fs.realpathSync(dbPath);
+  } catch {
+    throw new Error(`BENCH_DB cannot be resolved: ${dbPath}`);
+  }
+  if (!path.basename(real).startsWith('bench-')) {
+    throw new Error(`BENCH_DB must resolve to a file whose basename starts with "bench-": ${real}`);
+  }
+  enabled = true;
+}
 
 const SAMPLES = { iterations: 10, warmupIterations: 1, time: 1, warmupTime: 1 };
 

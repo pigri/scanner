@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   computeAttendance,
+  observationsForKey,
   type Observation,
   type ScanWindow,
 } from '../src/lib/history.js';
@@ -233,5 +234,48 @@ describe('computeAttendance — nuclei passes', () => {
     );
     expect(rows).toHaveLength(1);
     expect(rows[0]!.presence).toEqual(['present', 'present']);
+  });
+
+  it('a host-pass-only key is n/a, not absent, in URL-pass windows', () => {
+    const ws = [
+      w('nuclei', '2026-08-01T00:00:00.000Z', '2026-08-01T01:00:00.000Z'),
+      w('nuclei-url', '2026-08-05T00:00:00.000Z', '2026-08-05T01:00:00.000Z'),
+      w('nuclei', '2026-08-10T00:00:00.000Z', '2026-08-10T01:00:00.000Z'),
+      w('nuclei-url', '2026-08-15T00:00:00.000Z', '2026-08-15T01:00:00.000Z'),
+    ];
+    const [row] = computeAttendance(
+      [
+        obs({ title: 'x', tool: 'nuclei', seen_at: '2026-08-01T00:30:00.000Z' }),
+        obs({ title: 'x', tool: 'nuclei', seen_at: '2026-08-10T00:30:00.000Z' }),
+      ],
+      ws,
+    );
+    expect(row!.presence).toEqual(['present', 'n/a', 'present', 'n/a']);
+    expect(row!.status).toBe('persistent');
+    expect(row!.flapping).toBe(false);
+  });
+
+  it('a key seen by both passes sees the windows of both', () => {
+    const ws = [
+      w('nuclei', '2026-08-01T00:00:00.000Z', '2026-08-01T01:00:00.000Z'),
+      w('nuclei-url', '2026-08-05T00:00:00.000Z', '2026-08-05T01:00:00.000Z'),
+    ];
+    const [row] = computeAttendance(
+      [
+        obs({ title: 'x', tool: 'nuclei', seen_at: '2026-08-01T00:30:00.000Z' }),
+        obs({ title: 'x', tool: 'nuclei-url', seen_at: '2026-08-01T00:40:00.000Z' }),
+      ],
+      ws,
+    );
+    expect(row!.presence).toEqual(['present', 'absent']);
+  });
+
+  it('observationsForKey keeps both passes of a merged key', () => {
+    const a = obs({ title: 'x', tool: 'nuclei', seen_at: '2026-08-01T00:30:00.000Z' });
+    const b = obs({ title: 'x', tool: 'nuclei-url', seen_at: '2026-08-02T00:30:00.000Z' });
+    const c = obs({ title: 'y', tool: 'nuclei', seen_at: '2026-08-03T00:30:00.000Z' });
+    const rows = computeAttendance([a, b, c], [w('nuclei', '2026-08-01T00:00:00.000Z', '2026-08-04T00:00:00.000Z')]);
+    const row = rows.find((r) => r.title === 'x');
+    expect(observationsForKey([a, b, c], row!.key)).toEqual([a, b]);
   });
 });
