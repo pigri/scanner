@@ -56,14 +56,14 @@ function findingsBefore(coverage: boolean): string {
          SELECT target, tool, severity, category, title, MAX(cve) cve,
                 MIN(seen_at) first_seen, MAX(seen_at) last_seen, COUNT(*) occ
          FROM findings GROUP BY target, tool, severity, category, title),
-       wm AS MATERIALIZED (${watermarkSelect({ coverage })})
+       wm AS MATERIALIZED (${watermarkSelect({ coverage, partial: false })})
        SELECT l.target, l.tool, l.severity, l.category, l.title, l.cve,
               l.first_seen, l.last_seen, l.occ,
               CASE WHEN l.last_seen < wm.w THEN 1 ELSE 0 END resolved
        FROM logical l JOIN wm ON wm.target = l.target AND wm.tool = l.tool`;
 }
 function targetAggBefore(coverage: boolean): string {
-  return `WITH wm AS MATERIALIZED (${watermarkSelect({ coverage })}),
+  return `WITH wm AS MATERIALIZED (${watermarkSelect({ coverage, partial: false })}),
      sev AS MATERIALIZED (
        SELECT l.target target,
          SUM(l.severity='critical') critical, SUM(l.severity='high') high,
@@ -107,8 +107,8 @@ function cloneHalf(): void {
 
 function registerCases(label: string, setup?: () => void): void {
   const pairs: [string, () => string, () => string, unknown[]][] = [
-    ['findings list', () => findingsBefore(coverage), () => currentFindingsSelect({ coverage }), []],
-    ['target counts', () => targetAggBefore(coverage), () => targetAggSql(coverage), []],
+    ['findings list', () => findingsBefore(coverage), () => currentFindingsSelect({ coverage, partial: false }), []],
+    ['target counts', () => targetAggBefore(coverage), () => targetAggSql({ coverage, partial: false }), []],
     ['news rows', () => newsRowsBefore, () => buildNewsSql({}).rows.sql, []],
     ['news days', () => newsDaysBefore, () => buildNewsSql({}).days.sql, []],
     ['new since', () => newSinceBefore, () => newSinceSql({}), [since]],
