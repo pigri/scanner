@@ -221,8 +221,13 @@ Wrapper flags (before '--'):
     if (!db.recordCoverage('nmap-vulners', covered, now, runId)) {
       notes.push('tool_coverage write failed: scan.db busy');
     }
-    if (r.code !== 0) notes.push(`partial run: exit ${r.code}`);
-    db.finishRun(runId, { targetsCount: targets.length, findingsCount: totalPorts + cveFindings, ...(notes.length ? { notes: notes.join('; ') } : {}), at: new Date().toISOString(), partial: r.code !== 0 });
+    const timedOut = hosts.filter((h) => h.timedOut).length;
+    const why: string[] = [];
+    if (r.code !== 0) why.push(`exit ${r.code}`);
+    if (timedOut > 0) why.push(`${timedOut} timed-out host(s)`);
+    if (narrowed) why.push('narrowed port scan');
+    if (why.length) notes.push(`partial run: ${why.join(', ')}`);
+    db.finishRun(runId, { targetsCount: targets.length, findingsCount: totalPorts + cveFindings, ...(notes.length ? { notes: notes.join('; ') } : {}), at: new Date().toISOString(), partial: why.length > 0 });
     db.close();
     console.error(`  sqlite: ${path.resolve(opts.sqlite!)} (+${totalPorts} ports${cveFindings ? `, +${cveFindings} CVE findings` : ''}, run #${runId})`);
   }

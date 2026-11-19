@@ -618,6 +618,12 @@ describe('findings stay open after a partial run', () => {
     expect(d.findingsSummary).toEqual({ open: 2, resolved: 0 });
   }, 40_000);
 
+  it('counts both rows in /api/targets', async () => {
+    const base = await startUi(seedPartial(false));
+    const t = (await (await fetch(`${base}/api/targets?limit=100`)).json()) as any;
+    expect(t.rows.find((r: any) => r.target === 'host.example')).toMatchObject({ high: 2, findings: 2 });
+  }, 40_000);
+
   it('answers 200 with the legacy rule when partial_stamps is missing', async () => {
     const base = await startUi(seedPartial(true));
     const l = await fetch(`${base}/api/findings?status=open&limit=100`);

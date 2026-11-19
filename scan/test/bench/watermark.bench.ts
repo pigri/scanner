@@ -2,6 +2,7 @@
 //   BENCH_DB=/path/to/bench-scan-copy.db npx vitest bench test/bench/watermark.bench.ts
 // Skipped when BENCH_DB is unset. The file must be a COPY: its basename has to start
 // with `bench-`, because the setup writes partial_stamps rows into it.
+import fs from 'node:fs';
 import path from 'node:path';
 import { bench, describe } from 'vitest';
 import { openDb } from '../../src/lib/db.js';
@@ -9,7 +10,12 @@ import { currentFindingRowsSelect, currentFindingsSelect, watermarkSelect } from
 import { targetAggSql } from '../../src/lib/target-agg.js';
 
 const file = process.env.BENCH_DB;
-if (file && !path.basename(file).startsWith('bench-')) throw new Error(`BENCH_DB must be a copy named bench-*: ${file}`);
+// Judge the resolved file, so a bench-named symlink to a live DB is refused.
+if (file) {
+  let real: string;
+  try { real = fs.realpathSync(file); } catch (e) { throw new Error(`BENCH_DB cannot be resolved: ${file}: ${e instanceof Error ? e.message : String(e)}`); }
+  if (!path.basename(real).startsWith('bench-')) throw new Error(`BENCH_DB must be a copy named bench-*: ${real}`);
+}
 
 type Case = 'before' | 'empty' | 'realistic' | 'stress';
 const SEVEN = 7;
