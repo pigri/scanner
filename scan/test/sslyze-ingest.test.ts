@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { openDb } from '../src/lib/db.js';
 import { ingestSslyzeOutput, ingestAndFinishRun, SSLYZE_READ_COMMANDS, SSLYZE_COVERAGE_COMMANDS, SSLYZE_SCAN_FLAGS } from '../src/lib/sslyze-ingest.js';
+import { currentFindingsSelect } from '../src/lib/current-findings.js';
 
 const NOW = '2026-01-01T00:00:00.000Z';
 
@@ -321,5 +322,77 @@ describe('ingestAndFinishRun', () => {
     expect(close).toHaveBeenCalledTimes(1);
     expect(log).toHaveBeenCalledTimes(1);
     expect(String(log.mock.calls[0]?.[0])).not.toContain('/secret/path');
+  });
+});
+
+describe('ingestAndFinishRun partial runs', () => {
+  const text = (): string => toText({ server_scan_results: [good()] });
+  const T0 = '2025-12-01T00:00:00.000Z';
+  const errored = { status: 'ERROR', error_reason: 'CONNECTIVITY_ISSUE', result: null };
+  const withTls10 = (over: Record<string, unknown> = {}) => ({
+    ...good('h.example.com'),
+    scan_result: allCommands({ tls_1_0_cipher_suites: done({ is_tls_version_supported: true }), ...over }),
+  });
+  const without = (over: Record<string, unknown> = {}) => ({
+    ...good('h.example.com'),
+    scan_result: allCommands({ tls_1_1_cipher_suites: done({ is_tls_version_supported: true }), ...over }),
+  });
+  const tls10Resolved = (db: ReturnType<typeof openDb>) =>
+    (db.raw.prepare(currentFindingsSelect({ coverage: true, partial: true })).all() as Array<{ category: string; resolved: number }>)
+      .filter((r) => r.category === 'tls-1.0').map((r) => r.resolved);
+  const finishArg = (db: ReturnType<typeof openDb>) => {
+    const finish = vi.spyOn(db, 'finishRun');
+    vi.spyOn(db, 'close').mockImplementation(() => {});
+    return finish;
+  };
+  const firstRun = () => {
+    const db = openDb(':memory:');
+    const id = db.startRun('sslyze', {}, T0);
+    ingestSslyzeOutput(db, toText({ server_scan_results: [withTls10({ heartbleed: errored })] }), T0, id);
+    db.finishRun(id, { at: T0 });
+    return db;
+  };
+
+  it('keeps an older finding open after a run whose host had a command error', () => {
+    const db = firstRun();
+    const id = db.startRun('sslyze', {}, NOW);
+    finishArg(db);
+    ingestAndFinishRun(db, () => toText({ server_scan_results: [without({ heartbleed: errored })] }), NOW, id, 1);
+    expect(tls10Resolved(db)).toEqual([0]);
+    expect((db.raw.prepare('SELECT notes FROM runs WHERE id = ?').get(id) as { notes: string }).notes).toContain('partial run: 1 host(s) incomplete');
+  });
+
+  it('a clean run still closes an older finding', () => {
+    const db = firstRun();
+    const id = db.startRun('sslyze', {}, NOW);
+    const finish = finishArg(db);
+    ingestAndFinishRun(db, () => toText({ server_scan_results: [without()] }), NOW, id, 1);
+    expect(tls10Resolved(db)).toEqual([1]);
+    expect(finish.mock.calls[0]![1].partial ?? false).toBe(false);
+  });
+
+  it('is partial on a non-zero exit when rows were written', () => {
+    const { db, runId } = setup();
+    const finish = finishArg(db);
+    ingestAndFinishRun(db, () => text(), NOW, runId, 1, 1);
+    expect(finish).toHaveBeenCalledWith(runId, expect.objectContaining({ partial: true, notes: 'partial run: exit 1' }));
+  });
+
+  it('is not partial on a non-zero exit when no rows were written', () => {
+    const { db, runId } = setup();
+    const finish = finishArg(db);
+    ingestAndFinishRun(db, () => toText({ server_scan_results: [] }), NOW, runId, 1, 1);
+    expect(finish.mock.calls[0]![1].partial ?? false).toBe(false);
+  });
+
+  it('is partial when ingest throws after it wrote rows', () => {
+    const { db, runId } = setup();
+    const real = db.insertFinding.bind(db);
+    let n = 0;
+    vi.spyOn(db, 'insertFinding').mockImplementation((row, at, id) => { if (++n > 1) throw new Error('boom'); return real(row, at, id); });
+    const finish = finishArg(db);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(() => ingestAndFinishRun(db, () => text(), NOW, runId, 1)).toThrow('boom');
+    expect(finish).toHaveBeenCalledWith(runId, expect.objectContaining({ partial: true, notes: 'partial run: ingest failed' }));
   });
 });

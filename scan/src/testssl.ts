@@ -5,6 +5,7 @@ import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, resolveO
 import { normalizeTestsslFinding } from './lib/testssl-parse.js';
 import { parseCertificates } from './lib/testssl-cert.js';
 import { openDb, type Db } from './lib/db.js';
+import { finishWithWhy, partialReasons, rowsAtRisk } from './lib/run-partial.js';
 
 interface TestsslFinding { id?: string; severity?: string; finding?: string; cve?: string; port?: string }
 
@@ -119,7 +120,7 @@ Anything after '--' is passed to testssl.sh verbatim.`));
   const outFile = resolveOutputPath(opts, runId, 'testssl.jsonl');
   const wstream = fs.createWriteStream(outFile);
   const start = Date.now();
-  let done = 0, findings = 0;
+  let done = 0, findings = 0, incomplete = 0;
 
   console.error(`testssl: ${targets.length} hosts, concurrency=${concurrency}, timeout=${timeoutMs}ms`);
 
@@ -131,6 +132,8 @@ Anything after '--' is passed to testssl.sh verbatim.`));
       `testssl-${host.replace(/[^a-z0-9._-]+/gi, '_')}.json`
     );
     const res = await scanOne(testsslBin, host, tmp, passthroughForTool, timeoutMs);
+    const rowsBefore = findings;
+    try {
     if (res.ok) {
       wstream.write(JSON.stringify({ target: host, findings: res.findings }) + '\n');
       if (db && Array.isArray(res.findings)) {
@@ -159,6 +162,10 @@ Anything after '--' is passed to testssl.sh verbatim.`));
     } else {
       wstream.write(JSON.stringify({ target: host, error: res.stderr || 'no output', code: res.code }) + '\n');
     }
+    } catch (e: unknown) {
+      if (rowsAtRisk(findings - rowsBefore, true)) incomplete++;
+      console.error(`\n[testssl] ${host}: ${e instanceof Error ? e.message : String(e)}`);
+    }
     done++;
     const rate = done / ((Date.now() - start) / 1000);
     if (done % 5 === 0 || done === targets.length) {
@@ -171,7 +178,7 @@ Anything after '--' is passed to testssl.sh verbatim.`));
   const elapsed = ((Date.now() - start) / 1000).toFixed(1);
   console.error(`testssl done in ${elapsed}s: ${done}/${targets.length}. Output: ${outFile}`);
   if (db && runId !== null) {
-    db.finishRun(runId, { targetsCount: targets.length, findingsCount: findings, at: new Date().toISOString() });
+    finishWithWhy(db, runId, { targetsCount: targets.length, findingsCount: findings, at: new Date().toISOString() }, partialReasons([[incomplete, 'host(s) incomplete']]));
     db.close();
     console.error(`  sqlite: ${path.resolve(opts.sqlite!)} (+${findings} findings, run #${runId})`);
   }

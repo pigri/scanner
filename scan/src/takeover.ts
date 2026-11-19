@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, writeLines, resolveOutputPath } from './lib/runner.js';
 import { openDb } from './lib/db.js';
+import { exitFailed, exitReason, finishWithWhy, partialReasons, rowsAtRisk } from './lib/run-partial.js';
 
 async function main(): Promise<void> {
   const opts = parseCommonCli(process.argv);
@@ -34,6 +35,7 @@ Runs nuclei with just the subdomain-takeover templates. Fast, cheap, high-signal
 
   if (db && runId !== null && fs.existsSync(outFile)) {
     let count = 0;
+    let bad = 0;
     for (const line of fs.readFileSync(outFile, 'utf8').split('\n')) {
       if (!line.trim()) continue;
       try {
@@ -52,9 +54,13 @@ Runs nuclei with just the subdomain-takeover templates. Fast, cheap, high-signal
           meta: row,
         }, now, runId);
         count++;
-      } catch { /* ignore */ }
+      } catch { bad++; }
     }
-    db.finishRun(runId, { targetsCount: targets.length, findingsCount: count, at: new Date().toISOString() });
+    const failed = exitFailed(r.code) || bad > 0;
+    const why = rowsAtRisk(count, failed)
+      ? partialReasons([[exitFailed(r.code), exitReason(r.code)], [bad, 'unreadable or unsaved line(s)']])
+      : [];
+    finishWithWhy(db, runId, { targetsCount: targets.length, findingsCount: count, at: new Date().toISOString() }, why);
     db.close();
     console.error(`  sqlite: ${path.resolve(opts.sqlite!)} (+${count} findings, run #${runId})`);
   }

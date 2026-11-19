@@ -5,6 +5,7 @@ import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, resolveOutputPath } from './lib/runner.js';
 import { openDb } from './lib/db.js';
 import { smbLiveTargets } from './lib/smb-live.js';
+import { exitFailed, finishWithWhy, partialReasons, rowsAtRisk } from './lib/run-partial.js';
 
 async function main(): Promise<void> {
   const opts = parseCommonCli(process.argv);
@@ -46,6 +47,7 @@ Common passthrough:
   const outFile = resolveOutputPath(opts, runId, 'smbmap.log');
   const stream = fs.createWriteStream(outFile);
   let findings = 0;
+  let incomplete = 0;
   for (const host of targets) {
     const args = ['-H', host, ...passthrough];
     console.error(`smbmap -H ${host}`);
@@ -60,12 +62,13 @@ Common passthrough:
         meta: { stdout: r.stdout.slice(0, 4000), code: r.code },
       }, now, runId);
       findings++;
+      if (rowsAtRisk(1, exitFailed(r.code))) incomplete++;
     }
   }
   await new Promise<void>((r) => stream.end(() => r()));
   console.error(`done. Output: ${outFile}`);
   if (db && runId !== null) {
-    db.finishRun(runId, { targetsCount: targets.length, findingsCount: findings, at: new Date().toISOString() });
+    finishWithWhy(db, runId, { targetsCount: targets.length, findingsCount: findings, at: new Date().toISOString() }, partialReasons([[incomplete, 'host(s) exited non-zero']]));
     db.close();
   }
 }

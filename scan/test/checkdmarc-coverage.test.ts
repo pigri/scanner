@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { openDb } from '../src/lib/db.js';
 import { ingestCheckdmarcRows } from '../src/lib/checkdmarc-ingest.js';
+import { currentFindingsSelect } from '../src/lib/current-findings.js';
 import { checkdmarcRowConclusive, checkdmarcCoveredTargets } from '../src/lib/checkdmarc-coverage.js';
 
 const clean = (domain: string) => ({
@@ -103,5 +104,51 @@ describe('ingestCheckdmarcRows', () => {
     db.raw.exec("CREATE TRIGGER t BEFORE INSERT ON findings BEGIN SELECT RAISE(ABORT, 'database is locked'); END");
     await expect(ingestCheckdmarcRows(db, [weak], NOW, runId, noSpf)).rejects.toThrow(/locked/);
     expect(coverage(db)).toEqual([]);
+  });
+
+  describe('partial runs', () => {
+    const NOW2 = '2026-01-02T00:00:00.000Z';
+    const OPEN = { coverage: true, partial: true } as const;
+    const slowMissing = { domain: 'slow.example.com', dmarc: { record: null, error: 'The resolution lifetime expired after 5.0 seconds' } };
+    const slowPolicy = { domain: 'slow.example.com', dmarc: { record: 'v=DMARC1; p=none', valid: true, error: 'timed out' }, spf: { record: 'v=spf1 -all', valid: true }, mx: { hosts: [{ hostname: 'mx.example.com' }] } };
+    const okPolicy = { domain: 'slow.example.com', dnssec: true, dmarc: { record: 'v=DMARC1; p=none', valid: true }, spf: { record: 'v=spf1 -all', valid: true }, mx: { hosts: [{ hostname: 'mx.example.com' }] } };
+    const missingResolved = (db: ReturnType<typeof openDb>) =>
+      (db.raw.prepare(currentFindingsSelect(OPEN)).all() as Array<{ title: string; resolved: number }>)
+        .filter((r) => r.title.startsWith('DMARC missing')).map((r) => r.resolved);
+    const notes = (db: ReturnType<typeof openDb>, id: number) =>
+      (db.raw.prepare('SELECT notes FROM runs WHERE id = ?').get(id) as { notes: string | null }).notes ?? '';
+
+    it('keeps an older finding open after a run with a resolver failure', async () => {
+      const db = openDb(':memory:');
+      await ingestCheckdmarcRows(db, [slowMissing], NOW, db.startRun('checkdmarc', {}, NOW), noSpf);
+      const id = db.startRun('checkdmarc', {}, NOW2);
+      await ingestCheckdmarcRows(db, [slowPolicy], NOW2, id, noSpf);
+      expect(missingResolved(db)).toEqual([0]);
+      expect(notes(db, id)).toContain('partial run: 1 inconclusive row(s)');
+    });
+
+    it('keeps the run markers after a non-zero exit', async () => {
+      const db = openDb(':memory:');
+      const id = db.startRun('checkdmarc', {}, NOW2);
+      await ingestCheckdmarcRows(db, [okPolicy], NOW2, id, noSpf, 1);
+      expect(db.raw.prepare('SELECT COUNT(*) n FROM partial_stamps').get()).toEqual({ n: 1 });
+      expect(notes(db, id)).toContain('partial run: exit 1');
+    });
+
+    it('a clean run still closes an older finding', async () => {
+      const db = openDb(':memory:');
+      await ingestCheckdmarcRows(db, [slowMissing], NOW, db.startRun('checkdmarc', {}, NOW), noSpf);
+      const id = db.startRun('checkdmarc', {}, NOW2);
+      await ingestCheckdmarcRows(db, [okPolicy], NOW2, id, noSpf, 0);
+      expect(missingResolved(db)).toEqual([1]);
+      expect(notes(db, id)).not.toContain('partial');
+      expect(db.raw.prepare('SELECT COUNT(*) n FROM partial_stamps WHERE run_id = ?').get(id)).toEqual({ n: 0 });
+    });
+
+    it('a clean run with zero findings is complete', async () => {
+      const { db, runId } = setup();
+      await ingestCheckdmarcRows(db, [], NOW, runId, noSpf, 0);
+      expect(notes(db, runId)).not.toContain('partial');
+    });
   });
 });

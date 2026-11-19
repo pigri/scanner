@@ -6,6 +6,7 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { openDb, type Db } from '../src/lib/db.js';
 import { NvdWriter, type VulnLookup } from '../src/lib/nvd-db.js';
 import { runVersionMatch } from '../src/version-match.js';
+import { currentFindingsSelect } from '../src/lib/current-findings.js';
 
 const dirs: string[] = [];
 function tmpDir(): string {
@@ -276,5 +277,71 @@ describe('runVersionMatch', () => {
     await runVersionMatch({ db, targets: ['b.example'], nvdDb: buildNvd('2026-11-01T00:00:00.000Z'), maxAgeDays: 14, dryRun: false, now: NOW });
     expect(findings(db).some((f) => f.title.includes('2.4.7'))).toBe(false);
     expect(findings(db)).toHaveLength(1);
+  });
+});
+
+describe('runVersionMatch partial runs', () => {
+  const T0 = '2026-10-20T00:00:00.000Z';
+  const OLD = 'CVE-2010-0001';
+  const OPEN = { coverage: true, partial: true } as const;
+  const oldResolved = (db: Db) =>
+    (db.raw.prepare(currentFindingsSelect(OPEN)).all() as Array<{ title: string; resolved: number }>)
+      .filter((r) => r.title.startsWith(OLD)).map((r) => r.resolved);
+  const lastNotes = (db: Db) => (db.raw.prepare("SELECT notes FROM runs WHERE tool = 'version-match' ORDER BY id DESC LIMIT 1").get() as { notes: string | null }).notes ?? '';
+  const withOld = () => {
+    const db = openDb(':memory:');
+    seed(db);
+    db.insertFinding({ tool: 'version-match', target: 'a.example', category: 'cve', severity: 'high', title: `${OLD} on Old 1.0 (version match)`, cve: OLD }, T0, null);
+    return db;
+  };
+  const nvd = () => buildNvd('2026-11-01T00:00:00.000Z');
+  const flaky = async () => {
+    const { openNvdLookup } = await import('../src/lib/nvd-db.js');
+    const real = openNvdLookup(nvd())!;
+    const lookup: VulnLookup = {
+      snapshotAt: real.snapshotAt,
+      cpeMatches: (v, p) => { if (p === 'openssl') throw new Error('boom'); return real.cpeMatches(v, p); },
+      cveMeta: (ids) => real.cveMeta(ids),
+    };
+    return lookup;
+  };
+
+  it('keeps an older finding open after a target failed midway', async () => {
+    const db = withOld();
+    await runVersionMatch({ db, targets: ['a.example'], nvdDb: nvd(), lookup: await flaky(), maxAgeDays: 14, dryRun: false, now: NOW, log: () => {} });
+    expect(findings(db).length).toBeGreaterThan(0);
+    expect(oldResolved(db)).toEqual([0]);
+    expect(lastNotes(db)).toContain('partial run: 1 target(s) failed');
+  });
+
+  it('keeps an older finding open after a finding was skipped as busy', async () => {
+    const db = withOld();
+    const real = db.insertFinding.bind(db);
+    let n = 0;
+    db.insertFinding = (row, at, id) => { if (++n === 2) throw Object.assign(new Error('locked'), { code: 'SQLITE_BUSY' }); return real(row, at, id); };
+    await runVersionMatch({ db, targets: ['a.example'], nvdDb: nvd(), maxAgeDays: 14, dryRun: false, now: NOW, log: () => {} });
+    db.insertFinding = real;
+    expect(oldResolved(db)).toEqual([0]);
+    expect(lastNotes(db)).toContain('partial run: 1 finding(s) skipped: scan.db busy');
+  });
+
+  it('notes an unavailable nvd.db as a partial run', async () => {
+    const db = withOld();
+    await runVersionMatch({ db, targets: ['a.example'], nvdDb: '/nonexistent/nvd.db', maxAgeDays: 14, dryRun: false, now: NOW, log: () => {} });
+    expect(lastNotes(db)).toContain('partial run: nvd.db unavailable');
+  });
+
+  it('a clean run still closes an older finding', async () => {
+    const db = withOld();
+    await runVersionMatch({ db, targets: ['a.example'], nvdDb: nvd(), maxAgeDays: 14, dryRun: false, now: NOW, log: () => {} });
+    expect(oldResolved(db)).toEqual([1]);
+    expect(lastNotes(db)).not.toContain('partial');
+  });
+
+  it('a stale snapshot alone is not partial', async () => {
+    const db = withOld();
+    await runVersionMatch({ db, targets: ['a.example'], nvdDb: buildNvd('2026-01-01T00:00:00.000Z'), maxAgeDays: 14, dryRun: false, now: NOW, log: () => {} });
+    expect(lastNotes(db)).toContain('older than');
+    expect(lastNotes(db)).not.toContain('partial');
   });
 });

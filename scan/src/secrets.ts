@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, resolveOutputPath } from './lib/runner.js';
 import { openDb, type Db } from './lib/db.js';
+import { exitFailed, finishWithWhy, partialReasons, rowsAtRisk } from './lib/run-partial.js';
 
 // Extensions we bother fetching. Anything not on this list either has no
 // server-embedded secrets (images/fonts/video/audio) or is untrusted binary.
@@ -219,6 +220,7 @@ Wrapper flags (before '--'):
   };
 
   let findings = 0;
+  let badHits = 0;
 
   // --- gitleaks pass -----------------------------------------------------
   const glFile = resolveOutputPath(opts, runId, 'gitleaks.json');
@@ -303,14 +305,22 @@ Wrapper flags (before '--'):
           },
         }, now, runId);
         findings++;
-      } catch { /* ignore */ }
+      } catch { badHits++; }
     }
   }
 
   console.error(`secrets done: +${findings} finding(s) across ${fetched} file(s) (gitleaks + trufflehog)`);
 
   if (db && runId !== null) {
-    db.finishRun(runId, { targetsCount: targets.length, findingsCount: findings, at: new Date().toISOString() });
+    const why = rowsAtRisk(findings, exitFailed(gl.code) || exitFailed(th.code) || badHits > 0 || fetched < tasks.length)
+      ? partialReasons([
+        [exitFailed(gl.code), `gitleaks exit ${gl.code}`],
+        [exitFailed(th.code), `trufflehog exit ${th.code}`],
+        [badHits, 'trufflehog hit(s) unsaved'],
+        [tasks.length - fetched, 'URL(s) not fetched'],
+      ])
+      : [];
+    finishWithWhy(db, runId, { targetsCount: targets.length, findingsCount: findings, at: new Date().toISOString() }, why);
     db.close();
     console.error(`  sqlite: ${path.resolve(opts.sqlite!)} (+${findings} findings, run #${runId})`);
   }

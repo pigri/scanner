@@ -11,6 +11,7 @@ import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, resolveOutputPath } from './lib/runner.js';
 import { openDb, type Db } from './lib/db.js';
 import { fetchCanary, probeUrl, hashBody, isNearCanary, type CanaryProbe } from './lib/catchall.js';
+import { exitFailed, finishWithWhy, partialReasons, rowsAtRisk } from './lib/run-partial.js';
 
 const API_HOST_RE = /(^|[.-])(api|rest|graphql|swagger|openapi|ords|v[0-9]+)([.-]|$)/i;
 
@@ -115,6 +116,7 @@ Wrapper flags (before '--'):
 
   let findings = 0;
   let reviewFindings = 0;
+  let incomplete = 0;
   for (const info of scanList) {
     // Canary probe first — if this host is a catch-all responder, every kr
     // hit will look like a "reachable API route" when it's actually just the
@@ -137,6 +139,8 @@ Wrapper flags (before '--'):
     const MAX_BODIES_PER_HOST = 5;
     let bodiesFetched = 0;
     let reviewThisHost = 0;
+    const rowsBefore = findings;
+    let badLines = 0;
     for (const line of r.stdout.split('\n')) {
       const t = line.trim();
       if (!t.startsWith('{')) continue;
@@ -196,8 +200,9 @@ Wrapper flags (before '--'):
           findings++;
           if (looksFake) { reviewFindings++; reviewThisHost++; }
         }
-      } catch { /* ignore malformed line */ }
+      } catch { badLines++; }
     }
+    if (rowsAtRisk(findings - rowsBefore, exitFailed(r.code) || badLines > 0)) incomplete++;
     console.error(
       `  ${info.target}: exit ${r.code}${r.code !== 0 ? ' (may be host-timeout)' : ''}` +
         (reviewThisHost ? `, ${reviewThisHost} needs_review (${bodiesFetched} bodies preserved)` : '')
@@ -210,7 +215,7 @@ Wrapper flags (before '--'):
   );
 
   if (db && runId !== null) {
-    db.finishRun(runId, { targetsCount: scanList.length, findingsCount: findings, at: new Date().toISOString() });
+    finishWithWhy(db, runId, { targetsCount: scanList.length, findingsCount: findings, at: new Date().toISOString() }, partialReasons([[incomplete, 'host(s) incomplete']]));
     db.close();
     console.error(`  sqlite: ${path.resolve(opts.sqlite!)} (+${findings} findings, run #${runId})`);
   }

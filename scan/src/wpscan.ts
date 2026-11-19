@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, resolveOutputPath } from './lib/runner.js';
 import { openDb } from './lib/db.js';
+import { finishWithWhy, partialReasons, rowsAtRisk } from './lib/run-partial.js';
 
 async function main(): Promise<void> {
   const opts = parseCommonCli(process.argv);
@@ -23,13 +24,14 @@ Pass --enumerate flags after '--'. Output: JSONL to --out (default: wpscan.jsonl
   const outFile = resolveOutputPath(opts, runId, 'wpscan.jsonl');
   const token = process.env['WPSCAN_API_TOKEN'];
   const wstream = fs.createWriteStream(outFile);
-  let ok = 0, fail = 0, findings = 0;
+  let ok = 0, fail = 0, findings = 0, incomplete = 0;
   for (const target of targets) {
     const url = target.startsWith('http') ? target : `https://${target}`;
     const args = ['--url', url, '--format', 'json', '--random-user-agent', '--disable-tls-checks', ...opts.extraArgs];
     if (token) args.push('--api-token', token);
     console.error(`wpscan ${url}`);
     const r = await run('wpscan', args, { timeoutMs: 300_000 });
+    const rowsBefore = findings;
     if (r.stdout.trim()) {
       const line = r.stdout.trim().split('\n').filter(Boolean).slice(-1)[0] ?? '';
       try {
@@ -52,6 +54,7 @@ Pass --enumerate flags after '--'. Output: JSONL to --out (default: wpscan.jsonl
           }
         }
       } catch {
+        if (rowsAtRisk(findings - rowsBefore, true)) incomplete++;
         wstream.write(JSON.stringify({ target: url, error: 'non-json output', raw: r.stdout.slice(0, 500) }) + '\n');
         fail++;
       }
@@ -63,7 +66,7 @@ Pass --enumerate flags after '--'. Output: JSONL to --out (default: wpscan.jsonl
   await new Promise<void>((r) => wstream.end(() => r()));
   console.error(`wpscan done: ${ok} ok, ${fail} failed. Output: ${outFile}`);
   if (db && runId !== null) {
-    db.finishRun(runId, { targetsCount: targets.length, findingsCount: findings, at: new Date().toISOString() });
+    finishWithWhy(db, runId, { targetsCount: targets.length, findingsCount: findings, at: new Date().toISOString() }, partialReasons([[incomplete, 'target(s) incomplete']]));
     db.close();
     console.error(`  sqlite: ${path.resolve(opts.sqlite!)} (+${findings} findings, run #${runId})`);
   }
