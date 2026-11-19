@@ -63,7 +63,7 @@ describe('wpscanRows', () => {
       ['timthumb-vulnerability', 'high', 'http://wp.example/timthumb.php: Timthumb <= 2.8.13 WebShot Remote Code Execution', 'CVE-2014-4663', 'http://wp.example/timthumb.php'],
       ['config-backup', 'high', 'config backup exposed: http://wp.example/wp-config.php~', null, 'http://wp.example/wp-config.php~'],
       ['db-export', 'high', 'db export exposed: http://wp.example/1.sql', null, 'http://wp.example/1.sql'],
-      ['wordpress-users', 'info', 'WordPress users: admin-example, editor-example', null, null],
+      ['wordpress-users', 'info', 'WordPress users (2): admin-example, editor-example', null, null],
     ]);
   });
 
@@ -81,7 +81,7 @@ describe('wpscanRows', () => {
   it('lists the users in one row, with no credential-like field', () => {
     const rows = wpscanRows({ users: { zed: { id: 3, found_by: 'x', password: 'p', hash: 'h' }, amy: { id: 1, found_by: 'y' } } });
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.title).toBe('WordPress users: amy, zed');
+    expect(rows[0]!.title).toBe('WordPress users (2): amy, zed');
     expect(JSON.stringify(rows[0]!.meta)).not.toMatch(/password|hash|"p"|"h"/);
     expect(rows[0]!.meta).toEqual({ users: [{ slug: 'amy', id: 1, found_by: 'y' }, { slug: 'zed', id: 3, found_by: 'x' }] });
   });
@@ -130,6 +130,25 @@ describe('wpscanRows', () => {
 
 
 
+  it('bounds and sanitises the users title and keeps the clean full list in meta', () => {
+    const evil = 'evil\nCRITICAL: forged, x';
+    const rows = wpscanRows({ users: { [evil]: { id: 1 }, a: { id: 2 } } });
+    expect(rows[0]!.title).toBe('WordPress users (2): a, evilCRITICAL: forged x');
+    expect(rows[0]!.title).not.toMatch(/[\u0000-\u001f\u007f\u2028\u2029]/);
+    expect((rows[0]!.meta as { users: { slug: string }[] }).users.map((u) => u.slug)).toEqual(['a', 'evilCRITICAL: forged, x']);
+  });
 
+  it('caps the users title at five slugs of 40 characters, whatever the user count', () => {
+    const users = Object.fromEntries(Array.from({ length: 2000 }, (_, i) => [`user${String(i).padStart(4, '0')}${'x'.repeat(60)}`, { id: i }]));
+    const rows = wpscanRows({ users });
+    expect(rows[0]!.title.length).toBeLessThan(260);
+    expect(rows[0]!.title.startsWith('WordPress users (2000): ')).toBe(true);
+    expect(rows[0]!.title.endsWith('…')).toBe(true);
+    expect((rows[0]!.meta as { users: unknown[] }).users).toHaveLength(2000);
+  });
 
+  it('gives the same title for the same set of users in any order', () => {
+    const a = wpscanRows({ users: { b: { id: 2 }, a: { id: 1 } } })[0]!.title;
+    expect(wpscanRows({ users: { a: { id: 1 }, b: { id: 2 } } })[0]!.title).toBe(a);
+  });
 });

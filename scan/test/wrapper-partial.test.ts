@@ -132,7 +132,7 @@ describe('wpscan enumeration keys', () => {
       ['db-export', 'high', 'db export exposed: http://wp.example/1.sql', null, 'http://wp.example/1.sql'],
       ['timthumb', 'medium', 'timthumb exposed: http://wp.example/timthumb.php', null, 'http://wp.example/timthumb.php'],
       ['timthumb-vulnerability', 'high', 'http://wp.example/timthumb.php: Timthumb <= 2.8.13 WebShot Remote Code Execution', 'CVE-2014-4663', 'http://wp.example/timthumb.php'],
-      ['wordpress-users', 'info', 'WordPress users: admin-example, editor-example', null, 'https://wp.example'],
+      ['wordpress-users', 'info', 'WordPress users (2): admin-example, editor-example', null, 'https://wp.example'],
     ]);
   });
 

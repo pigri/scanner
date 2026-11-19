@@ -109,6 +109,14 @@ function vulnRows(s: Section, key: string, v: Node, seen: Set<string>): WpscanRo
   return (cves.length ? cves : [null]).map((cve) => ({ category: s.category, severity, title, cve, matched_at: urlOf(key), meta }));
 }
 
+const USERS_IN_TITLE = 5;
+const USER_SLUG_MAX = 40;
+
+/** Site-sourced text without control or line-separator characters, which would break markdown reports. */
+function plain(text: string): string {
+  return text.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '');
+}
+
 /** Every finding a wpscan document reports, in storable form. */
 export function wpscanRows(doc: unknown): WpscanRow[] {
   if (!isNode(doc)) return [];
@@ -130,9 +138,12 @@ export function wpscanRows(doc: unknown): WpscanRow[] {
   }
   const users = doc['users'];
   if (isNode(users) && Object.keys(users).length) {
-    const list = Object.entries(users).map(([slug, u]) => ({ slug, id: isNode(u) ? u['id'] : undefined, found_by: isNode(u) ? u['found_by'] : undefined }))
+    const list = Object.entries(users).map(([slug, u]) => ({ slug: plain(slug), id: isNode(u) ? u['id'] : undefined, found_by: isNode(u) ? u['found_by'] : undefined }))
       .sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
-    rows.push({ category: 'wordpress-users', severity: 'info', title: `WordPress users: ${list.map((u) => u.slug).join(', ')}`, cve: null, matched_at: null, meta: { users: list } });
+    // The title is part of the logical key, so it stays bounded and the same for the same set of users.
+    const shown = list.slice(0, USERS_IN_TITLE).map((u) => u.slug.replace(/,/g, '').slice(0, USER_SLUG_MAX));
+    const title = `WordPress users (${list.length}): ${shown.join(', ')}${list.length > USERS_IN_TITLE ? '…' : ''}`;
+    rows.push({ category: 'wordpress-users', severity: 'info', title, cve: null, matched_at: null, meta: { users: list } });
   }
   return rows;
 }
