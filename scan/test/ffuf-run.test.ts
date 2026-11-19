@@ -142,6 +142,47 @@ describe('ffufHosts coverage and the origin of open findings', () => {
     expect(notes).toEqual(['1 target(s) not covered: an open finding came from an origin outside this run']);
   });
 
+  const ENV_ROW = JSON.stringify({ results: [{ url: 'https://a.example/.env', input: { FUZZ: '.env' }, status: 200, length: 90 }] });
+
+  async function blockedRun(db: Db, passthrough: string[]) {
+    const dir = join(tmpdir(), `ffuf-test-${randomBytes(6).toString('hex')}`);
+    mkdirSync(dir, { recursive: true });
+    dirs.push(dir);
+    writeFileSync(join(dir, 'wl.txt'), 'admin/\n.env\n');
+    const notes: string[] = [];
+    const runId = db.startRun('ffuf', {}, AT);
+    const res = await ffufHosts(db, [HOST], {
+      now: AT, runId, wl: join(dir, 'wl.txt'), threads: 1, timeoutSec: 2, hostTimeoutSec: 5, passthrough,
+      outPath: (t) => join(dir, `${t}.json`), deps: deps({ report: ENV_ROW }), notes,
+    });
+    finishFfufRun(db, runId, 1, res, AT, notes);
+    const logical = db.raw.prepare(currentFindingsSelect(findingsRuleOpts(db.raw))).all() as Array<{ title: string; resolved: number }>;
+    return {
+      res,
+      f: logical.find((x) => x.title === '200 http://a.example:8080/admin/')?.resolved,
+      notes: (db.raw.prepare('SELECT notes FROM runs WHERE id = ?').get(runId) as { notes: string | null }).notes,
+    };
+  }
+
+  it('marks the run partial when the origin guard blocks a host that stored rows', async () => {
+    const db = openDb(':memory:');
+    open(db, 'http://a.example:8080/admin/');
+    const r = await blockedRun(db, []);
+    expect(r.f).toBe(0);
+    expect(r.res.incomplete).toBe(1);
+    expect(r.notes).toBe('1 target(s) not covered: an open finding came from an origin outside this run; partial run: 1 host(s) incomplete');
+  });
+
+  it('marks the run partial when the paths are unknown and the host stored rows', async () => {
+    const db = openDb(':memory:');
+    open(db, 'http://a.example:8080/admin/');
+    const r = await blockedRun(db, ['-mc', '200']);
+    expect(r.f).toBe(0);
+    expect(r.res.incomplete).toBe(1);
+    expect(r.notes).toContain('coverage skipped: cannot tell which paths ffuf requests');
+    expect(r.notes).toContain('partial run: 1 host(s) incomplete');
+  });
+
   const PATH_SEED: LiveUrl = { target: 'a.example', seed: 'https://a.example/app' };
 
   it('does not cover a host whose seed moved from a path to the root', async () => {
