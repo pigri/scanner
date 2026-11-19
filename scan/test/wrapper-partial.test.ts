@@ -32,9 +32,10 @@ function runWrapper(script: string, targets: string[], env: Record<string, strin
   return { notes: run.notes, partialRows: n, status: r.status, stderr: r.stderr };
 }
 
+// Real wpscan prints JSON.pretty_generate output: one key per line.
 const wpJson = (extra: Record<string, unknown>) => JSON.stringify({
   interesting_findings: [{ to_s: 'readme', type: 'readme', url: 'https://a.example/readme.html' }], ...extra,
-});
+}, null, 2);
 const wpFake = (json: string, code: number) => fake('wpscan', `cat <<'EOF'\n${json}\nEOF\nexit ${code}`);
 const API_OK = { vuln_api: { plan: 'free', requests_done_during_scan: 1, requests_remaining: 20 } };
 
@@ -69,9 +70,42 @@ describe('wpscan partial runs', () => {
   });
 
   it('a failure that wrote no rows is not partial', () => {
-    wpFake(JSON.stringify({ scan_aborted: 'boom' }), 3);
+    wpFake(JSON.stringify({ scan_aborted: 'boom' }, null, 2), 3);
     const r = runWrapper('wpscan.ts', ['a.example']);
     expect(r.notes ?? '').not.toContain('partial');
+  });
+});
+
+describe('wpscan findings from real output', () => {
+  const findingRows = (): { category: string; severity: string; title: string; cve: string | null }[] => {
+    const db = new Database(path.join(dir, 'scan.db'), { readonly: true });
+    const rows = db.prepare("SELECT category, severity, title, cve FROM findings WHERE tool = 'wpscan' ORDER BY id").all() as { category: string; severity: string; title: string; cve: string | null }[];
+    db.close();
+    return rows;
+  };
+
+  it('stores the interesting findings of a pretty-printed run', () => {
+    const fixture = fs.readFileSync(path.join(SCAN, 'test/fixtures/wpscan/wordpress-pretty.json'), 'utf8');
+    wpFake(fixture.trimEnd(), 0);
+    const r = runWrapper('wpscan.ts', ['wp.example']);
+    expect(r.stderr).not.toContain('wpscan done: 0 ok');
+    expect(findingRows().map((f) => f.category)).toEqual(['headers', 'robots_txt', 'readme', 'wp_cron']);
+  });
+
+  it('a target that is not WordPress is not a failure', () => {
+    const fixture = fs.readFileSync(path.join(SCAN, 'test/fixtures/wpscan/not-wordpress-pretty.json'), 'utf8');
+    wpFake(fixture.trimEnd(), 4);
+    const r = runWrapper('wpscan.ts', ['plain.example']);
+    expect(r.stderr).toContain('wpscan done: 1 ok, 0 failed');
+  });
+
+  it('stores vulnerabilities with a CVE id in the CVE-YYYY-N form', () => {
+    wpFake(JSON.stringify({
+      version: { number: '6.4.2', vulnerabilities: [{ title: 'core vuln', references: { cve: ['2024-0001'] } }] },
+      plugins: { 'demo-plugin': { vulnerabilities: [{ title: 'plugin vuln', references: { cve: ['CVE-2023-0002'] } }] } },
+    }, null, 2), 5);
+    runWrapper('wpscan.ts', ['a.example']);
+    expect(findingRows().map((f) => [f.category, f.cve])).toEqual([['core-vulnerability', 'CVE-2024-0001'], ['plugin-vulnerability', 'CVE-2023-0002']]);
   });
 });
 
