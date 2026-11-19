@@ -10,6 +10,13 @@ export function rowsAtRisk(rows: number, failed: boolean): boolean {
   return rows > 0 && failed;
 }
 
+/** Targets that stored rows in this run but are not in `covered`: their new rows move the rule-3 watermark. */
+export function incompleteHosts(rowsByTarget: ReadonlyMap<string, number>, covered: ReadonlySet<string>): number {
+  let n = 0;
+  for (const [t, rows] of rowsByTarget) if (rowsAtRisk(rows, !covered.has(t))) n++;
+  return n;
+}
+
 /** A failure the wrapper counts: a number names a count, a boolean a single event. */
 export type Signal = readonly [value: number | boolean, label: string];
 

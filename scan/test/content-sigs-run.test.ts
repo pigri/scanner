@@ -19,7 +19,8 @@ function probes(reply: (seed: string, path: string) => Reply): ProbeFn {
 
 async function scan(db: Db, live: LiveUrl[], probeFn: ProbeFn, withRun = true, notes?: string[], now = AT) {
   const runId = withRun ? db.startRun('content-sigs', {}, now) : null;
-  return scanSigs(db, live, { now, runId, timeoutSec: 2, maxKb: 8, concurrency: 2, hostConcurrency: 4, write: () => {}, probeFn, ...(notes ? { notes } : {}) });
+  const res = await scanSigs(db, live, { now, runId, timeoutSec: 2, maxKb: 8, concurrency: 2, hostConcurrency: 4, write: () => {}, probeFn, ...(notes ? { notes } : {}) });
+  return res.findings;
 }
 const cov = (db: Db) => db.raw.prepare('SELECT target, tool, seen_at FROM tool_coverage ORDER BY target').all();
 
@@ -189,9 +190,8 @@ describe('scanSigs marks the run partial for a host with rows and no coverage', 
   async function runAndFinish(db: Db, live: LiveUrl[], probeFn: ProbeFn) {
     const runId = db.startRun('content-sigs', {}, T2);
     const notes: string[] = [];
-    const stats = { incomplete: 0 };
-    const n = await scanSigs(db, live, { now: T2, runId, timeoutSec: 2, maxKb: 8, concurrency: 2, hostConcurrency: 4, write: () => {}, probeFn, notes, stats });
-    finishSigsRun(db, runId, live.length, n, stats, T2, notes);
+    const res = await scanSigs(db, live, { now: T2, runId, timeoutSec: 2, maxKb: 8, concurrency: 2, hostConcurrency: 4, write: () => {}, probeFn, notes });
+    finishSigsRun(db, runId, live.length, res, T2, notes);
     return {
       notes: (db.raw.prepare('SELECT notes FROM runs WHERE id = ?').get(runId) as { notes: string | null }).notes,
       marks: db.raw.prepare('SELECT run_id FROM partial_stamps').all().length,
@@ -225,5 +225,13 @@ describe('scanSigs marks the run partial for a host with rows and no coverage', 
     const r = await runAndFinish(db, [A], probes(() => null));
     expect(r.notes).toBeNull();
     expect(r.marks).toBe(0);
+  });
+
+  it('counts a host with rows as incomplete when the coverage write fails, and keeps F open', async () => {
+    const db = openDb(':memory:');
+    F(db);
+    db.raw.exec("CREATE TRIGGER t_cov BEFORE INSERT ON tool_coverage BEGIN SELECT RAISE(ABORT, 'database is locked'); END");
+    const r = await runAndFinish(db, [A], probes((_s, p) => (p === '.git/HEAD' ? gitHead : miss)));
+    expect(r).toEqual({ notes: 'partial run: 1 host(s) incomplete', marks: 1, f: 0 });
   });
 });

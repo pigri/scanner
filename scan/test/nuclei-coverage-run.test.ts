@@ -387,4 +387,13 @@ describe('nuclei-url marks the run partial for a host with rows and no coverage'
     const r = await runNuclei([], [hit]);
     expect(after(r.db, 'nuclei')).toEqual({ f: undefined, marks: 0, notes: null });
   }, 100_000);
+
+  it('counts a host with rows as incomplete when the coverage write fails, and keeps F open', async () => {
+    const r = await runNuclei(['--from-urls'], [hit], 0, { trigger: finding + second + "CREATE TRIGGER t_cov BEFORE INSERT ON tool_coverage BEGIN SELECT RAISE(ABORT, 'database is locked'); END;" });
+    expect(r.code, r.stderr).toBe(0);
+    expect(after(r.db)).toEqual({
+      f: 0, marks: 1,
+      notes: 'tool_coverage write failed: scan.db busy; partial run: 1 host(s) incomplete',
+    });
+  }, 100_000);
 });

@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, writeLines, resolveOutputPath } from './lib/runner.js';
 import { openDb, type Db } from './lib/db.js';
-import { partialReasons, finishWithWhy, rowsAtRisk } from './lib/run-partial.js';
+import { partialReasons, finishWithWhy, incompleteHosts } from './lib/run-partial.js';
 import { isBlockedAnswer } from './lib/real-answer.js';
 import { liveSeeds, originGuardNote, targetsOutsideSeedOrigin } from './lib/live-seed.js';
 import { fetchCanary, probeUrl, hashBody, isNearCanary } from './lib/catchall.js';
@@ -156,10 +156,9 @@ export async function ffufHosts(db: Db, live: readonly LiveUrl[], o: FfufOpts): 
   const paths = requestedPaths(wl, passthrough);
   const outside = paths ? targetsOutsideSeedOrigin(db, 'ffuf', live.map((l) => ({ target: l.target, url: l.seed })), { paths }) : null;
   o.notes?.push(...(paths ? originGuardNote('ffuf', outside) : ['coverage skipped: cannot tell which paths ffuf requests (wordlist unreadable, or a passthrough flag that may change the requests)']));
-  let incomplete = 0;
+  const rowsByTarget = new Map<string, number>();
   for (const { target, seed } of live) {
     const rowsBefore = findings;
-    let hostCovered = false;
     // Canary: fetch an unlikely-to-exist path first. If the host is a catch-all
     // responder (Zorp/decoy/SPA-that-serves-index-html-for-everything), the
     // canary tells us exactly what "no such thing" looks like there. Any ffuf
@@ -348,16 +347,18 @@ export async function ffufHosts(db: Db, live: readonly LiveUrl[], o: FfufOpts): 
       // unreachable hosts (empty report); the canary rules out the latter.
       // A blocked or rate-limited canary means ffuf's empty or uniform report
       // came from the block, not from the app.
-      if (canary && !isBlockedAnswer(canary.status, canary.mitigated === true) && r.code === 0 && !STOPPED_EARLY.test(r.stderr) && outside && !outside.has(target)) { covered.push(target); hostCovered = true; }
+      if (canary && !isBlockedAnswer(canary.status, canary.mitigated === true) && r.code === 0 && !STOPPED_EARLY.test(r.stderr) && outside && !outside.has(target)) { covered.push(target); }
     } catch (e) {
       console.error(`  ${target}: parse error: ${e instanceof Error ? e.message : String(e)}`);
     }
-    if (rowsAtRisk(findings - rowsBefore, !hostCovered)) incomplete++;
+    rowsByTarget.set(target, (rowsByTarget.get(target) ?? 0) + findings - rowsBefore);
   }
+  let covers = new Set(covered);
   if (runId !== null && !db.recordCoverage('ffuf', covered, now, runId)) {
     console.error('ffuf: tool_coverage write failed: scan.db busy');
+    covers = new Set();
   }
-  return { findings, reviewFindings, incomplete };
+  return { findings, reviewFindings, incomplete: incompleteHosts(rowsByTarget, covers) };
 }
 
 

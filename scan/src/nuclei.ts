@@ -326,9 +326,10 @@ Everything after '--' is passed to nuclei verbatim.`));
       const outside = targetsWithKeysOutside(openKeys, withRowRoots(targets, inputs, evidence)).length;
       if (outside) notes.push(`${outside} target(s) not covered: an open finding came from a URL outside this run`);
     }
-    const covered = unparseable ? [] : nucleiCoveredTargets(targets, evidence, { fromUrls, exitCode: r.code, skipped, inputs, openKeys });
+    let covered = unparseable ? [] : nucleiCoveredTargets(targets, evidence, { fromUrls, exitCode: r.code, skipped, inputs, openKeys });
     if (covered.length && !db.recordCoverage(toolName, covered, now, runId)) {
       notes.push('tool_coverage write failed: scan.db busy');
+      covered = [];
     }
     const notStored = evidence.filter((e) => !e.stored).length;
     const why: string[] = [];

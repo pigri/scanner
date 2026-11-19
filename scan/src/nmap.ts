@@ -219,9 +219,10 @@ Wrapper flags (before '--'):
       }
     }
     const notes: string[] = [];
-    const covered = openFindingPorts ? vulnersCoveredTargets(hosts, { vulners, exitCode: r.code, narrowed, openFindingPorts }) : [];
+    let covered = openFindingPorts ? vulnersCoveredTargets(hosts, { vulners, exitCode: r.code, narrowed, openFindingPorts }) : [];
     if (!db.recordCoverage('nmap-vulners', covered, now, runId)) {
       notes.push('tool_coverage write failed: scan.db busy');
+      covered = [];
     }
     // A timed-out host moves no watermark unless its target got rows in this run.
     const timedOut = hosts.filter((h) => h.timedOut && withRows.has(hostTarget(h))).length;

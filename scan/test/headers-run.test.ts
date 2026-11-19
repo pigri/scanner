@@ -13,7 +13,8 @@ const failing: typeof fetch = (async () => { throw new TypeError('fetch failed')
 
 async function audit(db: Db, urls: LiveUrl[], fetchFn: typeof fetch, withRun = true, notes?: string[], now = AT) {
   const runId = withRun ? db.startRun('headers', {}, now) : null;
-  return auditUrls(db, urls, { now, runId, timeoutSec: 2, concurrency: 2, write: () => {}, fetchFn, ...(notes ? { notes } : {}) });
+  const res = await auditUrls(db, urls, { now, runId, timeoutSec: 2, concurrency: 2, write: () => {}, fetchFn, ...(notes ? { notes } : {}) });
+  return res.findings;
 }
 const cov = (db: Db) => db.raw.prepare('SELECT target, tool, seen_at, run_id FROM tool_coverage ORDER BY target').all();
 
@@ -191,9 +192,8 @@ describe('auditUrls marks the run partial for a target with rows and no coverage
   async function runAndFinish(db: Db, urls: LiveUrl[], fetchFn: typeof fetch) {
     const runId = db.startRun('headers', {}, T2);
     const notes: string[] = [];
-    const stats = { incomplete: 0 };
-    const n = await auditUrls(db, urls, { now: T2, runId, timeoutSec: 2, concurrency: 2, write: () => {}, fetchFn, notes, stats });
-    finishHeadersRun(db, runId, urls.length, n, stats, T2, notes);
+    const res = await auditUrls(db, urls, { now: T2, runId, timeoutSec: 2, concurrency: 2, write: () => {}, fetchFn, notes });
+    finishHeadersRun(db, runId, urls.length, res, T2, notes);
     return {
       notes: (db.raw.prepare('SELECT notes FROM runs WHERE id = ?').get(runId) as { notes: string | null }).notes,
       marks: db.raw.prepare('SELECT run_id FROM partial_stamps').all().length,
@@ -234,5 +234,13 @@ describe('auditUrls marks the run partial for a target with rows and no coverage
     const r = await runAndFinish(db, [URL_A], failing);
     expect(r.notes).toBeNull();
     expect(r.marks).toBe(0);
+  });
+
+  it('counts a target with rows as incomplete when the coverage write fails, and keeps F open', async () => {
+    const db = openDb(':memory:');
+    F(db);
+    db.raw.exec("CREATE TRIGGER t_cov BEFORE INSERT ON tool_coverage BEGIN SELECT RAISE(ABORT, 'database is locked'); END");
+    const r = await runAndFinish(db, [URL_A], fetchReturning(200, { server: 'x' }));
+    expect(r).toEqual({ notes: 'partial run: 1 host(s) incomplete', marks: 1, f: 0 });
   });
 });

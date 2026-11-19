@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { openDb, type Db } from './lib/db.js';
 import { coveredTargets } from './lib/coverage.js';
-import { partialReasons, finishWithWhy, rowsAtRisk } from './lib/run-partial.js';
+import { partialReasons, finishWithWhy, incompleteHosts } from './lib/run-partial.js';
 import { liveSeeds, originGuardNote, targetsOutsideSeedOrigin } from './lib/live-seed.js';
 
 export interface LiveUrl { target: string; url: string; scheme: 'http' | 'https' }
@@ -150,16 +150,16 @@ export interface AuditOpts {
   fetchFn?: typeof fetch;
   /** Receives run notes about coverage this run did not record. */
   notes?: string[];
-  /** Receives the count of targets that stored rows but got no coverage. */
-  stats?: { incomplete: number };
 }
 
-export function finishHeadersRun(db: Db, runId: number, targetsCount: number, findings: number, stats: { incomplete: number }, at: string, notes: readonly string[] = []): void {
-  const why = partialReasons([[stats.incomplete, 'host(s) incomplete']]);
-  finishWithWhy(db, runId, { targetsCount, findingsCount: findings, ...(notes.length ? { notes: notes.join('; ') } : {}), at }, why);
+export interface HeadersResult { findings: number; incomplete: number }
+
+export function finishHeadersRun(db: Db, runId: number, targetsCount: number, res: HeadersResult, at: string, notes: readonly string[] = []): void {
+  const why = partialReasons([[res.incomplete, 'host(s) incomplete']]);
+  finishWithWhy(db, runId, { targetsCount, findingsCount: res.findings, ...(notes.length ? { notes: notes.join('; ') } : {}), at }, why);
 }
 
-export async function auditUrls(db: Db, urls: readonly LiveUrl[], opts: AuditOpts): Promise<number> {
+export async function auditUrls(db: Db, urls: readonly LiveUrl[], opts: AuditOpts): Promise<HeadersResult> {
   const { now, runId } = opts;
   const fetchFn = opts.fetchFn ?? fetch;
   const outcomes: { target: string; ok: boolean }[] = [];
@@ -220,8 +220,7 @@ export async function auditUrls(db: Db, urls: readonly LiveUrl[], opts: AuditOpt
     console.error('headers: tool_coverage write failed: scan.db busy');
     covered = [];
   }
-  if (opts.stats) opts.stats.incomplete = [...rowsByTarget].filter(([t, n]) => rowsAtRisk(n, !covered.includes(t))).length;
-  return findings;
+  return { findings, incomplete: incompleteHosts(rowsByTarget, new Set(covered)) };
 }
 
 async function main(): Promise<void> {
@@ -277,13 +276,12 @@ Wrapper flags (before '--'):
   const wstream = fs.createWriteStream(outFile);
 
   const notes: string[] = [];
-  const stats = { incomplete: 0 };
-  const findings = await auditUrls(db, urls, { notes, stats, now, runId, timeoutSec, concurrency, write: (l) => wstream.write(l) });
-  await new Promise<void>((res) => wstream.end(() => res()));
+  const result = await auditUrls(db, urls, { notes, now, runId, timeoutSec, concurrency, write: (l) => wstream.write(l) });
+  await new Promise<void>((done) => wstream.end(() => done()));
 
-  finishHeadersRun(db, runId, urls.length, findings, stats, new Date().toISOString(), notes);
+  finishHeadersRun(db, runId, urls.length, result, new Date().toISOString(), notes);
   db.close();
-  console.error(`headers done: +${findings} finding(s) across ${urls.length} target(s), run #${runId}`);
+  console.error(`headers done: +${result.findings} finding(s) across ${urls.length} target(s), run #${runId}`);
   console.error(`  sqlite: ${path.resolve(opts.sqlite)}`);
   void writeLines;   // silence unused-import linter — kept for cross-wrapper consistency
 }

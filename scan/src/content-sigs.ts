@@ -17,7 +17,7 @@ import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, requireTool, resolveOutputPath } from './lib/runner.js';
 import { openDb, type Db } from './lib/db.js';
 import { coveredTargets } from './lib/coverage.js';
-import { partialReasons, finishWithWhy, rowsAtRisk } from './lib/run-partial.js';
+import { partialReasons, finishWithWhy, incompleteHosts } from './lib/run-partial.js';
 import { liveSeeds, originGuardNote, targetsOutsideSeedOrigin } from './lib/live-seed.js';
 
 type Sev = 'critical' | 'high' | 'medium' | 'low' | 'info';
@@ -256,8 +256,6 @@ export interface SigsOpts {
   probeFn?: typeof probe;
   /** Receives run notes about coverage this run did not record. */
   notes?: string[];
-  /** Receives the count of hosts that stored rows but got no coverage. */
-  stats?: { incomplete: number };
 }
 
 /**
@@ -274,12 +272,14 @@ function hostExamined(replies: ({ status: number; mitigated: boolean } | null)[]
   return !(first === 401 || first === 403 || (first >= 300 && first < 400));
 }
 
-export function finishSigsRun(db: Db, runId: number, targetsCount: number, findings: number, stats: { incomplete: number }, at: string, notes: readonly string[] = []): void {
-  const why = partialReasons([[stats.incomplete, 'host(s) incomplete']]);
-  finishWithWhy(db, runId, { targetsCount, findingsCount: findings, ...(notes.length ? { notes: notes.join('; ') } : {}), at }, why);
+export interface SigsResult { findings: number; incomplete: number }
+
+export function finishSigsRun(db: Db, runId: number, targetsCount: number, res: SigsResult, at: string, notes: readonly string[] = []): void {
+  const why = partialReasons([[res.incomplete, 'host(s) incomplete']]);
+  finishWithWhy(db, runId, { targetsCount, findingsCount: res.findings, ...(notes.length ? { notes: notes.join('; ') } : {}), at }, why);
 }
 
-export async function scanSigs(db: Db, live: readonly LiveUrl[], o: SigsOpts): Promise<number> {
+export async function scanSigs(db: Db, live: readonly LiveUrl[], o: SigsOpts): Promise<SigsResult> {
   const { now, runId } = o;
   const probeFn = o.probeFn ?? probe;
   const hits: Hit[] = [];
@@ -339,8 +339,7 @@ export async function scanSigs(db: Db, live: readonly LiveUrl[], o: SigsOpts): P
     console.error('content-sigs: tool_coverage write failed: scan.db busy');
     covered = [];
   }
-  if (o.stats) o.stats.incomplete = [...rowsByTarget].filter(([t, n]) => rowsAtRisk(n, !covered.includes(t))).length;
-  return findings;
+  return { findings, incomplete: incompleteHosts(rowsByTarget, new Set(covered)) };
 }
 
 async function main(): Promise<void> {
@@ -406,12 +405,11 @@ Wrapper flags (before '--'):
   const outFile = resolveOutputPath(opts, runId, 'content-sigs.jsonl');
   const wstream = fs.createWriteStream(outFile);
   const notes: string[] = [];
-  const stats = { incomplete: 0 };
-  const findings = await scanSigs(db, live, { notes, stats, now, runId, timeoutSec, maxKb, concurrency, hostConcurrency, write: (l) => wstream.write(l) });
-  await new Promise<void>((res) => wstream.end(() => res()));
-  finishSigsRun(db, runId, live.length, findings, stats, new Date().toISOString(), notes);
+  const result = await scanSigs(db, live, { notes, now, runId, timeoutSec, maxKb, concurrency, hostConcurrency, write: (l) => wstream.write(l) });
+  await new Promise<void>((done) => wstream.end(() => done()));
+  finishSigsRun(db, runId, live.length, result, new Date().toISOString(), notes);
   db.close();
-  console.error(`content-sigs done: +${findings} exposure(s) across ${live.length} host(s), run #${runId}`);
+  console.error(`content-sigs done: +${result.findings} exposure(s) across ${live.length} host(s), run #${runId}`);
   console.error(`  sqlite: ${path.resolve(opts.sqlite)}`);
 }
 
