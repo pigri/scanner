@@ -595,7 +595,7 @@ so a tool that didn't run in a window doesn't count as flapping.
 Grid mode — one line per key with a ✓/·/- attendance strip:
 
 ```
-npm run history -- --target cca.hiteles.gov.hu --limit 15
+npm run history -- --target www.example.com --limit 15
 ```
 
 Sample:
@@ -609,7 +609,7 @@ Detail mode — full per-window attendance + every observation with
 `matched_at`, `run_id`, severity:
 
 ```
-npm run history -- --target cca.hiteles.gov.hu --tool testssl --title "HSTS: not offered"
+npm run history -- --target www.example.com --tool testssl --title "HSTS: not offered"
 ```
 
 Status: `persistent` (present in latest applicable scan) / `resolved`
