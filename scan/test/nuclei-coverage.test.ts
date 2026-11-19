@@ -151,20 +151,26 @@ describe('open findings outside this run\'s inputs', () => {
 
   it('keys a non-http row by its authority, from the url or else matched-at', () => {
     expect(rowKey(T, { type: 'tcp', url: `${T}:22`, matchedAt: null })).toBe(`self:${T}:22`);
-    expect(rowKey(T, { type: 'ssl', url: null, matchedAt: `${T}:8443` })).toBe(`self:${T}:8443`);
-    expect(rowKey(T, { type: 'ssl', url: null, matchedAt: T })).toBe(`self:${T}:443`);
+    expect(rowKey(T, { type: 'ssl', url: null, matchedAt: `${T}:8443` })).toBe(`ssl:${T}:8443`);
+    expect(rowKey(T, { type: 'ssl', url: null, matchedAt: T })).toBe(`ssl:${T}:443`);
     expect(rowKey(T, { type: 'javascript', url: T, matchedAt: T })).toBe(`self:${T}`);
     expect(rowKey(T, { type: 'dns', url: null, matchedAt: `ns.${T}` })).toBe(`self:${T}`);
     expect(rowKey(T, { type: 'http', url: `https://${T}/a`, matchedAt: null })).toBe(`https://${T}/a`);
   });
 
-  it('examines an authority only through an input url or a stored row on it', () => {
+  it('examines an ssl authority only through an input, never through a stored row', () => {
     const ssl8443 = new Map([[T, [rowKey(T, { type: 'ssl', url: null, matchedAt: `${T}:8443` })]]]);
     expect(nucleiCoveredTargets([T], [http], { ...opts, openKeys: ssl8443 })).toEqual([]);
     const sample = nucleiInputKeys([T], [`https://${T}:8443/app`]);
     expect(nucleiCoveredTargets([T], [http], { ...opts, inputs: sample, openKeys: ssl8443 })).toEqual([T]);
-    const row = { type: 'ssl', 'matched-at': `${T}:8443`, stored: true };
-    expect(nucleiCoveredTargets([T], [http, row], { ...opts, openKeys: ssl8443 })).toEqual([T]);
+    const sslRow = { type: 'ssl', 'matched-at': `${T}:8443`, stored: true };
+    expect(nucleiCoveredTargets([T], [http, sslRow], { ...opts, openKeys: ssl8443 })).toEqual([]);
+    expect(nucleiCoveredTargets([T], [http, tcp(`${T}:8443`)], { ...opts, openKeys: ssl8443 })).toEqual([]);
+  });
+
+  it('examines t:443 ssl for a bare target input', () => {
+    const open443 = new Map([[T, [rowKey(T, { type: 'ssl', url: null, matchedAt: `${T}:443` })]]]);
+    expect(nucleiCoveredTargets([T], [http], { ...opts, inputs: nucleiInputKeys([T], []), openKeys: open443 })).toEqual([T]);
   });
 
   it('covers a tcp finding on :22 only when this run stored a row on :22', () => {

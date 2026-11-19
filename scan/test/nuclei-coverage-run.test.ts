@@ -282,6 +282,7 @@ describe('nuclei-url coverage and the source of open findings', () => {
     ['tcp', `${HOST}:22`, `${HOST}:22`, [], false],
     ['tcp', `${HOST}:22`, `${HOST}:22`, [tcpRow(`${HOST}:22`)], true],
     ['tcp', `${HOST}:22`, `${HOST}:22`, [tcpRow(`${HOST}:2222`)], false],
+    ['ssl', `${HOST}:8443`, null, [tcpRow(`${HOST}:8443`)], false],
   ];
   for (const [kind, matchedAt, url, extraRows, covers] of cases) {
     it(`${covers ? 'covers' : 'does not cover'} a target whose open ${kind} finding (${matchedAt}) has ${extraRows.length ? 'a stored row on its authority' : 'no run evidence for its authority'}`, async () => {

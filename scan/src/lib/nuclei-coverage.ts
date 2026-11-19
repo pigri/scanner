@@ -79,10 +79,14 @@ export function inputKey(url: string | null | undefined): string {
  */
 export function nucleiInputKeys(targets: readonly string[], urlSample: readonly string[]): Set<string> {
   const keys = new Set<string>();
-  for (const t of targets) keys.add(selfKey(t));
+  for (const t of targets) {
+    keys.add(selfKey(t));
+    keys.add(sslKey(`${t}:443`));
+  }
   for (const u of urlSample) {
     keys.add(inputKey(u));
     keys.add(authorityKey(u));
+    keys.add(authorityKey(u, '', sslKey));
   }
   keys.delete('');
   return keys;
@@ -93,35 +97,41 @@ export function selfKey(target: string): string {
   return `self:${target}`;
 }
 
+/** Key of an ssl row: it examines only through an input authority, never through another protocol's row. */
+function sslKey(authority: string): string {
+  return `ssl:${authority}`;
+}
+
 const DEFAULT_PORT: Record<string, string> = { 'http:': '80', 'https:': '443' };
 
 /**
  * `self:host[:port]` of a URL or host[:port]. The port is the explicit one, else
  * the default of an explicit scheme, else `fallbackPort`. Empty when unparseable.
  */
-function authorityKey(value: string, fallbackPort = ''): string {
+function authorityKey(value: string, fallbackPort = '', key: (authority: string) => string = selfKey): string {
   const m = /^(?:([a-z][a-z0-9+.-]*):\/\/)?([^/?#]*)/i.exec(value.trim());
   const authority = (m?.[2] ?? '').toLowerCase();
   const port = /^(.+):(\d+)$/.exec(authority);
   const host = port ? port[1]! : authority;
   if (!host) return '';
   const p = port?.[2] ?? DEFAULT_PORT[`${(m?.[1] ?? '').toLowerCase()}:`] ?? fallbackPort;
-  return selfKey(p ? `${host}:${p}` : host);
+  return key(p ? `${host}:${p}` : host);
 }
 
 export interface RowShape { type?: string | null | undefined; url?: string | null | undefined; matchedAt?: string | null | undefined }
 
 /**
  * Key of a row: its input URL for an http row; `self:<target>` for dns; for any
- * other type `self:host:port` from its url, else its matched-at (ssl defaults
- * to 443, the other types have no default port).
+ * other type `self:host:port` from its url, else its matched-at (no default
+ * port). An ssl row is `ssl:host:port`, 443 by default.
  */
 export function rowKey(target: string, r: RowShape): string {
   const type = (r.type ?? 'http').toLowerCase();
   if (type === 'dns') return selfKey(target);
   if (type === 'http') return r.url ? inputKey(r.url) : selfKey(target);
   const src = r.url || r.matchedAt;
-  return src ? authorityKey(src, type === 'ssl' ? '443' : '') : selfKey(target);
+  if (!src) return selfKey(target);
+  return type === 'ssl' ? authorityKey(src, '443', sslKey) : authorityKey(src);
 }
 
 function authorityOf(t: string): string {
@@ -138,7 +148,7 @@ function rowInputKey(r: NucleiRowEvidence): string {
 
 /**
  * `inputs` plus the root URL of each bare target on the scheme this run's rows
- * show, plus the authority of each non-http row this run stored. A bare host
+ * show, plus the authority of each tcp, javascript or other non-http, non-ssl row this run stored. A bare host
  * with no row of its own gets none, so its open root findings stay outside.
  */
 export function withRowRoots(targets: readonly string[], inputs: ReadonlySet<string>, rows: readonly NucleiRowEvidence[]): Set<string> {
@@ -146,7 +156,7 @@ export function withRowRoots(targets: readonly string[], inputs: ReadonlySet<str
   const authorities = new Set(targets.map(authorityOf));
   for (const r of rows) {
     const type = (r.type ?? 'http').toLowerCase();
-    if (r.stored && type !== 'http' && type !== 'dns') {
+    if (r.stored && type !== 'http' && type !== 'dns' && type !== 'ssl') {
       const k = rowKey('', { type, url: r.url, matchedAt: r['matched-at'] });
       if (k && k !== selfKey('')) out.add(k);
     }
