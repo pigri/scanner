@@ -3,6 +3,7 @@ import {
   diffAgainstScan,
   classifyHost,
   keyOf,
+  withOpenKeys,
   isMeaningful,
   type Observation,
   type ScanWindow,
@@ -184,5 +185,20 @@ describe('classifyHost', () => {
 describe('keyOf nuclei passes', () => {
   it('gives both nuclei passes one key', () => {
     expect(keyOf({ tool: 'nuclei-url', category: 'x', title: 'y' })).toBe(keyOf({ tool: 'nuclei', category: 'x', title: 'y' }));
+  });
+});
+
+describe('withOpenKeys', () => {
+  it('moves a resolved finding the shared rule keeps open to stillOpen and blocks clean-now', () => {
+    const diff = diffAgainstScan([obs({ title: 'x', seen_at: '2026-08-01T00:00:00.000Z' })], window);
+    expect(classifyHost(diff)).toBe('clean-now');
+    const open = withOpenKeys(diff, new Set([keyOf({ tool: 'nuclei', category: 'template-id', title: 'x' })]));
+    expect(open.resolved).toHaveLength(0);
+    expect(open.stillOpen).toHaveLength(1);
+    expect(classifyHost(open)).toBe('still-dirty');
+  });
+  it('leaves a finding the rule resolves as resolved', () => {
+    const diff = diffAgainstScan([obs({ title: 'x', seen_at: '2026-08-01T00:00:00.000Z' })], window);
+    expect(withOpenKeys(diff, new Set()).resolved).toHaveLength(1);
   });
 });

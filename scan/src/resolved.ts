@@ -9,13 +9,19 @@
 // data source deep-audit uses to decide "have we actually scanned this host?".
 // Hosts without a completed scan_queue row are skipped as unknown.
 //
+// A finding the shared closing rule (lib/current-findings.ts) still calls open
+// is never "resolved", whatever the window says: a killed or partial run, or a
+// tool that wrote nothing, closes nothing. Such a finding is listed as OPEN and
+// keeps its host out of clean-now.
+//
 // A finding "disappearing" from the latest scan can also mean the detection
 // template was removed upstream. Treat the output as presumed-resolved, not
 // audited-resolved.
 import { openDb } from './lib/db.js';
+import { openKeysFor } from './lib/open-keys.js';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
 import {
-  diffAgainstScan, classifyHost, isMeaningful,
+  diffAgainstScan, classifyHost, isMeaningful, withOpenKeys,
   type Observation, type ScanWindow, type Diff, type HostStatus,
 } from './lib/resolved.js';
 
@@ -71,6 +77,10 @@ Options:
   --json             Machine-readable JSONL output
   --limit N          Cap rows (default: 50; ignored for --target)
   --include-info     Count info-severity too (default: only crit/high/med/low)
+
+A finding that the UI shows as open (the shared closing rule, e.g. after a
+killed or partial run) is never listed as resolved. --target lists it as OPEN
+and its host is not clean-now.
 
 Caveat: a finding may "disappear" because its detection template was removed
 upstream. Treat output as presumed-resolved, not audited-resolved.
@@ -154,6 +164,10 @@ function findingsFor(db: ReturnType<typeof openDb>, target: string): Observation
   return rows.map(toObservation);
 }
 
+function diffFor(db: ReturnType<typeof openDb>, w: ScanWindow): Diff {
+  return withOpenKeys(diffAgainstScan(findingsFor(db, w.target), w), openKeysFor(db.raw, w.target));
+}
+
 function fmtObs(o: Observation): string {
   const sev = (o.severity ?? '-').padEnd(8);
   const cve = o.cve ? `  ${o.cve}` : '';
@@ -165,6 +179,7 @@ function printTarget(diff: Diff, includeInfo: boolean): void {
   const resolved = diff.resolved.filter(gate);
   const persistent = diff.persistent.filter((p) => gate(p.pre) || gate(p.during));
   const novel = diff.novel.filter(gate);
+  const stillOpen = (diff.stillOpen ?? []).filter(gate);
   const status = classifyHost(diff);
 
   console.log(`${diff.target}   status=${status}`);
@@ -173,6 +188,10 @@ function printTarget(diff: Diff, includeInfo: boolean): void {
   if (resolved.length) {
     console.log('\n  RESOLVED (were open, absent from latest scan):');
     for (const o of resolved) console.log(fmtObs(o));
+  }
+  if (stillOpen.length) {
+    console.log('\n  OPEN (absent from latest scan, but the closing rule keeps them open):');
+    for (const o of stillOpen) console.log(fmtObs(o));
   }
   if (novel.length) {
     console.log('\n  NEW (first seen in latest scan):');
@@ -197,7 +216,7 @@ function main(): void {
       db.close();
       process.exit(1);
     }
-    const diff = diffAgainstScan(findingsFor(db, opts.target), window);
+    const diff = diffFor(db, window);
     if (opts.json) console.log(JSON.stringify({ ...diff, status: classifyHost(diff) }));
     else printTarget(diff, opts.includeInfo);
     db.close();
@@ -210,7 +229,7 @@ function main(): void {
   if (opts.mode === 'clean-now') {
     const cohort: Array<{ target: string; resolvedCount: number; lastScanAt: string; status: HostStatus }> = [];
     for (const w of windows) {
-      const diff = diffAgainstScan(findingsFor(db, w.target), w);
+      const diff = diffFor(db, w);
       const status = classifyHost(diff);
       if (status !== 'clean-now') continue;
       const resolvedCount = diff.resolved.filter(gate).length;
@@ -239,7 +258,7 @@ function main(): void {
   interface Row { target: string; obs: Observation; lastScanAt: string }
   const rows: Row[] = [];
   for (const w of windows) {
-    const diff = diffAgainstScan(findingsFor(db, w.target), w);
+    const diff = diffFor(db, w);
     for (const o of diff.resolved.filter(gate)) {
       rows.push({ target: w.target, obs: o, lastScanAt: w.finishedAt });
     }
