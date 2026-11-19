@@ -356,6 +356,15 @@ describe('ffuf partial runs', () => {
     expect(note(db, id).notes ?? '').not.toContain('partial');
   });
 
+  it('a failed coverage write counts the host with rows as incomplete and keeps the older finding open', async () => {
+    const db = openDb(':memory:');
+    await runAt(db, { report: ONE_HIT, canary: { ...CANARY, status: 429 } }, T0);
+    db.raw.exec("CREATE TRIGGER t_cov BEFORE INSERT ON tool_coverage BEGIN SELECT RAISE(ABORT, 'database is locked'); END");
+    const id = await runAt(db, { report: ENV_HIT }, AT);
+    expect(resolved(db)).toEqual([['.env', 0], ['admin', 0]]);
+    expect(note(db, id).notes).toContain('partial run: 1 host(s) incomplete');
+  });
+
   it('a clean run with no hits is complete, not partial', async () => {
     const db = openDb(':memory:');
     const id = await runAt(db, {}, AT);

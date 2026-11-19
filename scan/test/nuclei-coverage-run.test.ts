@@ -345,3 +345,55 @@ describe('nuclei-url coverage keeps an open finding open once the pair has a cov
     expect(st.cov).not.toEqual([T1]);
   }, 100_000);
 });
+
+describe('nuclei-url marks the run partial for a host with rows and no coverage', () => {
+  const T1 = '2026-01-01T00:00:00.000Z';
+  const finding = `INSERT INTO findings(tool, target, category, severity, title, matched_at, meta_json, seen_at)
+    VALUES ('nuclei-url', '${HOST}', 'cve', 'high', 'older finding', 'https://${HOST}/app/zzz', '${JSON.stringify({ url: `https://${HOST}/app/zzz` })}', '${T1}');`;
+  const second = `INSERT INTO discovered_urls(target, url, source, status, seen_at)
+    VALUES ('${HOST}', 'https://${HOST}/app/zzz', 'katana', 200, '${NOW}');`;
+  const hit = row('http', `https://${HOST}/app/login`);
+  const after = (dbPath: string, tool = 'nuclei-url') => {
+    const db = openDb(dbPath);
+    const logical = db.raw.prepare(currentFindingsSelect(findingsRuleOpts(db.raw))).all() as { title: string; resolved: number }[];
+    const notes = (db.raw.prepare('SELECT notes FROM runs WHERE tool = ?').get(tool) as { notes: string | null }).notes;
+    const marks = db.raw.prepare('SELECT run_id FROM partial_stamps').all().length;
+    db.close();
+    return { f: logical.find((x) => x.title === 'older finding')?.resolved, notes, marks };
+  };
+
+  it('keeps F open when the sample dropped its URL and the run stored another row (case B)', async () => {
+    const r = await runNuclei(['--from-urls', '--urls-per-host', '1'], [hit], 0, { trigger: finding + second });
+    expect(r.code, r.stderr).toBe(0);
+    expect(coverage(r.db).rows).toEqual([]);
+    expect(after(r.db)).toEqual({
+      f: 0, marks: 1,
+      notes: '1 target(s) not covered: an open finding came from a URL outside this run; partial run: 1 host(s) incomplete',
+    });
+  }, 100_000);
+
+  it('closes F through coverage when the run examined its URL, and is not partial', async () => {
+    const r = await runNuclei(['--from-urls'], [hit], 0, { trigger: finding + second });
+    expect(after(r.db)).toEqual({ f: 1, marks: 0, notes: null });
+  }, 100_000);
+
+  it('is not partial when every host with rows is covered and another host has no rows', async () => {
+    const r = await runNuclei(['--from-urls'], [hit]);
+    expect(coverage(r.db).rows.map((x) => x.target)).toEqual([HOST]);
+    expect(after(r.db)).toEqual({ f: undefined, marks: 0, notes: null });
+  }, 100_000);
+
+  it('does not count the host pass, which records no coverage', async () => {
+    const r = await runNuclei([], [hit]);
+    expect(after(r.db, 'nuclei')).toEqual({ f: undefined, marks: 0, notes: null });
+  }, 100_000);
+
+  it('counts a host with rows as incomplete when the coverage write fails, and keeps F open', async () => {
+    const r = await runNuclei(['--from-urls'], [hit], 0, { trigger: finding + second + "CREATE TRIGGER t_cov BEFORE INSERT ON tool_coverage BEGIN SELECT RAISE(ABORT, 'database is locked'); END;" });
+    expect(r.code, r.stderr).toBe(0);
+    expect(after(r.db)).toEqual({
+      f: 0, marks: 1,
+      notes: 'tool_coverage write failed: scan.db busy; partial run: 1 host(s) incomplete',
+    });
+  }, 100_000);
+});

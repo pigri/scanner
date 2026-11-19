@@ -223,6 +223,7 @@ Everything after '--' is passed to nuclei verbatim.`));
 
     let count = 0;
     let reviewCount = 0;
+    const storedTargets = new Set<string>();
     const evidence: NucleiRowEvidence[] = [];
     let unparseable = 0;
     for (const line of fs.readFileSync(outFile, 'utf8').split('\n')) {
@@ -308,6 +309,7 @@ Everything after '--' is passed to nuclei verbatim.`));
               needsReview: isSuspect,
             }, now, runId);
             count++;
+            storedTargets.add(targetHost);
           } catch (e) { ev.stored = false; throw e; }
         }
         ev.stored = true;
@@ -324,9 +326,10 @@ Everything after '--' is passed to nuclei verbatim.`));
       const outside = targetsWithKeysOutside(openKeys, withRowRoots(targets, inputs, evidence)).length;
       if (outside) notes.push(`${outside} target(s) not covered: an open finding came from a URL outside this run`);
     }
-    const covered = unparseable ? [] : nucleiCoveredTargets(targets, evidence, { fromUrls, exitCode: r.code, skipped, inputs, openKeys });
+    let covered = unparseable ? [] : nucleiCoveredTargets(targets, evidence, { fromUrls, exitCode: r.code, skipped, inputs, openKeys });
     if (covered.length && !db.recordCoverage(toolName, covered, now, runId)) {
       notes.push('tool_coverage write failed: scan.db busy');
+      covered = [];
     }
     const notStored = evidence.filter((e) => !e.stored).length;
     const why: string[] = [];
@@ -334,6 +337,9 @@ Everything after '--' is passed to nuclei verbatim.`));
     if (unparseable) why.push(`${unparseable} unparseable row(s)`);
     if (skipped.size) why.push(`${skipped.size} skipped host(s)`);
     if (notStored) why.push(`${notStored} row(s) not stored`);
+    // Only the --from-urls pass records coverage; a host with stored rows and none still moves the rule-3 watermark.
+    const incomplete = fromUrls ? [...storedTargets].filter((t) => !covered.includes(t)).length : 0;
+    if (incomplete) why.push(`${incomplete} host(s) incomplete`);
     if (why.length) notes.push(`partial run: ${why.join(', ')}`);
     db.finishRun(runId, { targetsCount: targets.length, findingsCount: count, ...(notes.length ? { notes: notes.join('; ') } : {}), at: new Date().toISOString(), partial: why.length > 0 });
     db.close();

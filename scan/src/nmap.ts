@@ -219,16 +219,20 @@ Wrapper flags (before '--'):
       }
     }
     const notes: string[] = [];
-    const covered = openFindingPorts ? vulnersCoveredTargets(hosts, { vulners, exitCode: r.code, narrowed, openFindingPorts }) : [];
+    let covered = openFindingPorts ? vulnersCoveredTargets(hosts, { vulners, exitCode: r.code, narrowed, openFindingPorts }) : [];
     if (!db.recordCoverage('nmap-vulners', covered, now, runId)) {
       notes.push('tool_coverage write failed: scan.db busy');
+      covered = [];
     }
     // A timed-out host moves no watermark unless its target got rows in this run.
     const timedOut = hosts.filter((h) => h.timedOut && withRows.has(hostTarget(h))).length;
+    // A host that stored CVE rows without coverage still moves the rule-3 watermark.
+    const incomplete = vulners ? [...withRows].filter((t) => !covered.includes(t)).length : 0;
     const why: string[] = [];
     if (r.code !== 0) why.push(`exit ${r.code}`);
     if (timedOut > 0) why.push(`${timedOut} timed-out host(s)`);
     if (narrowed) why.push('narrowed port scan');
+    if (incomplete > 0) why.push(`${incomplete} host(s) incomplete`);
     if (why.length) notes.push(`partial run: ${why.join(', ')}`);
     db.finishRun(runId, { targetsCount: targets.length, findingsCount: totalPorts + cveFindings, ...(notes.length ? { notes: notes.join('; ') } : {}), at: new Date().toISOString(), partial: why.length > 0 });
     db.close();

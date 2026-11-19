@@ -163,6 +163,9 @@ describe('nmap partial runs', () => {
   };
   const prior = (db: ReturnType<typeof openDb>) => priorFinding(8080)(db);
   const title = `CVE-2020-0001 on nginx (${HOST}:8080)`;
+  // On a port the run still sees open, so the host is covered and the clean run may resolve it.
+  const prior80 = (db: ReturnType<typeof openDb>) => priorFinding(80)(db);
+  const title80 = `CVE-2020-0001 on nginx (${HOST}:80)`;
 
   it('keeps a prior finding open when nmap exits 1', async () => {
     const r = await runNmap({ exit: 1, seed: prior });
@@ -194,9 +197,9 @@ describe('nmap partial runs', () => {
   const withHosts = (...extra: string[]) => XML.replace('</nmaprun>', `${extra.join('\n')}</nmaprun>`);
 
   it('ignores a timed-out host that wrote no rows when another host of the batch did', async () => {
-    const r = await runNmap({ xml: withHosts(hostXml('192.0.2.20', 'quiet.example.test', true)), seed: prior });
+    const r = await runNmap({ xml: withHosts(hostXml('192.0.2.20', 'quiet.example.test', true)), seed: prior80 });
     expect(r.code, r.stderr).toBe(0);
-    expect(resolved(r.db, title)).toBe(1);
+    expect(resolved(r.db, title80)).toBe(1);
     expect(state(r.db).marks).toEqual([]);
     expect(state(r.db).notes ?? '').not.toContain('partial run');
   }, 100_000);
@@ -226,8 +229,63 @@ describe('nmap partial runs', () => {
   }, 100_000);
 
   it('resolves the prior finding when nmap exits 0 (control)', async () => {
-    const r = await runNmap({ seed: prior });
+    const r = await runNmap({ seed: prior80 });
     expect(r.code, r.stderr).toBe(0);
-    expect(resolved(r.db, title)).toBe(1);
+    expect(resolved(r.db, title80)).toBe(1);
+  }, 100_000);
+});
+
+describe('nmap vulners marks the run partial for a host with rows and no coverage', () => {
+  const title = `CVE-2020-0001 on nginx (${HOST}:8080)`;
+  const state = (dbPath: string, t = title) => {
+    const db = openDb(dbPath);
+    const logical = db.raw.prepare(currentFindingsSelect(findingsRuleOpts(db.raw))).all() as { title: string; resolved: number }[];
+    const notes = (db.raw.prepare('SELECT notes FROM runs ORDER BY id DESC LIMIT 1').get() as { notes: string | null }).notes;
+    const marks = db.raw.prepare('SELECT run_id FROM partial_stamps').all().length;
+    db.close();
+    return { f: logical.find((x) => x.title === t)?.resolved, notes, marks };
+  };
+
+  it('keeps F open when the openFindingPorts guard blocked the host that stored rows', async () => {
+    const r = await runNmap({ seed: priorFinding(8080) });
+    expect(r.code, r.stderr).toBe(0);
+    expect(coverage(r.db).cov).toEqual([]);
+    expect(state(r.db)).toEqual({ f: 0, marks: 1, notes: 'partial run: 1 host(s) incomplete' });
+  }, 100_000);
+
+  it('closes F through coverage for a covered host, and the run is not partial', async () => {
+    const t80 = `CVE-2020-0001 on nginx (${HOST}:80)`;
+    const r = await runNmap({ seed: priorFinding(80) });
+    expect(r.code, r.stderr).toBe(0);
+    expect(coverage(r.db).cov).toHaveLength(1);
+    const db = openDb(r.db);
+    const f = (db.raw.prepare(currentFindingsSelect(findingsRuleOpts(db.raw))).all() as { title: string; resolved: number }[]).find((x) => x.title === t80);
+    db.close();
+    expect(f?.resolved).toBe(1);
+    expect(state(r.db)).toMatchObject({ marks: 0, notes: null });
+  }, 100_000);
+
+  it('is not partial when every host with rows is covered', async () => {
+    const r = await runNmap({});
+    expect(state(r.db)).toEqual({ f: undefined, marks: 0, notes: null });
+  }, 100_000);
+
+  it('is not partial for a host with no CVE rows and no coverage', async () => {
+    const bare = XML.replace(/<script[\s\S]*<\/script>/, '');
+    const r = await runNmap({ xml: bare });
+    expect(r.code, r.stderr).toBe(0);
+    expect(coverage(r.db).cov).toEqual([]);
+    expect(state(r.db)).toMatchObject({ marks: 0, notes: null });
+  }, 100_000);
+
+  it('does not count a run without --vulners, which records no coverage', async () => {
+    const r = await runNmap({ extra: [] });
+    expect(state(r.db)).toMatchObject({ marks: 0, notes: null });
+  }, 100_000);
+
+  it('counts a covered host with rows as incomplete when the coverage write fails, and keeps F open', async () => {
+    const r = await runNmap({ seed: (db) => { priorFinding(80)(db); db.raw.exec("CREATE TRIGGER t_cov BEFORE INSERT ON tool_coverage BEGIN SELECT RAISE(ABORT, 'database is locked'); END"); } });
+    expect(r.code).toBe(0);
+    expect(state(r.db, `CVE-2020-0001 on nginx (${HOST}:80)`)).toEqual({ f: 0, marks: 1, notes: 'tool_coverage write failed: scan.db busy; partial run: 1 host(s) incomplete' });
   }, 100_000);
 });

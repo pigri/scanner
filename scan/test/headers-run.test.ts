@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { openDb, type Db } from '../src/lib/db.js';
 import { currentFindingsSelect, findingsRuleOpts } from '../src/lib/current-findings.js';
-import { auditUrls, type LiveUrl } from '../src/headers.js';
+import { auditUrls, finishHeadersRun, type LiveUrl } from '../src/headers.js';
 
 const AT = '2026-11-18T10:00:00.000Z';
 const URL_A: LiveUrl = { target: 'a.example', url: 'https://a.example/', scheme: 'https' };
@@ -13,7 +13,8 @@ const failing: typeof fetch = (async () => { throw new TypeError('fetch failed')
 
 async function audit(db: Db, urls: LiveUrl[], fetchFn: typeof fetch, withRun = true, notes?: string[], now = AT) {
   const runId = withRun ? db.startRun('headers', {}, now) : null;
-  return auditUrls(db, urls, { now, runId, timeoutSec: 2, concurrency: 2, write: () => {}, fetchFn, ...(notes ? { notes } : {}) });
+  const res = await auditUrls(db, urls, { now, runId, timeoutSec: 2, concurrency: 2, write: () => {}, fetchFn, ...(notes ? { notes } : {}) });
+  return res.findings;
 }
 const cov = (db: Db) => db.raw.prepare('SELECT target, tool, seen_at, run_id FROM tool_coverage ORDER BY target').all();
 
@@ -178,5 +179,68 @@ describe('auditUrls keeps an open finding open once the pair has a coverage row'
     seed(db, 'https://a.example/');
     await audit(db, [URL_A], fetchReturning(200), true, undefined, T2);
     expect(state(db)).toEqual({ f: 1, cov: [T2] });
+  });
+});
+
+describe('auditUrls marks the run partial for a target with rows and no coverage', () => {
+  const T1 = '2026-11-10T10:00:00.000Z';
+  const T2 = '2026-11-18T10:00:00.000Z';
+  const F = (db: Db, withCoverage = false) => {
+    db.insertFinding({ tool: 'headers', target: 'a.example', category: 'hsts', severity: 'low', title: 'F', matched_at: 'https://a.example/', meta: {} }, T1, null);
+    if (withCoverage) db.recordCoverage('headers', ['a.example'], T1, null);
+  };
+  async function runAndFinish(db: Db, urls: LiveUrl[], fetchFn: typeof fetch) {
+    const runId = db.startRun('headers', {}, T2);
+    const notes: string[] = [];
+    const res = await auditUrls(db, urls, { now: T2, runId, timeoutSec: 2, concurrency: 2, write: () => {}, fetchFn, notes });
+    finishHeadersRun(db, runId, urls.length, res, T2, notes);
+    return {
+      notes: (db.raw.prepare('SELECT notes FROM runs WHERE id = ?').get(runId) as { notes: string | null }).notes,
+      marks: db.raw.prepare('SELECT run_id FROM partial_stamps').all().length,
+      f: (db.raw.prepare(currentFindingsSelect(findingsRuleOpts(db.raw))).all() as { title: string; resolved: number }[]).find((r) => r.title === 'F')?.resolved,
+    };
+  }
+  const GOOD = {
+    'strict-transport-security': 'max-age=63072000; includeSubDomains; preload',
+    'content-security-policy': "default-src 'self'; frame-ancestors 'none'",
+    'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer',
+    'permissions-policy': 'geolocation=()', 'cross-origin-opener-policy': 'same-origin',
+    'cross-origin-embedder-policy': 'require-corp',
+  };
+
+  it('keeps F open when the seed answered 404 but its missing headers were stored', async () => {
+    const db = openDb(':memory:');
+    F(db);
+    const r = await runAndFinish(db, [URL_A], fetchReturning(404, { server: 'x' }));
+    expect(r).toEqual({ notes: 'partial run: 1 host(s) incomplete', marks: 1, f: 0 });
+  });
+
+  it('closes F through coverage for a covered target, and the run is not partial', async () => {
+    const db = openDb(':memory:');
+    F(db, true);
+    const r = await runAndFinish(db, [URL_A], fetchReturning(200, GOOD));
+    expect(r).toEqual({ notes: null, marks: 0, f: 1 });
+  });
+
+  it('is not partial when every target with rows is covered', async () => {
+    const db = openDb(':memory:');
+    const r = await runAndFinish(db, [URL_A], fetchReturning(200, { server: 'x' }));
+    expect(r.notes).toBeNull();
+    expect(r.marks).toBe(0);
+  });
+
+  it('is not partial for a target with no rows and no coverage', async () => {
+    const db = openDb(':memory:');
+    const r = await runAndFinish(db, [URL_A], failing);
+    expect(r.notes).toBeNull();
+    expect(r.marks).toBe(0);
+  });
+
+  it('counts a target with rows as incomplete when the coverage write fails, and keeps F open', async () => {
+    const db = openDb(':memory:');
+    F(db);
+    db.raw.exec("CREATE TRIGGER t_cov BEFORE INSERT ON tool_coverage BEGIN SELECT RAISE(ABORT, 'database is locked'); END");
+    const r = await runAndFinish(db, [URL_A], fetchReturning(200, { server: 'x' }));
+    expect(r).toEqual({ notes: 'partial run: 1 host(s) incomplete', marks: 1, f: 0 });
   });
 });

@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { openDb, type Db } from './lib/db.js';
 import { coveredTargets } from './lib/coverage.js';
+import { partialReasons, finishWithWhy, incompleteHosts } from './lib/run-partial.js';
 import { liveSeeds, originGuardNote, targetsOutsideSeedOrigin } from './lib/live-seed.js';
 
 export interface LiveUrl { target: string; url: string; scheme: 'http' | 'https' }
@@ -151,11 +152,19 @@ export interface AuditOpts {
   notes?: string[];
 }
 
-export async function auditUrls(db: Db, urls: readonly LiveUrl[], opts: AuditOpts): Promise<number> {
+export interface HeadersResult { findings: number; incomplete: number }
+
+export function finishHeadersRun(db: Db, runId: number, targetsCount: number, res: HeadersResult, at: string, notes: readonly string[] = []): void {
+  const why = partialReasons([[res.incomplete, 'host(s) incomplete']]);
+  finishWithWhy(db, runId, { targetsCount, findingsCount: res.findings, ...(notes.length ? { notes: notes.join('; ') } : {}), at }, why);
+}
+
+export async function auditUrls(db: Db, urls: readonly LiveUrl[], opts: AuditOpts): Promise<HeadersResult> {
   const { now, runId } = opts;
   const fetchFn = opts.fetchFn ?? fetch;
   const outcomes: { target: string; ok: boolean }[] = [];
   let findings = 0;
+  const rowsByTarget = new Map<string, number>();
   let idx = 0;
   // Before this run's rows move the watermark.
   const outside = targetsOutsideSeedOrigin(db, 'headers', urls, 'exact');
@@ -194,6 +203,7 @@ export async function auditUrls(db: Db, urls: readonly LiveUrl[], opts: AuditOpt
             meta: v.meta ?? { status: resp.status },
           }, now, runId);
           findings++;
+          rowsByTarget.set(u.target, (rowsByTarget.get(u.target) ?? 0) + 1);
         }
         outcomes.push({ target: u.target, ok: coversHeaders(resp, u.url) });
       } catch (e) {
@@ -205,10 +215,12 @@ export async function auditUrls(db: Db, urls: readonly LiveUrl[], opts: AuditOpt
     }
   }
   await Promise.all(Array.from({ length: Math.min(opts.concurrency, urls.length) }, worker));
-  if (runId !== null && !db.recordCoverage('headers', (outside ? coveredTargets(outcomes).filter((t) => !outside.has(t)) : []), now, runId)) {
+  let covered = outside ? coveredTargets(outcomes).filter((t) => !outside.has(t)) : [];
+  if (runId !== null && !db.recordCoverage('headers', covered, now, runId)) {
     console.error('headers: tool_coverage write failed: scan.db busy');
+    covered = [];
   }
-  return findings;
+  return { findings, incomplete: incompleteHosts(rowsByTarget, new Set(covered)) };
 }
 
 async function main(): Promise<void> {
@@ -264,12 +276,12 @@ Wrapper flags (before '--'):
   const wstream = fs.createWriteStream(outFile);
 
   const notes: string[] = [];
-  const findings = await auditUrls(db, urls, { notes, now, runId, timeoutSec, concurrency, write: (l) => wstream.write(l) });
-  await new Promise<void>((res) => wstream.end(() => res()));
+  const result = await auditUrls(db, urls, { notes, now, runId, timeoutSec, concurrency, write: (l) => wstream.write(l) });
+  await new Promise<void>((done) => wstream.end(() => done()));
 
-  db.finishRun(runId, { targetsCount: urls.length, findingsCount: findings, ...(notes.length ? { notes: notes.join('; ') } : {}), at: new Date().toISOString() });
+  finishHeadersRun(db, runId, urls.length, result, new Date().toISOString(), notes);
   db.close();
-  console.error(`headers done: +${findings} finding(s) across ${urls.length} target(s), run #${runId}`);
+  console.error(`headers done: +${result.findings} finding(s) across ${urls.length} target(s), run #${runId}`);
   console.error(`  sqlite: ${path.resolve(opts.sqlite)}`);
   void writeLines;   // silence unused-import linter — kept for cross-wrapper consistency
 }

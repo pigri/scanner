@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { openDb } from '../src/lib/db.js';
 import {
-  exitFailed, exitReason, finishWithWhy, partialFinish, partialNote, partialReasons, rowsAtRisk, testsslAborted, wpscanFailed,
+  exitFailed, exitReason, finishWithWhy, partialFinish, partialNote, partialReasons, rowsAtRisk, incompleteHosts, testsslAborted, wpscanFailed,
 } from '../src/lib/run-partial.js';
 
 describe('rowsAtRisk', () => {
@@ -122,5 +122,14 @@ describe('wpscanFailed', () => {
     expect(wpscanFailed(0, { vuln_api: { requests_remaining: 'Unlimited' } })).toBe(false);
     expect(wpscanFailed(0, {})).toBe(false);
     expect(wpscanFailed(0, null)).toBe(false);
+  });
+});
+
+describe('incompleteHosts', () => {
+  it('counts the targets with rows that are not covered', () => {
+    const rows = new Map([['a.example', 2], ['b.example', 1], ['c.example', 0]]);
+    expect(incompleteHosts(rows, new Set(['a.example']))).toBe(1);
+    expect(incompleteHosts(rows, new Set())).toBe(2);
+    expect(incompleteHosts(rows, new Set(['a.example', 'b.example']))).toBe(0);
   });
 });

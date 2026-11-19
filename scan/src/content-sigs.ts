@@ -17,6 +17,7 @@ import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, requireTool, resolveOutputPath } from './lib/runner.js';
 import { openDb, type Db } from './lib/db.js';
 import { coveredTargets } from './lib/coverage.js';
+import { partialReasons, finishWithWhy, incompleteHosts } from './lib/run-partial.js';
 import { liveSeeds, originGuardNote, targetsOutsideSeedOrigin } from './lib/live-seed.js';
 
 type Sev = 'critical' | 'high' | 'medium' | 'low' | 'info';
@@ -271,12 +272,20 @@ function hostExamined(replies: ({ status: number; mitigated: boolean } | null)[]
   return !(first === 401 || first === 403 || (first >= 300 && first < 400));
 }
 
-export async function scanSigs(db: Db, live: readonly LiveUrl[], o: SigsOpts): Promise<number> {
+export interface SigsResult { findings: number; incomplete: number }
+
+export function finishSigsRun(db: Db, runId: number, targetsCount: number, res: SigsResult, at: string, notes: readonly string[] = []): void {
+  const why = partialReasons([[res.incomplete, 'host(s) incomplete']]);
+  finishWithWhy(db, runId, { targetsCount, findingsCount: res.findings, ...(notes.length ? { notes: notes.join('; ') } : {}), at }, why);
+}
+
+export async function scanSigs(db: Db, live: readonly LiveUrl[], o: SigsOpts): Promise<SigsResult> {
   const { now, runId } = o;
   const probeFn = o.probeFn ?? probe;
   const hits: Hit[] = [];
   const outcomes: { target: string; ok: boolean }[] = [];
   let findings = 0;
+  const rowsByTarget = new Map<string, number>();
   // Before this run's rows move the watermark.
   const outside = targetsOutsideSeedOrigin(db, 'content-sigs', live.map((l) => ({ target: l.target, url: l.seed })), { paths: SIGS.map((g) => g.path) });
   o.notes?.push(...originGuardNote('content-sigs', outside));
@@ -316,6 +325,7 @@ export async function scanSigs(db: Db, live: readonly LiveUrl[], o: SigsOpts): P
             meta: { path: sig.path, status: r.status, length: r.body.length, desc: sig.desc, snippet: r.body.slice(0, 400) },
           }, now, runId);
           findings++;
+          rowsByTarget.set(h.target, (rowsByTarget.get(h.target) ?? 0) + 1);
           console.error(`  ★ ${h.target} ${sig.path} → ${sig.sev} (${r.status}, ${r.body.length}b)`);
         }
       }
@@ -324,10 +334,12 @@ export async function scanSigs(db: Db, live: readonly LiveUrl[], o: SigsOpts): P
     }
   }
   await Promise.all(Array.from({ length: Math.min(o.concurrency, live.length) }, hostWorker));
-  if (runId !== null && !db.recordCoverage('content-sigs', (outside ? coveredTargets(outcomes).filter((t) => !outside.has(t)) : []), now, runId)) {
+  let covered = outside ? coveredTargets(outcomes).filter((t) => !outside.has(t)) : [];
+  if (runId !== null && !db.recordCoverage('content-sigs', covered, now, runId)) {
     console.error('content-sigs: tool_coverage write failed: scan.db busy');
+    covered = [];
   }
-  return findings;
+  return { findings, incomplete: incompleteHosts(rowsByTarget, new Set(covered)) };
 }
 
 async function main(): Promise<void> {
@@ -393,11 +405,11 @@ Wrapper flags (before '--'):
   const outFile = resolveOutputPath(opts, runId, 'content-sigs.jsonl');
   const wstream = fs.createWriteStream(outFile);
   const notes: string[] = [];
-  const findings = await scanSigs(db, live, { notes, now, runId, timeoutSec, maxKb, concurrency, hostConcurrency, write: (l) => wstream.write(l) });
-  await new Promise<void>((res) => wstream.end(() => res()));
-  db.finishRun(runId, { targetsCount: live.length, findingsCount: findings, ...(notes.length ? { notes: notes.join('; ') } : {}), at: new Date().toISOString() });
+  const result = await scanSigs(db, live, { notes, now, runId, timeoutSec, maxKb, concurrency, hostConcurrency, write: (l) => wstream.write(l) });
+  await new Promise<void>((done) => wstream.end(() => done()));
+  finishSigsRun(db, runId, live.length, result, new Date().toISOString(), notes);
   db.close();
-  console.error(`content-sigs done: +${findings} exposure(s) across ${live.length} host(s), run #${runId}`);
+  console.error(`content-sigs done: +${result.findings} exposure(s) across ${live.length} host(s), run #${runId}`);
   console.error(`  sqlite: ${path.resolve(opts.sqlite)}`);
 }
 
