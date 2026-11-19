@@ -252,6 +252,21 @@ describe('nuclei-url coverage and the source of open findings', () => {
     expect(st.cov).toEqual([]);
   }, 100_000);
 
+  const bare = (scheme: string) => JSON.stringify({
+    'template-id': 't-http', type: 'http', info: { name: 'T', severity: 'info' }, host: HOST,
+    url: `${scheme}://${HOST}`, scheme, 'matched-at': `${scheme}://${HOST}/`,
+  });
+
+  it('does not cover a target whose open https root finding met a run that scanned the host on http', async () => {
+    const r = await runNuclei(['--from-urls'], [bare('http')], 0, { trigger: seed(`https://${HOST}`) });
+    expect(state(r.db).cov).toEqual([]);
+  }, 100_000);
+
+  it('covers a target whose open https root finding met a run that scanned the host on https', async () => {
+    const r = await runNuclei(['--from-urls'], [bare('https')], 0, { trigger: seed(`https://${HOST}`) });
+    expect(state(r.db).cov).toEqual([HOST]);
+  }, 100_000);
+
   it('records no coverage, and says so, when the open findings cannot be read', async () => {
     const bad = `INSERT INTO findings(tool, target, category, severity, title, matched_at, meta_json, seen_at)
       VALUES ('nuclei-url', '${HOST}', 'cve', 'high', 'bad row', 'x', 'not json', '${OLDER}')`;

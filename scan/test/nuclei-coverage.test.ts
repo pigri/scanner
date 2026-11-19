@@ -6,6 +6,7 @@ const ssl = { type: 'ssl', 'matched-at': `${T}:443`, stored: true };
 const inputs = nucleiInputKeys([T], [`https://${T}/app/login`]);
 const base = { inputs, openKeys: new Map<string, string[]>() };
 const http = { type: 'http', 'matched-at': `https://${T}/app/login`, stored: true };
+const bareRow = (scheme: string) => ({ type: 'http', 'matched-at': `${scheme}://${T}/`, url: `${scheme}://${T}`, stored: true });
 
 describe('nucleiCoveredTargets', () => {
   it('covers nothing on the host pass', () => {
@@ -119,8 +120,25 @@ describe('open findings outside this run\'s inputs', () => {
   });
 
   it('covers a target whose open keys are all inputs, however the url is written', () => {
-    const keys = open(`https://${T}/app/login`, `https://${T.toUpperCase()}/app/login/`, `https://${T}`, `${T}:443`, `http://${T}`);
-    expect(nucleiCoveredTargets([T], [http], { ...opts, openKeys: keys })).toEqual([T]);
+    const keys = open(`https://${T}/app/login`, `https://${T.toUpperCase()}/app/login/`, `https://${T}`, `${T}:443`);
+    expect(nucleiCoveredTargets([T], [http, bareRow('https')], { ...opts, openKeys: keys })).toEqual([T]);
+  });
+
+  it('scopes a bare host to the scheme nuclei used on it', () => {
+    expect(nucleiCoveredTargets([T], [http, bareRow('http')], { ...opts, openKeys: open(`https://${T}`) })).toEqual([]);
+    expect(nucleiCoveredTargets([T], [http, bareRow('https')], { ...opts, openKeys: open(`http://${T}`) })).toEqual([]);
+    expect(nucleiCoveredTargets([T], [http, bareRow('http')], { ...opts, openKeys: open(`http://${T}`) })).toEqual([T]);
+  });
+
+  it('adds no root key for a bare host with no row of its own', () => {
+    expect(nucleiCoveredTargets([T], [http], { ...opts, openKeys: open(`https://${T}`) })).toEqual([]);
+    expect(nucleiCoveredTargets([T], [http], { ...opts, openKeys: open(`http://${T}`) })).toEqual([]);
+  });
+
+  it('reads the scheme field when a row url has none', () => {
+    const row = { type: 'http', 'matched-at': `http://${T}/`, url: T, scheme: 'http', stored: true };
+    expect(nucleiCoveredTargets([T], [http, row], { ...opts, openKeys: open(`http://${T}`) })).toEqual([T]);
+    expect(nucleiCoveredTargets([T], [http, row], { ...opts, openKeys: open(`https://${T}`) })).toEqual([]);
   });
 
   it('treats an open row with no key as outside', () => {
@@ -133,7 +151,7 @@ describe('open findings outside this run\'s inputs', () => {
 
   it('lists the targets that have a key outside the inputs', () => {
     const m = new Map([[T, [`https://${T}/gone`]], ['b.example.test', [`https://b.example.test`]]]);
-    expect(targetsWithKeysOutside(m, nucleiInputKeys([T, 'b.example.test'], []))).toEqual([T]);
+    expect(targetsWithKeysOutside(m, nucleiInputKeys([T, 'b.example.test'], ['https://b.example.test']))).toEqual([T]);
   });
 
   it('keys an input url by scheme, host, port and path only', () => {

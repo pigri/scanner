@@ -24,6 +24,9 @@ export interface NucleiRowEvidence {
   'matched-at'?: string | undefined;
   /** The row's `host`, which keys its finding. */
   host?: string | undefined;
+  /** The input nuclei scanned: a URL, or the bare host with the scheme nuclei chose. */
+  url?: string | undefined;
+  scheme?: string | undefined;
   /** Every finding of this row reached the database. */
   stored: boolean;
 }
@@ -56,8 +59,7 @@ export function nucleiSkippedHosts(stderr: string, errorLog: readonly string[], 
 
 /**
  * Key of an input URL or a finding's `url`: scheme, host, non-default port, path
- * (no trailing slash) and query. A value without a scheme is read as https, so
- * an ssl row's `matched-at` of `host:443` keys like the bare host.
+ * (no trailing slash) and query. A value without a scheme is read as https.
  */
 export function inputKey(url: string | null | undefined): string {
   if (!url) return '';
@@ -69,16 +71,52 @@ export function inputKey(url: string | null | undefined): string {
   }
 }
 
-/** Keys of what a `--from-urls` run feeds nuclei. A bare host is probed on either scheme. */
+/**
+ * Keys of what a `--from-urls` run feeds nuclei before it runs: the sample URLs
+ * and, per bare target, a `self:` key for rows that carry no URL (dns, tcp,
+ * ssl). A bare host's root URL is not here: nuclei probes it and scans one
+ * scheme, so `withRowRoots` reads that scheme from the run's own rows.
+ */
 export function nucleiInputKeys(targets: readonly string[], urlSample: readonly string[]): Set<string> {
   const keys = new Set<string>();
-  for (const t of targets) {
-    keys.add(inputKey(`http://${t}`));
-    keys.add(inputKey(`https://${t}`));
-  }
+  for (const t of targets) keys.add(selfKey(t));
   for (const u of urlSample) keys.add(inputKey(u));
   keys.delete('');
   return keys;
+}
+
+/** Key of an open row that has no `url`: the target itself. */
+export function selfKey(target: string): string {
+  return `self:${target}`;
+}
+
+function authorityOf(t: string): string {
+  try { return new URL(`https://${t}`).host.toLowerCase(); } catch { return ''; }
+}
+
+/** The key of the input behind a row, with the scheme nuclei chose when the url has none. */
+function rowInputKey(r: NucleiRowEvidence): string {
+  if (!r.url) return '';
+  return inputKey(/^https?:\/\//i.test(r.url) || !r.scheme ? r.url : `${r.scheme}://${r.url}`);
+}
+
+/**
+ * `inputs` plus the root URL of each bare target on the scheme this run's rows
+ * show. A bare host with no row of its own gets none, so its open root
+ * findings stay outside.
+ */
+export function withRowRoots(targets: readonly string[], inputs: ReadonlySet<string>, rows: readonly NucleiRowEvidence[]): Set<string> {
+  const out = new Set(inputs);
+  const authorities = new Set(targets.map(authorityOf));
+  for (const r of rows) {
+    const k = rowInputKey(r);
+    if (!k) continue;
+    try {
+      const u = new URL(k);
+      if (!u.pathname.replace(/\/+$/, '') && !u.search && authorities.has(u.host.toLowerCase())) out.add(k);
+    } catch { /* not a url */ }
+  }
+  return out;
 }
 
 /**
@@ -121,7 +159,7 @@ export function nucleiCoveredTargets(
   },
 ): string[] {
   if (!opts.fromUrls || opts.exitCode !== 0 || !opts.openKeys) return [];
-  const outside = new Set(targetsWithKeysOutside(opts.openKeys, opts.inputs));
+  const outside = new Set(targetsWithKeysOutside(opts.openKeys, withRowRoots(targets, opts.inputs, rows)));
   const state = new Map<string, { hit: boolean; failed: boolean }>();
   for (const r of rows) {
     const h = parseMatched(r['matched-at']).hostname;

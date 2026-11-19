@@ -6,7 +6,7 @@ import { openDb, type Db } from './lib/db.js';
 import { fetchCanary, probeUrl, hashBody, isNearCanary, type CanaryProbe } from './lib/catchall.js';
 import { cveIdsFor } from './lib/nuclei-cve.js';
 import { NUCLEI_URL_TOOL } from './lib/nuclei-tool.js';
-import { hostOf, nucleiCoveredTargets, nucleiInputKeys, nucleiSkippedHosts, openNucleiUrlKeys, targetsWithKeysOutside, type NucleiRowEvidence } from './lib/nuclei-coverage.js';
+import { hostOf, nucleiCoveredTargets, nucleiInputKeys, nucleiSkippedHosts, openNucleiUrlKeys, targetsWithKeysOutside, withRowRoots, type NucleiRowEvidence } from './lib/nuclei-coverage.js';
 
 // Nuclei templates whose semantics are "did the server return a page for this
 // path?" — these fire false positives on catch-all responders that return the
@@ -234,10 +234,10 @@ Everything after '--' is passed to nuclei verbatim.`));
         const row = parsed as {
           'template-id'?: string; template_id?: string;
           info?: { name?: string; severity?: string; classification?: { 'cve-id'?: string[] } };
-          host?: string; 'matched-at'?: string; type?: string;
+          host?: string; 'matched-at'?: string; type?: string; url?: string; scheme?: string;
         };
         // Fails closed: stored flips to true only after the row's last insert.
-        ev = { type: row.type, 'matched-at': row['matched-at'], host: row.host, stored: false };
+        ev = { type: row.type, 'matched-at': row['matched-at'], host: row.host, url: row.url, scheme: row.scheme, stored: false };
         evidence.push(ev);
         const tid = row['template-id'] ?? row.template_id ?? 'unknown';
         const cves = row.info?.classification?.['cve-id'];
@@ -321,7 +321,7 @@ Everything after '--' is passed to nuclei verbatim.`));
     if (unparseable) notes.push(`coverage skipped: ${unparseable} unparseable nuclei row(s)`);
     if (!openKeys) notes.push('coverage skipped: cannot read open nuclei-url findings');
     else {
-      const outside = targetsWithKeysOutside(openKeys, inputs).length;
+      const outside = targetsWithKeysOutside(openKeys, withRowRoots(targets, inputs, evidence)).length;
       if (outside) notes.push(`${outside} target(s) not covered: an open finding came from a URL outside this run`);
     }
     const covered = unparseable ? [] : nucleiCoveredTargets(targets, evidence, { fromUrls, exitCode: r.code, skipped, inputs, openKeys });
