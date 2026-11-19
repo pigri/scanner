@@ -10,9 +10,11 @@
 // deep-audit and resolved. Findings that predate the earliest scan_queue
 // row still count in first_seen/last_seen but sit outside every presence bit.
 import { openDb } from './lib/db.js';
+import { openKeysFor } from './lib/open-keys.js';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
 import {
   computeAttendance,
+  attendanceWithOpenKeys,
   observationsForKey,
   type Observation,
   type ScanWindow,
@@ -76,6 +78,8 @@ Presence strip:
 Status column (based on the most recent APPLICABLE window):
   persistent   present in the most recent applicable scan
   resolved     absent from the most recent applicable scan (observed before)
+  open         absent from that scan, but the shared closing rule (as in the
+               UI) still counts it open, e.g. after a killed or partial run
   unknown      no applicable window (finding predates the recorded runs)
   <status>!    ≥ 2 present↔absent transitions — often WAF / rate-limit /
                DNS churn, not an actual fix
@@ -252,7 +256,7 @@ function main(): void {
     process.exit(1);
   }
   const observations = findingsFor(db, opts.target, opts.tool);
-  let rows = computeAttendance(observations, windows);
+  let rows = attendanceWithOpenKeys(computeAttendance(observations, windows), openKeysFor(db.raw, opts.target));
   if (opts.category) rows = rows.filter((r) => r.category === opts.category);
   if (opts.tool) rows = rows.filter((r) => r.tool === opts.tool);
 

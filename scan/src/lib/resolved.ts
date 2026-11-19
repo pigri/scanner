@@ -51,6 +51,9 @@ export interface Diff {
   persistent: PersistentPair[];
   // Key seen only in the window. Value = last during observation.
   novel: Observation[];
+  // Absent from the latest window, yet open under the shared closing rule
+  // (lib/current-findings.ts), e.g. after a partial run. Set by diffWithOpenKeys.
+  stillOpen?: Observation[];
 }
 
 // Severities that count as "real issues" (matches deep-audit.ts convention).
@@ -128,6 +131,18 @@ export function diffAgainstScan(
   return { target: window.target, window, resolved, persistent, novel };
 }
 
+/**
+ * Move the `resolved` findings whose key is open under the shared closing rule
+ * to `stillOpen`, so this window-based view never calls resolved what the UI
+ * shows as open.
+ */
+export function diffWithOpenKeys(diff: Diff, openKeys: ReadonlySet<Key>): Diff {
+  const resolved: Observation[] = [];
+  const stillOpen: Observation[] = [];
+  for (const o of diff.resolved) (openKeys.has(keyOf(o)) ? stillOpen : resolved).push(o);
+  return { ...diff, resolved, stillOpen };
+}
+
 export type HostStatus =
   | 'clean-always'  // never had any meaningful finding
   | 'clean-now'     // had meaningful findings before the window, none in it
@@ -142,10 +157,12 @@ export type HostStatus =
 export function classifyHost(diff: Diff): HostStatus {
   const meaningfulPre =
     diff.resolved.some(isMeaningful) ||
+    (diff.stillOpen ?? []).some(isMeaningful) ||
     diff.persistent.some((p) => isMeaningful(p.pre));
   const meaningfulDuring =
     diff.novel.some(isMeaningful) ||
-    diff.persistent.some((p) => isMeaningful(p.during));
+    diff.persistent.some((p) => isMeaningful(p.during)) ||
+    (diff.stillOpen ?? []).some(isMeaningful);
 
   if (!meaningfulPre && !meaningfulDuring) return 'clean-always';
   if (!meaningfulDuring) return 'clean-now';

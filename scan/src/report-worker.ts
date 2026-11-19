@@ -1,16 +1,18 @@
 #!/usr/bin/env -S node --loader tsx
 // Drains report_queue: for each scanned target, gather its rows from the DB and
-// write a per-target markdown report to --out-dir. Runs as a daemon with
+// write a per-target markdown report to --out-dir. Findings are the open
+// logical ones (lib/current-findings.ts), as in the UI. Runs as a daemon with
 // --watch (systemd: deploy/scan-report-worker.service).
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { openDb, checkpointNoWait } from './lib/db.js';
+import { openReportFindings } from './lib/report-findings.js';
 import { latestRiskRow } from './lib/risk-latest.js';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
 import { createLogger } from './lib/log.js';
 import { runQueueLoop, type BatchOutcome } from './lib/queue-loop.js';
-import { renderTargetReport, reportFilename, type TargetReportData, type ReportFinding, type ReportPort, type ReportHttp } from './lib/report.js';
+import { renderTargetReport, reportFilename, type TargetReportData, type ReportPort, type ReportHttp } from './lib/report.js';
 
 interface Opts {
   db: string;
@@ -67,7 +69,7 @@ function gatherTargetData(db: ReturnType<typeof openDb>, target: string, nowIso:
   const ports = db.raw.prepare('SELECT port, protocol, service, product, version FROM ports WHERE target = ? ORDER BY port').all(target) as ReportPort[];
   const http = (db.raw.prepare('SELECT url, status_code, web_server, tech_json FROM http_probes WHERE target = ?').all(target) as { url: string; status_code: number | null; web_server: string | null; tech_json: string | null }[])
     .map((r): ReportHttp => ({ url: r.url, status_code: r.status_code, web_server: r.web_server, tech: r.tech_json ? JSON.parse(r.tech_json) as string[] : null }));
-  const findings = db.raw.prepare('SELECT severity, tool, title, cve FROM findings WHERE target = ?').all(target) as ReportFinding[];
+  const findings = openReportFindings(db.raw, target);
   const risk = latestRiskRow(db.raw).get(target);
   return { target, generatedAt: nowIso, riskScore: risk?.score ?? null, ports, http, findings };
 }
