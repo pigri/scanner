@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { openDb, type Db } from '../src/lib/db.js';
+import { currentFindingsSelect, findingsRuleOpts } from '../src/lib/current-findings.js';
 import { ffufHosts, type FfufDeps, type LiveUrl } from '../src/ffuf.js';
 
 const AT = '2026-11-18T10:00:00.000Z';
@@ -28,13 +29,13 @@ function deps(sc: Scenario): FfufDeps {
   };
 }
 
-async function scan(db: Db, sc: Scenario, withRun = true, notes?: string[]) {
+async function scan(db: Db, sc: Scenario, withRun = true, notes?: string[], now = AT) {
   const dir = join(tmpdir(), `ffuf-test-${randomBytes(6).toString('hex')}`);
   mkdirSync(dir, { recursive: true });
   dirs.push(dir);
-  const runId = withRun ? db.startRun('ffuf', {}, AT) : null;
+  const runId = withRun ? db.startRun('ffuf', {}, now) : null;
   return ffufHosts(db, [HOST], {
-    now: AT, runId, wl: join(dir, 'wl.txt'), threads: 1, timeoutSec: 2, hostTimeoutSec: 5, passthrough: [],
+    now, runId, wl: join(dir, 'wl.txt'), threads: 1, timeoutSec: 2, hostTimeoutSec: 5, passthrough: [],
     outPath: (t) => join(dir, `${t}.json`), deps: deps(sc), ...(notes ? { notes } : {}),
   });
 }
@@ -163,5 +164,33 @@ describe('ffufHosts coverage and the origin of open findings', () => {
     await scan(db, {}, true, notes);
     expect(cov(db)).toEqual([]);
     expect(notes).toEqual(['coverage skipped: cannot read open ffuf findings']);
+  });
+});
+
+describe('ffufHosts keeps an open finding open once the pair has a coverage row', () => {
+  const T1 = '2026-11-10T10:00:00.000Z';
+  const T2 = '2026-11-18T10:00:00.000Z';
+  const seed = (db: Db) => {
+    db.insertFinding({ tool: 'ffuf', target: 'a.example', category: 'path-200', severity: 'medium', title: 'F', matched_at: 'http://a.example:8080/admin/', meta: {} }, T1, null);
+    db.recordCoverage('ffuf', ['a.example'], T1, null);
+  };
+  const state = (db: Db) => ({
+    f: (db.raw.prepare(currentFindingsSelect(findingsRuleOpts(db.raw))).all() as { title: string; resolved: number }[]).find((r) => r.title === 'F')?.resolved,
+    cov: (db.raw.prepare('SELECT seen_at FROM tool_coverage').all() as { seen_at: string }[]).map((r) => r.seen_at),
+  });
+
+  it('leaves F open when the run fetched only another origin', async () => {
+    const db = openDb(':memory:');
+    seed(db);
+    await scan(db, { report: ONE_HIT }, true, undefined, T2);
+    expect(state(db)).toEqual({ f: 0, cov: [T1] });
+  });
+
+  it('resolves F when the run fetched its origin and did not report it', async () => {
+    const db = openDb(':memory:');
+    db.insertFinding({ tool: 'ffuf', target: 'a.example', category: 'path-200', severity: 'medium', title: 'F', matched_at: 'https://a.example/old/', meta: {} }, T1, null);
+    db.recordCoverage('ffuf', ['a.example'], T1, null);
+    await scan(db, { report: ONE_HIT }, true, undefined, T2);
+    expect(state(db)).toEqual({ f: 1, cov: [T2] });
   });
 });

@@ -261,3 +261,33 @@ describe('nuclei-url coverage and the source of open findings', () => {
     expect(st.notes).toContain('coverage skipped: cannot read open nuclei-url findings');
   }, 100_000);
 });
+
+describe('nuclei-url coverage keeps an open finding open once the pair has a coverage row', () => {
+  const T1 = '2026-01-01T00:00:00.000Z';
+  const covered = `INSERT INTO tool_coverage(target, tool, seen_at, run_id) VALUES ('${HOST}', 'nuclei-url', '${T1}', NULL);`;
+  const finding = `INSERT INTO findings(tool, target, category, severity, title, matched_at, meta_json, seen_at)
+    VALUES ('nuclei-url', '${HOST}', 'cve', 'high', 'older finding', 'https://${HOST}/app/zzz', '${JSON.stringify({ url: `https://${HOST}/app/zzz` })}', '${T1}');`;
+  const second = `INSERT INTO discovered_urls(target, url, source, status, seen_at)
+    VALUES ('${HOST}', 'https://${HOST}/app/zzz', 'katana', 200, '${NOW}');`;
+  const hit = row('http', `https://${HOST}/app/login`);
+  const after = (dbPath: string) => {
+    const db = openDb(dbPath);
+    const logical = db.raw.prepare(currentFindingsSelect(findingsRuleOpts(db.raw))).all() as { title: string; resolved: number }[];
+    const cov = db.raw.prepare("SELECT seen_at FROM tool_coverage WHERE target = ? AND tool = 'nuclei-url'").all(HOST) as { seen_at: string }[];
+    db.close();
+    return { f: logical.find((x) => x.title === 'older finding')?.resolved, cov: cov.map((c) => c.seen_at) };
+  };
+
+  it('leaves the finding open when the run examined only another URL', async () => {
+    const r = await runNuclei(['--from-urls', '--urls-per-host', '1'], [hit], 0, { trigger: covered + finding + second });
+    expect(r.code, r.stderr).toBe(0);
+    expect(after(r.db)).toEqual({ f: 0, cov: [T1] });
+  }, 100_000);
+
+  it('resolves the finding when the run examined its URL and did not report it', async () => {
+    const r = await runNuclei(['--from-urls'], [hit], 0, { trigger: covered + finding + second });
+    const st = after(r.db);
+    expect(st.f).toBe(1);
+    expect(st.cov).not.toEqual([T1]);
+  }, 100_000);
+});

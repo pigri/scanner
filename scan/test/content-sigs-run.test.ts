@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { openDb, type Db } from '../src/lib/db.js';
+import { currentFindingsSelect, findingsRuleOpts } from '../src/lib/current-findings.js';
 import { scanSigs, type LiveUrl } from '../src/content-sigs.js';
 
 const AT = '2026-11-18T10:00:00.000Z';
@@ -16,9 +17,9 @@ function probes(reply: (seed: string, path: string) => Reply): ProbeFn {
   return async (seed, sig) => reply(seed, sig.path);
 }
 
-async function scan(db: Db, live: LiveUrl[], probeFn: ProbeFn, withRun = true, notes?: string[]) {
-  const runId = withRun ? db.startRun('content-sigs', {}, AT) : null;
-  return scanSigs(db, live, { now: AT, runId, timeoutSec: 2, maxKb: 8, concurrency: 2, hostConcurrency: 4, write: () => {}, probeFn, ...(notes ? { notes } : {}) });
+async function scan(db: Db, live: LiveUrl[], probeFn: ProbeFn, withRun = true, notes?: string[], now = AT) {
+  const runId = withRun ? db.startRun('content-sigs', {}, now) : null;
+  return scanSigs(db, live, { now, runId, timeoutSec: 2, maxKb: 8, concurrency: 2, hostConcurrency: 4, write: () => {}, probeFn, ...(notes ? { notes } : {}) });
 }
 const cov = (db: Db) => db.raw.prepare('SELECT target, tool, seen_at FROM tool_coverage ORDER BY target').all();
 
@@ -118,5 +119,32 @@ describe('scanSigs coverage and the origin of open findings', () => {
     await scan(db, [A], probes(() => miss), true, notes);
     expect(cov(db)).toEqual([]);
     expect(notes).toEqual(['coverage skipped: cannot read open content-sigs findings']);
+  });
+});
+
+describe('scanSigs keeps an open finding open once the pair has a coverage row', () => {
+  const T1 = '2026-11-10T10:00:00.000Z';
+  const T2 = '2026-11-18T10:00:00.000Z';
+  const seed = (db: Db, matched: string) => {
+    db.insertFinding({ tool: 'content-sigs', target: 'a.example', category: 'exposure-.env', severity: 'high', title: 'F', matched_at: matched, meta: {} }, T1, null);
+    db.recordCoverage('content-sigs', ['a.example'], T1, null);
+  };
+  const state = (db: Db) => ({
+    f: (db.raw.prepare(currentFindingsSelect(findingsRuleOpts(db.raw))).all() as { title: string; resolved: number }[]).find((r) => r.title === 'F')?.resolved,
+    cov: (db.raw.prepare('SELECT seen_at FROM tool_coverage').all() as { seen_at: string }[]).map((r) => r.seen_at),
+  });
+
+  it('leaves F open when the run probed only another origin', async () => {
+    const db = openDb(':memory:');
+    seed(db, 'http://a.example:8080/.env');
+    await scan(db, [A], probes((_s, p) => (p === '.git/HEAD' ? gitHead : miss)), true, undefined, T2);
+    expect(state(db)).toEqual({ f: 0, cov: [T1] });
+  });
+
+  it('resolves F when the run probed its origin and did not report it', async () => {
+    const db = openDb(':memory:');
+    seed(db, 'https://a.example/.env');
+    await scan(db, [A], probes((_s, p) => (p === '.git/HEAD' ? gitHead : miss)), true, undefined, T2);
+    expect(state(db)).toEqual({ f: 1, cov: [T2] });
   });
 });
