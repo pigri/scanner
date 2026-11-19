@@ -128,7 +128,15 @@ describe('wpscanRows', () => {
     expect(rows.map((r) => [r.title, r.cve])).toEqual([['t: same', 'CVE-2024-0001'], ['t: same', null]]);
   });
 
+  it('stores a main_theme vulnerability when there is no themes key', () => {
+    const rows = wpscanRows({ main_theme: { slug: 'demo-theme', vulnerabilities: [{ title: 'bug', references: { cve: ['2024-0009'] } }] } });
+    expect(brief(rows)).toEqual([['theme-vulnerability', 'high', 'demo-theme: bug', 'CVE-2024-0009', null]]);
+  });
 
+  it('stores no password of a password_attack block in any row', () => {
+    const doc = { ...(real('keys-enumerate-pretty.json') as object), password_attack: { 'admin-example': { password: 'hunter2-secret' } } };
+    expect(JSON.stringify(wpscanRows(doc))).not.toContain('hunter2-secret');
+  });
 
   it('bounds and sanitises the users title and keeps the clean full list in meta', () => {
     const evil = 'evil\nCRITICAL: forged, x';
