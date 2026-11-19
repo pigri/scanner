@@ -101,21 +101,40 @@ export interface FfufOpts {
   notes?: string[];
 }
 
+// Flags (ffuf -h) that leave the set of requested URLs alone. A flag that takes
+// a value is true. Anything else, a filter or matcher included, ends coverage.
+const PASSTHROUGH_FLAGS = new Map<string, boolean>([
+  ['t', true], ['rate', true], ['p', true], ['maxtime', true], ['x', true], ['replay-proxy', true],
+  ['s', false], ['c', false], ['v', false], ['noninteractive', false], ['http2', false],
+]);
+
 /**
  * The paths ffuf requests below a seed: each wordlist entry, and with `-e` each
  * entry plus an extension. Null when that cannot be known: the wordlist cannot
- * be read, or the passthrough adds a wordlist or recursion.
+ * be read, or the passthrough holds a flag that may change what is requested
+ * (`-u`, `-request`, `-w`, `-recursion`, or any flag not known to leave it alone).
  */
 export function requestedPaths(wl: string, passthrough: readonly string[]): string[] | null {
-  if (passthrough.some((a) => a === '-recursion' || a === '-w')) return null;
+  let exts: string[] = [];
+  for (let i = 0; i < passthrough.length; i++) {
+    const m = /^--?([^=\s-][^=\s]*)(?:=(.*))?$/.exec(passthrough[i]!);
+    if (!m) return null;
+    const name = m[1]!;
+    let value = m[2];
+    if (name === 'e' || PASSTHROUGH_FLAGS.get(name)) {
+      if (value === undefined) value = passthrough[++i];
+      if (value === undefined) return null;
+      if (name === 'e') exts = value.split(',').filter(Boolean);
+    } else if (!PASSTHROUGH_FLAGS.has(name)) {
+      return null;
+    }
+  }
   let words: string[];
   try {
     words = fs.readFileSync(wl, 'utf8').split('\n').map((w) => w.replace(/\r$/, '')).filter(Boolean);
   } catch {
     return null;
   }
-  const i = passthrough.indexOf('-e');
-  const exts = i >= 0 ? (passthrough[i + 1] ?? '').split(',').filter(Boolean) : [];
   return words.flatMap((w) => [w, ...exts.map((x) => `${w}${x}`)]);
 }
 
@@ -128,7 +147,7 @@ export async function ffufHosts(db: Db, live: readonly LiveUrl[], o: FfufOpts): 
   // Before this run's rows move the watermark.
   const paths = requestedPaths(wl, passthrough);
   const outside = paths ? targetsOutsideSeedOrigin(db, 'ffuf', live.map((l) => ({ target: l.target, url: l.seed })), { paths }) : null;
-  o.notes?.push(...(paths ? originGuardNote('ffuf', outside) : ['coverage skipped: cannot tell which paths ffuf requests (wordlist unreadable, or -recursion or -w passed)']));
+  o.notes?.push(...(paths ? originGuardNote('ffuf', outside) : ['coverage skipped: cannot tell which paths ffuf requests (wordlist unreadable, or a passthrough flag that may change the requests)']));
   for (const { target, seed } of live) {
     // Canary: fetch an unlikely-to-exist path first. If the host is a catch-all
     // responder (Zorp/decoy/SPA-that-serves-index-html-for-everything), the
