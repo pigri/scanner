@@ -150,3 +150,13 @@ describe('targetAggSql with partial runs', () => {
     expect(legacy).toMatchObject({ critical: 0, low: 1, findings: 1 });
   });
 });
+
+describe('targetAggSql nuclei passes', () => {
+  it('counts a finding both nuclei passes report once', () => {
+    const db = newDb();
+    ins(db, { target: 'x', tool: 'nuclei', severity: 'high', title: 'same', cve: 'CVE-1' });
+    ins(db, { target: 'x', tool: 'nuclei-url', severity: 'high', title: 'same', cve: 'CVE-1' });
+    ins(db, { target: 'x', tool: 'nuclei-url', severity: 'low', title: 'url-only' });
+    expect(aggOf(db, false, 'x')).toMatchObject({ high: 1, low: 1, findings: 2, cves: 1 });
+  });
+});

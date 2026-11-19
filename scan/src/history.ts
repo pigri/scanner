@@ -13,6 +13,7 @@ import { openDb } from './lib/db.js';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
 import {
   computeAttendance,
+  observationsForKey,
   type Observation,
   type ScanWindow,
   type KeyAttendance,
@@ -223,9 +224,7 @@ function printDetail(
       console.log(`    #${i + 1}  ${w.tool.padEnd(12)}  ${w.startedAt} → ${w.finishedAt}   ${mark}${sev}`);
     });
 
-    const rows = observations.filter(
-      (o) => o.tool === k.tool && o.category === k.category && o.title === k.title,
-    );
+    const rows = observationsForKey(observations, k.key);
     console.log('\n  Observations (chronological):');
     for (const o of rows) {
       const sev = `[${(o.severity ?? '-').padEnd(8)}]`;

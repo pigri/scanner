@@ -5,7 +5,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, rmSync } from 'node:fs';
 import Database from 'better-sqlite3';
-import { NEWS_FIRSTS_SQL, buildNewsSql } from '../src/lib/news-sql.js';
+import { NEWS_FIRSTS_SQL, buildNewsSql, newSinceSql } from '../src/lib/news-sql.js';
 
 const SCHEMA = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '../src/lib/schema.sql'),
@@ -60,12 +60,15 @@ describe('news aggregation query plan', () => {
       .join('\n');
     db.close();
 
-    // The whole point: aggregation reads the covering index in order, so there is
-    // no temp B-tree sort and no table lookup. Dropping the index or breaking its
-    // coverage reintroduces the temp B-tree and fails here.
+    // The plain branch aggregates in index order: no temp B-tree and no table
+    // lookup. The nuclei branch groups across two tools, so it needs exactly one
+    // temp B-tree; every findings access still uses the covering index.
+    // Dropping the index or breaking its coverage fails here.
     expect(plan).toContain('idx_findings_logical');
     expect(plan).toContain('COVERING INDEX');
-    expect(plan).not.toContain('TEMP B-TREE');
+    expect(plan.split('UNION ALL')[0]).not.toContain('TEMP B-TREE');
+    expect(plan.match(/TEMP B-TREE/g)).toHaveLength(1);
+    expect(plan).not.toMatch(/SCAN findings(?! USING COVERING INDEX idx_findings_logical)/);
   });
 });
 
@@ -137,7 +140,10 @@ describe('buildNewsSql query plans', () => {
       db.close();
       expect(plan).toContain('COVERING INDEX idx_findings_logical');
       expect(plan).not.toContain('idx_findings_severity');
-      expect(plan).not.toContain('TEMP B-TREE FOR GROUP BY');
+      // One temp B-tree remains: the nuclei branch groups across two tools.
+      expect(plan.split('UNION ALL')[0]).not.toContain('TEMP B-TREE');
+      expect(plan.match(/TEMP B-TREE FOR GROUP BY/g)).toHaveLength(1);
+      expect(plan).not.toMatch(/SCAN findings(?! USING COVERING INDEX idx_findings_logical)/);
     });
   }
 
@@ -160,5 +166,32 @@ describe('buildNewsSql query plans', () => {
       expect(r.severity).toBe('high');
       expect(r.first_seen.slice(0, 10)).toBe('2026-10-05');
     }
+  });
+});
+
+describe('nuclei passes in News', () => {
+  const twinKey = { target: 'a.example.com', category: 'cve', severity: 'high', title: 'CVE-2021-1 on a' };
+  it('shows a match both passes report once, with the earlier first_seen', () => {
+    const db = newDb();
+    insertFinding(db, { ...twinKey, tool: 'nuclei', seen_at: '2026-10-05T00:00:00Z' });
+    insertFinding(db, { ...twinKey, tool: 'nuclei-url', seen_at: '2026-10-09T00:00:00Z' });
+    const rows = db.prepare(buildNewsSql({}).rows.sql).all(...buildNewsSql({}).rows.params) as { tool: string; first_seen: string }[];
+    const days = db.prepare(buildNewsSql({}).days.sql).all() as { day: string; c: number }[];
+    db.close();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ tool: 'nuclei', first_seen: '2026-10-05T00:00:00Z' });
+    expect(days).toEqual([{ day: '2026-10-05', c: 1 }]);
+  });
+
+  it('newSinceSql does not return a URL-pass re-observation of an older finding', () => {
+    const db = newDb();
+    insertFinding(db, { ...twinKey, tool: 'nuclei', seen_at: '2026-10-05T00:00:00Z' });
+    insertFinding(db, { ...twinKey, tool: 'nuclei-url', seen_at: '2026-10-09T00:00:00Z' });
+    insertFinding(db, { ...twinKey, title: 'fresh', tool: 'nuclei-url', seen_at: '2026-10-09T00:00:00Z' });
+    const rows = db.prepare(newSinceSql({})).all('2026-10-08T00:00:00Z') as { title: string }[];
+    const sev = db.prepare(newSinceSql({ severity: true, tool: true })).all('2026-10-01T00:00:00Z', 'high', 'nuclei-url') as { seen_at: string }[];
+    db.close();
+    expect(rows.map((r) => r.title)).toEqual(['fresh']);
+    expect(sev).toHaveLength(1);
   });
 });

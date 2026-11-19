@@ -70,8 +70,13 @@ function assertChronological(windows: readonly ScanWindow[]): void {
   }
 }
 
-function windowAppliesToKey(w: ScanWindow, keyTool: string): boolean {
-  return w.tool === 'scan-all' || w.tool === keyTool;
+function windowAppliesToKey(w: ScanWindow, tools: ReadonlySet<string>): boolean {
+  return w.tool === 'scan-all' || tools.has(w.tool);
+}
+
+/** The observations that make up one merged key, whichever pass saw them. */
+export function observationsForKey(observations: readonly Observation[], key: Key): Observation[] {
+  return observations.filter((o) => keyOf(o) === key);
 }
 
 function computeStatus(applicable: PresenceState[]): Status {
@@ -94,6 +99,32 @@ function countTransitions(applicable: PresenceState[]): number {
     last = p;
   }
   return n;
+}
+
+// A merged key has one status per pass: each pass's own windows only.
+function perToolOutcome(
+  obsList: readonly Observation[],
+  windows: readonly ScanWindow[],
+  tools: ReadonlySet<string>,
+): { status: Status; flapping: boolean } {
+  let persistent = false;
+  let resolved = false;
+  let unknown = false;
+  let flapping = false;
+  for (const tool of tools) {
+    const own = windows.filter((w) => w.tool === tool || w.tool === 'scan-all');
+    const seq: PresenceState[] = own.map((w) =>
+      obsList.some((o) => o.tool === tool && o.seen_at >= w.startedAt && o.seen_at <= w.finishedAt)
+        ? 'present'
+        : 'absent',
+    );
+    const st = computeStatus(seq);
+    if (st === 'persistent') persistent = true;
+    else if (st === 'resolved') resolved = true;
+    else unknown = true;
+    if (countTransitions(seq) >= 2) flapping = true;
+  }
+  return { status: persistent ? 'persistent' : unknown ? 'unknown' : resolved ? 'resolved' : 'unknown', flapping };
 }
 
 /**
@@ -130,8 +161,9 @@ export function computeAttendance(
   const out: KeyAttendance[] = [];
   for (const [k, obsList] of byKey) {
     const first = obsList[0]!;
+    const tools = new Set(obsList.map((o) => o.tool));
     const presence: PresenceState[] = windows.map((w) =>
-      windowAppliesToKey(w, first.tool) ? 'absent' : 'n/a',
+      windowAppliesToKey(w, tools) ? 'absent' : 'n/a',
     );
     const severityPerWindow: (string | null)[] = windows.map(() => null);
     let firstSeen = first.seen_at;
@@ -144,7 +176,7 @@ export function computeAttendance(
       worstSeverity = worse(worstSeverity, o.severity);
       for (let i = 0; i < windows.length; i++) {
         const w = windows[i]!;
-        if (!windowAppliesToKey(w, first.tool)) continue;
+        if (!windowAppliesToKey(w, tools)) continue;
         if (o.seen_at >= w.startedAt && o.seen_at <= w.finishedAt) {
           presence[i] = 'present';
           severityPerWindow[i] = worse(severityPerWindow[i]!, o.severity);
@@ -152,6 +184,7 @@ export function computeAttendance(
       }
     }
 
+    const { status, flapping } = perToolOutcome(obsList, windows, tools);
     out.push({
       key: k,
       tool: first.tool,
@@ -162,8 +195,8 @@ export function computeAttendance(
       severityPerWindow,
       firstSeen,
       lastSeen,
-      status: computeStatus(presence),
-      flapping: countTransitions(presence) >= 2,
+      status,
+      flapping,
       worstSeverity,
     });
   }
