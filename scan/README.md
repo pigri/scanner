@@ -319,6 +319,21 @@ If `tool_coverage` or `partial_stamps` is missing (an old DB), the readers skip 
 
 A tool that records no coverage keeps rule 3.
 
+**Coverage seed checks.** A tool records coverage for a target only when the run examined the source of every open finding of that pair. A run that looked elsewhere cannot close what it never saw. The check reads the open findings before the run inserts its own rows, and compares each finding's source with what the run requested:
+
+- `nuclei-url`: the key of each open row MUST have been examined by this run.
+  - An http row keys on its URL. A bare host's root counts only with a scheme this run's own rows name.
+  - An ssl row keys on its host and port (443 by default). Only an input examines it: the bare target for port 443, or a sample URL on that authority.
+  - Any other non-http row (tcp, javascript, …) keys on its host and port. An input URL, or a row this run stored on that exact authority, examines it.
+  - A dns row keys on the target.
+- `ffuf`: the finding's URL MUST be the target's seed URL plus one entry of the run's wordlist. A wordlist that cannot be read, or a passthrough flag outside a short allowlist (rate, timing, `-replay-proxy`, output noise), records no coverage.
+- `content-sigs`: the finding's URL MUST be the seed plus one of the signature paths.
+- `headers`: the finding's URL MUST be the seed URL itself.
+
+The seed is one http(s) URL per target from `http_probes`, chosen the same way on every run: https before http, a default port before an explicit one, then the lowest URL. A finding with no readable `matched_at` counts as outside.
+
+A blocked pair records no coverage and its findings stay open. They stay open until a run examines their source again. For `ffuf`, a blocked host that stored rows also makes the run partial (`partial run: N host(s) incomplete`), so the run's own rows close nothing by rule 3 either: none of that host's ffuf findings close until its seed returns to their origin, or they are triaged by hand. The other three tools withhold coverage only, so a pair that was never covered still follows rule 3. The run note names the cause: `N target(s) not covered: an open finding came from a URL outside this run` (`nuclei-url`), `...from an origin outside this run` (the others), or `coverage skipped: cannot read open <tool> findings`.
+
 **Same finding, two nuclei passes.** The host pass writes `tool='nuclei'` and the `--from-urls` pass writes `tool='nuclei-url'`. Every reader folds them into `nuclei`: a match both passes report is one finding, with summed occurrences, and it is open if either pass still has it open. Each pass keeps its own watermark. News and the digest key on the folded tool, so a URL-pass finding is not announced again as new.
 
 **Scores and counts.** The risk score reads current rows only, so a conclusive empty run lowers it. The known-CVE bucket counts distinct CVE ids, so one CVE reported under two titles counts once. The UI severity counts, the overview and the recent-targets list count open logical findings. The CVE column counts distinct ids.
