@@ -534,6 +534,7 @@ Buckets per target:
 - **resolved** — key seen before the window, absent from it
 - **persistent** — key seen in both (still open)
 - **novel** — key seen only in the window (new since last scan)
+- **stillOpen** (`--json`) / **OPEN** (`--target`) — key absent from the window, but open under the closing rule (see [Open and current findings](#open-and-current-findings)), for example after a killed or partial run. It is never listed as resolved, and its host is `still-dirty`, not `clean-now`
 
 ```
 npm run resolved                                  # clean-now cohort (hosts that
@@ -579,7 +580,11 @@ npm run history -- --target cca.hiteles.gov.hu --tool testssl --title "HSTS: not
 ```
 
 Status: `persistent` (present in latest applicable scan) / `resolved`
-(absent) / `unknown` (no applicable window). A trailing `!` means ≥ 2
+(absent, and the closing rule agrees) / `open` (absent from that scan, but the
+closing rule, see [Open and current findings](#open-and-current-findings),
+still counts it open, for example after a partial run) / `unknown` (no
+applicable window). `first_seen`/`last_seen` and the presence strip keep the
+per-window history. A trailing `!` means ≥ 2
 present↔absent transitions across applicable windows — usually WAF /
 rate-limit / DNS churn, not a real fix. JSONL via `--json`.
 
