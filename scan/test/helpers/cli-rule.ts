@@ -32,12 +32,18 @@ export function run(script: string, args: string[]): { out: string; status: numb
  * after writing one info row, so it must not close `cve-a`. The scan_queue
  * window is the later run's.
  */
-export function seedKilledNuclei(db: ReturnType<typeof openDb>, target: string): void {
-  const r1 = db.startRun('nuclei', {}, T0);
-  db.insertFinding({ tool: 'nuclei', target, category: 'cve-a', severity: 'medium', title: 'cve-a' }, T0, r1);
+export function seedKilledNuclei(
+  db: ReturnType<typeof openDb>,
+  target: string,
+  o: { tool?: string; category?: string | null } = {},
+): void {
+  const tool = o.tool ?? 'nuclei';
+  const category = o.category === undefined ? 'cve-a' : o.category;
+  const r1 = db.startRun(tool, {}, T0);
+  db.insertFinding({ tool, target, category, severity: 'medium', title: 'cve-a' }, T0, r1);
   db.finishRun(r1, { at: T1 });
-  const r2 = db.startRun('nuclei', {}, T2);
-  db.insertFinding({ tool: 'nuclei', target, category: 'tech', severity: 'info', title: 'tech-detect' }, T2, r2);
+  const r2 = db.startRun(tool, {}, T2);
+  db.insertFinding({ tool, target, category: 'tech', severity: 'info', title: 'tech-detect' }, T2, r2);
   db.finishRun(r2, { at: T3, partial: true });
   db.raw.prepare(
     `INSERT INTO scan_queue (target, status, queued_at, started_at, finished_at) VALUES (?, 'done', ?, ?, ?)`,

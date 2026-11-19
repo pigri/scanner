@@ -2,6 +2,18 @@ import { describe, it, expect } from 'vitest';
 import { run, tmpDb, seedKilledNuclei, T0, T1, T2, T3 } from './helpers/cli-rule.js';
 
 describe('history', () => {
+  it.each([
+    ['a NULL category', { category: null }],
+    ['a nuclei-url-only finding', { tool: 'nuclei-url' }],
+  ])('is open, not resolved, after a partial run: %s', (_n, o) => {
+    const { file, db } = tmpDb();
+    seedKilledNuclei(db, 'host.example', o);
+    db.close();
+    const r = run('src/history.ts', ['--sqlite', file, '--target', 'host.example', '--json']);
+    const rows = r.out.trim().split('\n').map((l) => JSON.parse(l) as { title: string; status: string });
+    expect(rows.find((x) => x.title === 'cve-a')!.status).toBe('open');
+  });
+
   it('does not mark a finding resolved after a partial run window', () => {
     const { file, db } = tmpDb();
     seedKilledNuclei(db, 'host.example');
@@ -10,7 +22,7 @@ describe('history', () => {
     expect(r.status).toBe(0);
     const rows = r.out.trim().split('\n').map((l) => JSON.parse(l) as { title: string; status: string; firstSeen: string; lastSeen: string });
     const a = rows.find((x) => x.title === 'cve-a')!;
-    expect(a.status).not.toBe('resolved');
+    expect(a.status).toBe('open');
     expect(a.firstSeen).toBe(T0);
     expect(a.lastSeen).toBe(T0);
   });
