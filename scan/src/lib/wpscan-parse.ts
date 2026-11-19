@@ -91,11 +91,16 @@ function* walk(node: unknown, segs: string[], key = ''): Generator<[string, unkn
 
 function vulnRows(s: Section, key: string, v: Node, seen: Set<string>): WpscanRow[] {
   const title = s.title(key, v);
-  const dedup = `${s.category}\0${title}`;
-  // main_theme is also listed under themes when all themes are enumerated.
-  if (seen.has(dedup)) return [];
-  seen.add(dedup);
   const cves = wpscanCves(v as Vuln);
+  // main_theme is also listed under themes when all themes are enumerated. Only that overlap is
+  // deduplicated, by the vulnerability's identity, so two vulnerabilities sharing a title both stay.
+  if (s.category === 'theme-vulnerability') {
+    const wpvulndb = isNode(v['references']) ? v['references']['wpvulndb'] : undefined;
+    const id = Array.isArray(wpvulndb) && wpvulndb.length ? `db:${wpvulndb.map(String).sort().join(',')}` : `cve:${[...cves].sort().join(',')}`;
+    const dedup = `${title}\0${id}`;
+    if (seen.has(dedup)) return [];
+    seen.add(dedup);
+  }
   const score = cvssScore(v['cvss']);
   const vector = str((v['cvss'] as Node | undefined)?.['vector']);
   const meta = { ...v, cves, ...(score !== null ? { cvss: score, cvss_vector: vector } : {}) };

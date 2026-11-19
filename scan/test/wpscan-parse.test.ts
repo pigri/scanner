@@ -113,4 +113,23 @@ describe('wpscanRows', () => {
     expect(rows.map((r) => [r.title, r.cve])).toEqual([['pair', 'CVE-2024-0001'], ['pair', 'CVE-2024-0002']]);
     for (const r of rows) expect(r.meta).toMatchObject({ cves: ['CVE-2024-0001', 'CVE-2024-0002'], cvss: 8.1, cvss_vector: 'vec' });
   });
+
+
+  it('keeps two vulnerabilities of one plugin that share a title', () => {
+    const rows = wpscanRows({ plugins: { p: { vulnerabilities: [
+      { title: 'XSS', references: { cve: ['2020-0001'] } }, { title: 'XSS', references: { cve: ['2021-0002'] } },
+    ] } } });
+    expect(rows.map((r) => r.cve)).toEqual(['CVE-2020-0001', 'CVE-2021-0002']);
+  });
+
+  it('stores a theme vulnerability once when main_theme and themes both list it', () => {
+    const v = { title: 'same', references: { cve: ['2024-0001'], wpvulndb: ['111'] } };
+    const rows = wpscanRows({ main_theme: { slug: 't', vulnerabilities: [v] }, themes: { t: { slug: 't', vulnerabilities: [v, { title: 'same', references: { wpvulndb: ['222'] } }] } } });
+    expect(rows.map((r) => [r.title, r.cve])).toEqual([['t: same', 'CVE-2024-0001'], ['t: same', null]]);
+  });
+
+
+
+
+
 });
