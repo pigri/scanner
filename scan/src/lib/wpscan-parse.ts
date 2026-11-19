@@ -26,11 +26,11 @@ export function wpscanCve(v: Vuln): string | null {
   return wpscanCves(v)[0] ?? null;
 }
 
-/** The score of wpscan's `cvss: {score, vector}` object, or null when there is none above zero. */
+/** The score of wpscan's `cvss: {score, vector}` object, clamped to (0, 10], or null when there is none above zero. */
 function cvssScore(cvss: unknown): number | null {
   const raw = (cvss as { score?: unknown } | null | undefined)?.score;
-  const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number.parseFloat(raw) : NaN;
-  return Number.isFinite(n) && n > 0 ? n : null;
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' && /^\d+(\.\d+)?$/.test(raw.trim()) ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? Math.min(n, 10) : null;
 }
 
 /** critical >= 9, high >= 7, medium >= 4, low above 0. Without a score the vulnerability stays `high`. */

@@ -48,7 +48,7 @@ describe('wpscanSeverity', () => {
   it.each([
     [{ score: '10.0' }, 'critical'], [{ score: '9.0' }, 'critical'], [{ score: '8.9' }, 'high'], [{ score: '7.0' }, 'high'],
     [{ score: '6.9' }, 'medium'], [{ score: '4.0' }, 'medium'], [{ score: '3.9' }, 'low'], [{ score: 0.1 }, 'low'],
-    [{ score: '0' }, 'high'], [{ score: 'n/a' }, 'high'], [{}, 'high'], [null, 'high'], [undefined, 'high'],
+    [{ score: '0' }, 'high'], [{ score: '9.8abc' }, 'high'], [{ score: '1e3' }, 'high'], [{ score: 1e3 }, 'critical'], [{ score: -5 }, 'high'], [{ score: 'n/a' }, 'high'], [{}, 'high'], [null, 'high'], [undefined, 'high'],
   ])('cvss %j -> %s', (cvss, want) => { expect(wpscanSeverity(cvss)).toBe(want); });
 });
 
@@ -114,6 +114,12 @@ describe('wpscanRows', () => {
     for (const r of rows) expect(r.meta).toMatchObject({ cves: ['CVE-2024-0001', 'CVE-2024-0002'], cvss: 8.1, cvss_vector: 'vec' });
   });
 
+  it('sets no numeric cvss from a malformed score and clamps one above 10', () => {
+    const meta = (score: unknown) => wpscanRows({ version: { vulnerabilities: [{ title: 't', cvss: { score } }] } })[0]!.meta as { cvss?: unknown };
+    expect(typeof meta('9.8abc').cvss).not.toBe('number');
+    expect(typeof meta('1e3').cvss).not.toBe('number');
+    expect(meta('12').cvss).toBe(10);
+  });
 
   it('keeps two vulnerabilities of one plugin that share a title', () => {
     const rows = wpscanRows({ plugins: { p: { vulnerabilities: [
