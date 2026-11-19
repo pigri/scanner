@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, resolveOutputPath } from './lib/runner.js';
 import { openDb } from './lib/db.js';
+import { parseWpscanStdout, wpscanCve, type WpscanParsed } from './lib/wpscan-parse.js';
 import { finishWithWhy, partialReasons, rowsAtRisk, wpscanFailed } from './lib/run-partial.js';
 
 async function main(): Promise<void> {
@@ -33,13 +34,8 @@ Pass --enumerate flags after '--'. Output: JSONL to --out (default: wpscan.jsonl
     const r = await run('wpscan', args, { timeoutMs: 300_000 });
     const rowsBefore = findings;
     if (r.stdout.trim()) {
-      const line = r.stdout.trim().split('\n').filter(Boolean).slice(-1)[0] ?? '';
       try {
-        const parsed = JSON.parse(line) as {
-          interesting_findings?: { to_s?: string; type?: string; url?: string; references?: unknown }[];
-          version?: { number?: string; vulnerabilities?: { title?: string; references?: { cve?: string[] } }[] };
-          plugins?: Record<string, { version?: { number?: string }; vulnerabilities?: { title?: string; references?: { cve?: string[] } }[] }>;
-        };
+        const parsed = parseWpscanStdout(r.stdout) as WpscanParsed;
         wstream.write(JSON.stringify({ target: url, wpscan: parsed }) + '\n');
         ok++;
         if (db) {
@@ -48,9 +44,9 @@ Pass --enumerate flags after '--'. Output: JSONL to --out (default: wpscan.jsonl
             findings++;
           };
           for (const f of parsed.interesting_findings ?? []) emit(f.to_s ?? 'interesting finding', 'info', f.type ?? 'interesting', null, f);
-          for (const v of parsed.version?.vulnerabilities ?? []) emit(v.title ?? 'core vuln', 'high', 'core-vulnerability', v.references?.cve?.[0] ?? null, v);
+          for (const v of parsed.version?.vulnerabilities ?? []) emit(v.title ?? 'core vuln', 'high', 'core-vulnerability', wpscanCve(v), v);
           for (const [name, p] of Object.entries(parsed.plugins ?? {})) {
-            for (const v of p.vulnerabilities ?? []) emit(`${name}: ${v.title ?? 'plugin vuln'}`, 'high', 'plugin-vulnerability', v.references?.cve?.[0] ?? null, v);
+            for (const v of p.vulnerabilities ?? []) emit(`${name}: ${v.title ?? 'plugin vuln'}`, 'high', 'plugin-vulnerability', wpscanCve(v), v);
           }
         }
         if (rowsAtRisk(findings - rowsBefore, wpscanFailed(r.code, parsed))) incomplete++;

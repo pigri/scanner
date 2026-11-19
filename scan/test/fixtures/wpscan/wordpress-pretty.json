@@ -1,0 +1,173 @@
+{
+  "banner": {
+    "description": "WordPress Security Scanner by the WPScan Team",
+    "version": "3.8.28",
+    "authors": [
+      "@_WPScan_",
+      "@ethicalhack3r",
+      "@erwan_lr",
+      "@firefart"
+    ],
+    "sponsor": "Sponsored by Automattic - https://automattic.com/"
+  },
+  "start_time": 1795077393,
+  "start_memory": 60792832,
+  "target_url": "http://wp.example/",
+  "target_ip": "192.0.2.1",
+  "effective_url": "http://wp.example/",
+  "interesting_findings": [
+    {
+      "url": "http://wp.example/",
+      "to_s": "Headers",
+      "type": "headers",
+      "found_by": "Headers (Passive Detection)",
+      "confidence": 100,
+      "confirmed_by": {
+
+      },
+      "references": {
+
+      },
+      "interesting_entries": [
+        "Server: BaseHTTP/0.6 Python/3.12.3"
+      ]
+    },
+    {
+      "url": "http://wp.example/robots.txt",
+      "to_s": "robots.txt found: http://wp.example/robots.txt",
+      "type": "robots_txt",
+      "found_by": "Robots Txt (Aggressive Detection)",
+      "confidence": 100,
+      "confirmed_by": {
+
+      },
+      "references": {
+
+      },
+      "interesting_entries": [
+
+      ]
+    },
+    {
+      "url": "http://wp.example/readme.html",
+      "to_s": "WordPress readme found: http://wp.example/readme.html",
+      "type": "readme",
+      "found_by": "Direct Access (Aggressive Detection)",
+      "confidence": 100,
+      "confirmed_by": {
+
+      },
+      "references": {
+
+      },
+      "interesting_entries": [
+
+      ]
+    },
+    {
+      "url": "http://wp.example/wp-cron.php",
+      "to_s": "The external WP-Cron seems to be enabled: http://wp.example/wp-cron.php",
+      "type": "wp_cron",
+      "found_by": "Direct Access (Aggressive Detection)",
+      "confidence": 60,
+      "confirmed_by": {
+
+      },
+      "references": {
+        "url": [
+          "https://www.iplocation.net/defend-wordpress-from-ddos",
+          "https://github.com/wpscanteam/wpscan/issues/1299"
+        ]
+      },
+      "interesting_entries": [
+
+      ]
+    }
+  ],
+  "version": {
+    "number": "6.4.2",
+    "release_date": "2023-12-06",
+    "status": "insecure",
+    "found_by": "Meta Generator (Passive Detection)",
+    "confidence": 100,
+    "interesting_entries": [
+      "http://wp.example/, Match: 'WordPress 6.4.2'"
+    ],
+    "confirmed_by": {
+      "Rss Generator (Aggressive Detection)": {
+        "confidence": 80,
+        "interesting_entries": [
+          "http://wp.example/feed/, <generator>https://wordpress.org/?v=6.4.2</generator>"
+        ]
+      }
+    },
+    "vulnerabilities": [
+
+    ]
+  },
+  "main_theme": {
+    "slug": "twentytwenty",
+    "location": "http://wp.example/wp-content/themes/twentytwenty/",
+    "latest_version": "3.1",
+    "last_updated": "2026-05-20T00:00:00.000Z",
+    "outdated": true,
+    "readme_url": false,
+    "directory_listing": false,
+    "error_log_url": null,
+    "style_url": "http://wp.example/wp-content/themes/twentytwenty/style.css?ver=1.0",
+    "style_name": "Twenty Twenty",
+    "style_uri": null,
+    "description": null,
+    "author": null,
+    "author_uri": null,
+    "template": null,
+    "license": null,
+    "license_uri": null,
+    "tags": null,
+    "text_domain": null,
+    "found_by": "Css Style In Homepage (Passive Detection)",
+    "confidence": 70,
+    "interesting_entries": [
+
+    ],
+    "confirmed_by": {
+
+    },
+    "vulnerabilities": [
+
+    ],
+    "version": {
+      "number": "1.0",
+      "confidence": 80,
+      "found_by": "Style (Passive Detection)",
+      "interesting_entries": [
+        "http://wp.example/wp-content/themes/twentytwenty/style.css?ver=1.0, Match: 'Version: 1.0'"
+      ],
+      "confirmed_by": {
+
+      }
+    },
+    "parents": [
+
+    ]
+  },
+  "plugins": {
+
+  },
+  "config_backups": {
+
+  },
+  "vuln_api": {
+    "error": "No WPScan API Token given, as a result vulnerability data has not been output.\nYou can get a free API token with 25 daily requests by registering at https://wpscan.com/register"
+  },
+  "stop_time": 1795077397,
+  "elapsed": 4,
+  "requests_done": 174,
+  "cached_requests": 6,
+  "data_sent": 47037,
+  "data_sent_humanised": "45.935 KB",
+  "data_received": 18376,
+  "data_received_humanised": "17.945 KB",
+  "used_memory": 326606848,
+  "used_memory_humanised": "311.477 MB"
+}
