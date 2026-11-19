@@ -84,3 +84,33 @@ describe('targetsOutsideSeedOrigin', () => {
     expect(targetsOutsideSeedOrigin(db, 'ffuf', seeds)).toBeNull();
   });
 });
+
+describe('targetsOutsideSeedOrigin and the seed path', () => {
+  const put = (db: Db, matched: string) =>
+    db.insertFinding({ tool: 'ffuf', target: 'a.example', category: 'c', severity: 'low', title: matched, matched_at: matched, meta: {} }, AT, null);
+  const outside = (matched: string, seed: string, mode?: 'prefix' | 'exact') => {
+    const db = openDb(':memory:');
+    put(db, matched);
+    return [...targetsOutsideSeedOrigin(db, 'ffuf', [{ target: 'a.example', url: seed }], mode)!];
+  };
+
+  it('puts a finding outside a path seed when it is not under that path', () => {
+    expect(outside('https://a.example/other/x', 'https://a.example/app')).toEqual(['a.example']);
+    expect(outside('https://a.example/apple/x', 'https://a.example/app')).toEqual(['a.example']);
+    expect(outside('https://a.example/', 'https://a.example/app')).toEqual(['a.example']);
+  });
+
+  it('keeps a finding under the seed path inside, however the seed ends', () => {
+    expect(outside('https://a.example/app/x', 'https://a.example/app')).toEqual([]);
+    expect(outside('https://a.example/app/x', 'https://a.example/app/')).toEqual([]);
+    expect(outside('https://a.example/anything/x', 'https://a.example')).toEqual([]);
+  });
+
+  it('with an exact seed, accepts only the seed url itself', () => {
+    expect(outside('https://a.example/app', 'https://a.example/app', 'exact')).toEqual([]);
+    expect(outside('https://a.example/app/', 'https://a.example/app', 'exact')).toEqual([]);
+    expect(outside('https://a.example/app/x', 'https://a.example/app', 'exact')).toEqual(['a.example']);
+    expect(outside('https://a.example/other', 'https://a.example', 'exact')).toEqual(['a.example']);
+    expect(outside('https://a.example/', 'https://a.example', 'exact')).toEqual([]);
+  });
+});

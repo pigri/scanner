@@ -29,12 +29,12 @@ function deps(sc: Scenario): FfufDeps {
   };
 }
 
-async function scan(db: Db, sc: Scenario, withRun = true, notes?: string[], now = AT) {
+async function scan(db: Db, sc: Scenario, withRun = true, notes?: string[], now = AT, host: LiveUrl = HOST) {
   const dir = join(tmpdir(), `ffuf-test-${randomBytes(6).toString('hex')}`);
   mkdirSync(dir, { recursive: true });
   dirs.push(dir);
   const runId = withRun ? db.startRun('ffuf', {}, now) : null;
-  return ffufHosts(db, [HOST], {
+  return ffufHosts(db, [host], {
     now, runId, wl: join(dir, 'wl.txt'), threads: 1, timeoutSec: 2, hostTimeoutSec: 5, passthrough: [],
     outPath: (t) => join(dir, `${t}.json`), deps: deps(sc), ...(notes ? { notes } : {}),
   });
@@ -139,6 +139,24 @@ describe('ffufHosts coverage and the origin of open findings', () => {
     await scan(db, {}, true, notes);
     expect(cov(db)).toEqual([]);
     expect(notes).toEqual(['1 target(s) not covered: an open finding came from an origin outside this run']);
+  });
+
+  const PATH_SEED: LiveUrl = { target: 'a.example', seed: 'https://a.example/app' };
+
+  it('does not cover a host whose open finding lies outside the seed path', async () => {
+    for (const matched of ['https://a.example/other/x', 'https://a.example/apple/x']) {
+      const db = openDb(':memory:');
+      open(db, matched);
+      await scan(db, {}, true, [], AT, PATH_SEED);
+      expect(cov(db), matched).toEqual([]);
+    }
+  });
+
+  it('covers a host whose open finding lies under the seed path', async () => {
+    const db = openDb(':memory:');
+    open(db, 'https://a.example/app/admin');
+    await scan(db, {}, true, [], AT, PATH_SEED);
+    expect(cov(db)).toHaveLength(1);
   });
 
   it('covers a host whose open findings all came from the seed origin', async () => {

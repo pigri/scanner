@@ -158,7 +158,7 @@ export async function auditUrls(db: Db, urls: readonly LiveUrl[], opts: AuditOpt
   let findings = 0;
   let idx = 0;
   // Before this run's rows move the watermark.
-  const outside = targetsOutsideSeedOrigin(db, 'headers', urls);
+  const outside = targetsOutsideSeedOrigin(db, 'headers', urls, 'exact');
   opts.notes?.push(...originGuardNote('headers', outside));
   async function worker(): Promise<void> {
     for (;;) {

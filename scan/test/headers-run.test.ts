@@ -124,6 +124,17 @@ describe('auditUrls coverage and the origin of open findings', () => {
     expect(notes).toEqual(['1 target(s) not covered: an open finding came from an origin outside this run']);
   });
 
+  const URL_PATH: LiveUrl = { target: 'a.example', url: 'https://a.example/app', scheme: 'https' };
+
+  it('does not cover a target whose open finding came from another url on the origin', async () => {
+    for (const [matched, seed] of [['https://a.example/app/', URL_A], ['https://a.example/', URL_PATH]] as const) {
+      const db = openDb(':memory:');
+      open(db, matched);
+      await audit(db, [seed], fetchReturning(200), true, []);
+      expect(cov(db), `${matched} vs ${seed.url}`).toEqual([]);
+    }
+  });
+
   it('covers a target whose open findings all came from the audited origin', async () => {
     const db = openDb(':memory:');
     open(db, 'https://a.example/');

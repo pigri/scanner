@@ -103,6 +103,24 @@ describe('scanSigs coverage and the origin of open findings', () => {
     expect(notes).toEqual(['1 target(s) not covered: an open finding came from an origin outside this run']);
   });
 
+  const PATH_SEED: LiveUrl = { target: 'a.example', seed: 'https://a.example/app' };
+
+  it('does not cover a host whose open finding lies outside the seed path', async () => {
+    for (const matched of ['https://a.example/.git/HEAD', 'https://a.example/apple/.git/HEAD']) {
+      const db = openDb(':memory:');
+      open(db, matched);
+      await scan(db, [PATH_SEED], probes(() => miss), true, []);
+      expect(cov(db), matched).toEqual([]);
+    }
+  });
+
+  it('covers a host whose open finding lies under the seed path', async () => {
+    const db = openDb(':memory:');
+    open(db, 'https://a.example/app/.git/HEAD');
+    await scan(db, [PATH_SEED], probes(() => miss), true, []);
+    expect(cov(db)).toHaveLength(1);
+  });
+
   it('covers a host whose open findings all came from the seed origin', async () => {
     const db = openDb(':memory:');
     open(db, 'https://a.example/.git/HEAD');
