@@ -3,9 +3,8 @@
 // carries a partial_stamps marker and that have no tool_coverage row. Their
 // watermark is the newest unmarked stamp, or '' when every stamp is marked, so
 // their rows stay current and retention keeps them. See lib/current-findings.ts.
-import Database from 'better-sqlite3';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
-import { frozenReport, formatText } from './lib/frozen-pairs.js';
+import { frozenReport, formatText, openReadOnly } from './lib/frozen-pairs.js';
 
 function usage(): void {
   console.error(`Usage: frozen-pairs [--sqlite scan.db] [--json] [--top N]
@@ -28,7 +27,7 @@ function main(): void {
     else if (a === '-h' || a === '--help') { usage(); return; }
   }
   if (!Number.isInteger(top) || top < 0) { usage(); process.exit(2); }
-  const db = new Database(resolveDbArg(argv), { readonly: true, fileMustExist: true });
+  const db = openReadOnly(resolveDbArg(argv));
   try {
     const r = frozenReport(db, top);
     process.stdout.write(json ? JSON.stringify(r) + '\n' : formatText(r));

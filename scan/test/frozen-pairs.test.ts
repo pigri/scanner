@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from '../src/lib/db.js';
-import { frozenReport, frozenPairsSql } from '../src/lib/frozen-pairs.js';
+import { frozenReport, frozenPairsSql, openReadOnly } from '../src/lib/frozen-pairs.js';
 
 const T0 = '2026-11-10T10:00:00.000Z';
 const T1 = '2026-11-10T11:00:00.000Z';
@@ -125,11 +125,54 @@ describe('frozenReport', () => {
     expect(r.tools[0]).toMatchObject({ pairs: 3, rows: 6 });
   });
 
-  it('plans every per-pair lookup on an index', () => {
+  it('plans every findings lookup on the intended index', () => {
     const d = fresh();
     const plan = (d.raw.prepare(`EXPLAIN QUERY PLAN ${frozenPairsSql(true)}`).all() as { detail: string }[])
       .map((p) => p.detail);
-    expect(plan.filter((l) => /^SCAN f\b/.test(l))).toEqual([]);
+    const onF = plan.filter((l) => /^(SCAN|SEARCH) f\b/.test(l));
+    const seen = 'SEARCH f USING INDEX idx_findings_seen (seen_at=?)';
+    const pair = 'SEARCH f USING COVERING INDEX idx_findings_logical (target=? AND tool=?)';
+    expect(onF.filter((l) => l !== seen && l !== pair)).toEqual([]);
+    expect(onF.filter((l) => l === seen)).toHaveLength(1);
+  });
+
+  it('dates the oldest marker from the first marked stamp after the watermark', () => {
+    const d = fresh();
+    d.row('a.example', 'ffuf', T0, 'a');
+    d.row('a.example', 'ffuf', T1, 'b');
+    d.row('a.example', 'ffuf', T2, 'c');
+    d.mark('ffuf', T0);
+    d.mark('ffuf', T2);
+    expect(report(d.raw).top).toEqual([
+      { target: 'a.example', tool: 'ffuf', rows: 2, newest: T2, oldestMarker: T2, allMarked: false },
+    ]);
+  });
+
+  it('does not take another tool marker at the newest stamp for the pair', () => {
+    const d = fresh();
+    d.row('a.example', 'ffuf', T0);
+    d.row('a.example', 'ffuf', T2);
+    d.mark('ffuf', T0);
+    d.mark('headers', T2);
+    expect(report(d.raw).tools).toEqual([]);
+  });
+});
+
+describe('openReadOnly', () => {
+  it('opens read-only and refuses a missing file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'frozen-'));
+    try {
+      const path = join(dir, 'scan.db');
+      openDb(path).raw.close();
+      const db = openReadOnly(path);
+      expect(db.readonly).toBe(true);
+      expect(() => db.exec('CREATE TABLE z (a)')).toThrow();
+      db.close();
+      expect(() => openReadOnly(join(dir, 'none.db'))).toThrow();
+      expect(existsSync(join(dir, 'none.db'))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -142,10 +185,27 @@ describe('frozen-pairs CLI', () => {
       raw.prepare(`INSERT INTO findings (target, tool, severity, category, title, seen_at) VALUES ('a.example','ffuf','high','c','x',?)`).run(T2);
       raw.prepare(`INSERT INTO partial_stamps (tool, seen_at, run_id) VALUES ('ffuf', ?, 1)`).run(T2);
       raw.close();
+      const files = () => readdirSync(dir).sort();
+      const before = { bytes: readFileSync(path), mtime: statSync(path).mtimeMs };
       const out = execFileSync('npx', ['tsx', 'src/frozen-pairs.ts', '--sqlite', path, '--json', '--top', '1'], { encoding: 'utf8' });
       const j = JSON.parse(out);
       expect(j.tools[0]).toMatchObject({ tool: 'ffuf', pairs: 1, allMarked: 1, rows: 1 });
       expect(j.top).toHaveLength(1);
+      expect(readFileSync(path).equals(before.bytes)).toBe(true);
+      for (const f of files().filter((n) => n.endsWith('-wal'))) expect(statSync(join(dir, f)).size).toBe(0);
+      expect(statSync(path).mtimeMs).toBe(before.mtime);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('exits non-zero for a missing path and creates no file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'frozen-'));
+    try {
+      const path = join(dir, 'none.db');
+      expect(() => execFileSync('npx', ['tsx', 'src/frozen-pairs.ts', '--sqlite', path], { stdio: 'pipe' })).toThrow();
+      expect(existsSync(path)).toBe(false);
+      expect(readdirSync(dir)).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

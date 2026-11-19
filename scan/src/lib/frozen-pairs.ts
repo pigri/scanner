@@ -1,4 +1,4 @@
-import type Database from 'better-sqlite3';
+import Database from 'better-sqlite3';
 import { STICKY_TOOLS, tableExists } from './current-findings.js';
 
 export interface FrozenPair {
@@ -27,6 +27,11 @@ export interface FrozenReport {
   top: FrozenPair[];
 }
 
+/** The report never writes: open the DB read-only and require it to exist. */
+export function openReadOnly(path: string): Database.Database {
+  return new Database(path, { readonly: true, fileMustExist: true });
+}
+
 const STICKY = STICKY_TOOLS.map((t) => `'${t}'`).join(',');
 
 /**
@@ -51,13 +56,16 @@ WITH cand AS (
   SELECT c.target, c.tool,
          (SELECT MAX(f.seen_at) FROM findings f WHERE f.target = c.target AND f.tool = c.tool) newest
   FROM cand c
-), fz AS (
+), fw AS (
   SELECT target, tool, newest,
          COALESCE((SELECT MAX(f.seen_at) FROM findings f WHERE f.target = nw.target AND f.tool = nw.tool
-                   AND NOT ${marked('f')}), '') w,
-         (SELECT MIN(f.seen_at) FROM findings f WHERE f.target = nw.target AND f.tool = nw.tool
-          AND ${marked('f')}) oldest_marker
+                   AND NOT ${marked('f')}), '') w
   FROM nw WHERE EXISTS (SELECT 1 FROM partial_stamps p WHERE p.tool = nw.tool AND p.seen_at = nw.newest)
+), fz AS (
+  SELECT target, tool, newest, w,
+         (SELECT MIN(f.seen_at) FROM findings f WHERE f.target = fw.target AND f.tool = fw.tool
+          AND f.seen_at > fw.w AND ${marked('f')}) oldest_marker
+  FROM fw
 )
 SELECT target, tool, newest, w, oldest_marker,
        (SELECT COUNT(*) FROM findings f WHERE f.target = fz.target AND f.tool = fz.tool AND f.seen_at >= fz.w) rows
