@@ -101,6 +101,30 @@ function countTransitions(applicable: PresenceState[]): number {
   return n;
 }
 
+// A merged key has one status per pass: each pass's own windows only.
+function perToolOutcome(
+  obsList: readonly Observation[],
+  windows: readonly ScanWindow[],
+  tools: ReadonlySet<string>,
+): { status: Status; flapping: boolean } {
+  let persistent = false;
+  let resolved = false;
+  let flapping = false;
+  for (const tool of tools) {
+    const own = windows.filter((w) => w.tool === tool || w.tool === 'scan-all');
+    const seq: PresenceState[] = own.map((w) =>
+      obsList.some((o) => o.tool === tool && o.seen_at >= w.startedAt && o.seen_at <= w.finishedAt)
+        ? 'present'
+        : 'absent',
+    );
+    const st = computeStatus(seq);
+    if (st === 'persistent') persistent = true;
+    else if (st === 'resolved') resolved = true;
+    if (countTransitions(seq) >= 2) flapping = true;
+  }
+  return { status: persistent ? 'persistent' : resolved ? 'resolved' : 'unknown', flapping };
+}
+
 /**
  * Group observations by (tool, category, title) and compute per-window
  * attendance. Windows must be sorted chronologically by startedAt and all
@@ -158,6 +182,7 @@ export function computeAttendance(
       }
     }
 
+    const { status, flapping } = perToolOutcome(obsList, windows, tools);
     out.push({
       key: k,
       tool: first.tool,
@@ -168,8 +193,8 @@ export function computeAttendance(
       severityPerWindow,
       firstSeen,
       lastSeen,
-      status: computeStatus(presence),
-      flapping: countTransitions(presence) >= 2,
+      status,
+      flapping,
       worstSeverity,
     });
   }
