@@ -14,11 +14,11 @@ export function openReportFindings(raw: Database.Database, target: string): Repo
   const opts = { ...findingsRuleOpts(raw), targetParam: '@t' };
   const rows = raw
     .prepare(
-      `SELECT severity, tool, category, title, cve
+      `SELECT severity, tool, category, title
        FROM (${currentFindingsSelect(opts)})
        WHERE resolved = 0`,
     )
-    .all({ t: target }) as (ReportFinding & { category: string | null })[];
+    .all({ t: target }) as (Omit<ReportFinding, 'cve'> & { category: string | null })[];
   const current = raw
     .prepare(
       `SELECT f.tool, f.category, f.title, f.cve
@@ -35,6 +35,6 @@ export function openReportFindings(raw: Database.Database, target: string): Repo
   }
   return rows.map(({ category, ...f }) => {
     const set = cves.get(keyOf({ tool: f.tool, category: category ?? '', title: f.title }));
-    return { ...f, cve: set ? [...set].sort().join(', ') : f.cve };
+    return { ...f, cve: set ? [...set].sort().join(', ') : null };
   });
 }

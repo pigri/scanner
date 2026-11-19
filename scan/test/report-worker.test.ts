@@ -55,3 +55,41 @@ describe('report-worker CVEs', () => {
     expect(md).not.toContain('CVE-2026-0003');
   });
 });
+
+describe('report-worker CVE cell', () => {
+  const build = (rows: [string, string | null, string, string?][]) => {
+    const { dir, file, db } = tmpDb();
+    for (const [tool, cve, at, title] of rows)
+      db.raw.prepare(`INSERT INTO findings (target, tool, severity, category, title, cve, seen_at)
+                      VALUES ('host.example', ?, 'critical', 'multi-cve', ?, ?, ?)`).run(tool, title ?? 'multi', cve, at);
+    db.reportQueue.enqueueMany([{ target: 'host.example', priority: 0 }], T0);
+    db.close();
+    const out = path.join(dir, 'reports');
+    const r = run('src/report-worker.ts', ['--sqlite', file, '--out-dir', out, '--max-batches', '1', '--log', path.join(dir, 'w.log')]);
+    expect(r.status).toBe(0);
+    return fs.readFileSync(path.join(out, 'host.example.md'), 'utf8');
+  };
+
+  it('shows no CVE when the current rows carry none, though an older row did', () => {
+    const md = build([['nuclei', 'CVE-2020-0001', T0], ['nuclei', null, T2]]);
+    expect(md).toContain('Findings: 1');
+    expect(md).toContain('| critical | nuclei | multi |  |');
+    expect(md).not.toContain('CVE-2020-0001');
+  });
+
+  it('shows no CVE when only the resolved nuclei-url twin carries one', () => {
+    const md = build([
+      ['nuclei-url', 'CVE-2020-0002', T0],   // resolved: the nuclei-url pass reported something else at T2
+      ['nuclei-url', null, T2, 'other'],
+      ['nuclei', null, T2],
+    ]);
+    expect(md).toContain('Findings: 2');
+    expect(md).toContain('| critical | nuclei | multi |  |');
+    expect(md).not.toContain('CVE-2020-0002');
+  });
+
+  it('lists both current CVEs of a nuclei-url-only finding', () => {
+    const md = build([['nuclei-url', 'CVE-2026-0001', T2], ['nuclei-url', 'CVE-2026-0002', T2]]);
+    expect(md).toContain('| critical | nuclei | multi | CVE-2026-0001, CVE-2026-0002 |');
+  });
+});
