@@ -286,7 +286,7 @@ Views: **Overview** (inventory counts, severity breakdown, highest-risk targets,
 
 ### Open and current findings
 
-The Findings page, the per-target view, the severity counts, the CVE list, the risk score and retention all share one rule (`src/lib/current-findings.ts`). Each `(target, tool)` pair has a **watermark** `w`. A finding row is **current** when `seen_at >= w`. A logical finding (one per target, tool, severity, category and title) is **open** when its `last_seen >= w`, else **resolved**. A tool that never re-ran a host leaves its findings open, so "resolved" means "confirmed gone by a later scan", not "not yet rechecked".
+The Findings page, the per-target view, the severity counts, the CVE list, the risk score and retention all share one rule (`src/lib/current-findings.ts`). Each `(target, tool)` pair has a **watermark** `w`. A finding row is **current** when `seen_at >= w`. A logical finding (one per target, tool, severity, category and title) is **open** when its `last_seen >= w`, else **resolved**. A finding therefore closes in one of two ways: a recorded coverage row newer than it (the tool conclusively examined the target), or, for a tool with no coverage row for the pair, a newer row of the same pair from a run that was not partial. The second way proves only that the tool stored something for the target later, not that it looked at that finding. Sticky tools never close, and a partial run closes nothing by its own rows. A pair nobody re-ran stays open.
 
 The watermark is the first of these that applies:
 
@@ -332,7 +332,38 @@ A tool that records no coverage keeps rule 3.
 
 The seed is one http(s) URL per target from `http_probes`, chosen the same way on every run: https before http, a default port before an explicit one, then the lowest URL. A finding with no readable `matched_at` counts as outside.
 
-A blocked pair records no coverage and its findings stay open. They stay open until a run examines their source again. For `ffuf`, a blocked host that stored rows also makes the run partial (`partial run: N host(s) incomplete`), so the run's own rows close nothing by rule 3 either: none of that host's ffuf findings close until its seed returns to their origin, or they are triaged by hand. `nuclei-url`, `nmap-vulners`, `headers` and `content-sigs` do the same, so a host that stored rows without coverage closes nothing of its own. The run note names the cause: `N target(s) not covered: an open finding came from a URL outside this run` (`nuclei-url`), `...from an origin outside this run` (the others), or `coverage skipped: cannot read open <tool> findings`.
+A blocked pair records no coverage and its findings stay open. They stay open until a run examines their source again. For `ffuf`, a blocked host that stored rows also makes the run partial (`partial run: N host(s) incomplete`), so the run's own rows close nothing by rule 3 either: none of that host's ffuf findings close until the block is cleared (see below). `nuclei-url`, `nmap-vulners`, `headers` and `content-sigs` do the same, so a host that stored rows without coverage closes nothing of its own. The run note names the cause (`runs.notes`): `N target(s) not covered: an open finding came from a URL outside this run` (`nuclei-url`), `...from an origin outside this run` (the others), or `coverage skipped: cannot read open <tool> findings`.
+
+Run notes about coverage:
+
+- `N target(s) not covered: an open finding came from a URL outside this run` (`nuclei-url`) and `...from an origin outside this run` (the others): that many targets were blocked by the seed check above.
+- `coverage skipped: cannot read open <tool> findings`: the guard could not read the open findings, so the run recorded no coverage for any target.
+- `coverage skipped: cannot tell which paths ffuf requests (wordlist unreadable, or a passthrough flag that may change the requests)` (`ffuf`): no host of the run is covered. Causes: an unreadable wordlist, or the passthrough flag cause below.
+- `coverage skipped: N unparseable nuclei row(s)` and `coverage skipped: cannot read open nuclei-url findings` (`nuclei-url`).
+- `partial run: <reasons>`: the run is partial (see the table).
+- `nvd.db unavailable (<path>): missing, unreadable or wrong schema; no version-match findings` (`version-match`): the NVD mirror could not be opened, so the run wrote nothing and recorded no coverage. The run is also partial with the reason `nvd.db unavailable`.
+
+**Clearing a blocked `ffuf` pair.** Three causes block ffuf coverage for a host:
+
+1. The seed (origin) guard: an open finding's URL is on another origin than the seed, for example the seed moved from https to http or to another port.
+2. A word removed from the wordlist: an open finding's URL is the seed plus a path that is no longer an entry of the run's wordlist (with `-e`, no entry plus extension either).
+3. A passthrough flag outside the allowlist in `src/ffuf.ts` (`-t`, `-rate`, `-p`, `-maxtime`, `-replay-proxy`, `-s`, `-c`, `-v`, `-noninteractive`, `-http2`, and `-e`): the run cannot tell which URLs it requests (`coverage skipped: cannot tell which paths ffuf requests ...`). Remove the flag. This blocks every host of the run, not one pair.
+
+Restoring the origin, the word or the flag and running again clears the block. When the old finding is not coming back, clear it by hand against a backup of the DB:
+
+- Delete the run that wrote it: `npm run prune-runs -- --runs <id> --expect <id>:ffuf --yes`. This deletes all of that run's findings, `tool_coverage` rows and `partial_stamps` markers, so it also reopens older findings that its coverage had closed.
+- Or record coverage for the one pair with the statement `Db.recordCoverage` runs. It closes every finding of the pair older than `seen_at`:
+
+  ```sql
+  INSERT INTO tool_coverage(target, tool, seen_at, run_id) VALUES ('www.example.com', 'ffuf', '2026-01-01T00:00:00.000Z', NULL)
+  ON CONFLICT(target, tool) DO UPDATE SET seen_at = excluded.seen_at, run_id = excluded.run_id
+  WHERE excluded.seen_at > tool_coverage.seen_at;
+  ```
+
+  Use the current time as an ISO string for `seen_at`.
+- A partial run that never finished keeps its marker, so its rows close nothing by rule 3. To let them count, delete the marker: `DELETE FROM partial_stamps WHERE run_id = <id>;`. `finishRun` does the same for a clean run.
+
+The other tools clear a blocked pair the same way, with their own tool name.
 
 **Same finding, two nuclei passes.** The host pass writes `tool='nuclei'` and the `--from-urls` pass writes `tool='nuclei-url'`. Every reader folds them into `nuclei`: a match both passes report is one finding, with summed occurrences, and it is open if either pass still has it open. Each pass keeps its own watermark. News and the digest key on the folded tool, so a URL-pass finding is not announced again as new.
 
@@ -564,7 +595,7 @@ so a tool that didn't run in a window doesn't count as flapping.
 Grid mode — one line per key with a ✓/·/- attendance strip:
 
 ```
-npm run history -- --target cca.hiteles.gov.hu --limit 15
+npm run history -- --target www.example.com --limit 15
 ```
 
 Sample:
@@ -578,7 +609,7 @@ Detail mode — full per-window attendance + every observation with
 `matched_at`, `run_id`, severity:
 
 ```
-npm run history -- --target cca.hiteles.gov.hu --tool testssl --title "HSTS: not offered"
+npm run history -- --target www.example.com --tool testssl --title "HSTS: not offered"
 ```
 
 Status: `persistent` (present in latest applicable scan) / `resolved`

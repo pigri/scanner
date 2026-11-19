@@ -337,8 +337,9 @@ CREATE TABLE IF NOT EXISTS target_network_events (
 CREATE INDEX IF NOT EXISTS idx_tne_target_at ON target_network_events(target, at);
 
 -- The newest run that conclusively examined a (target, tool); no foreign key to
--- runs, so pruning runs never drops it. CREATE IF NOT EXISTS on every open also
--- covers legacy DBs. See Db.recordCoverage.
+-- runs, so deleting a run does not cascade to it; prune-runs deletes the rows of
+-- the runs it prunes by run_id. CREATE IF NOT EXISTS on every open also covers
+-- legacy DBs. See Db.recordCoverage.
 CREATE TABLE IF NOT EXISTS tool_coverage (
   target  TEXT NOT NULL,
   tool    TEXT NOT NULL,
