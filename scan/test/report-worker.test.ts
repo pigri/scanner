@@ -33,3 +33,25 @@ describe('report-worker', () => {
   });
 });
 
+
+describe('report-worker CVEs', () => {
+  it('lists every distinct CVE of a finding current rows, and none from a superseded row', () => {
+    const { dir, file, db } = tmpDb();
+    const t = 'host.example';
+    const ins = (cve: string, at: string) =>
+      db.raw.prepare(`INSERT INTO findings (target, tool, severity, category, title, cve, seen_at)
+                      VALUES (?, 'nuclei', 'critical', 'multi-cve', 'multi', ?, ?)`).run(t, cve, at);
+    ins('CVE-2026-0003', T0);           // superseded: the newer run reported only the two below
+    ins('CVE-2026-0001', T2);
+    ins('CVE-2026-0002', T2);
+    db.reportQueue.enqueueMany([{ target: t, priority: 0 }], T0);
+    db.close();
+    const out = path.join(dir, 'reports');
+    const r = run('src/report-worker.ts', ['--sqlite', file, '--out-dir', out, '--max-batches', '1', '--log', path.join(dir, 'w.log')]);
+    expect(r.status).toBe(0);
+    const md = fs.readFileSync(path.join(out, 'host.example.md'), 'utf8');
+    expect(md).toContain('Findings: 1');
+    expect(md).toContain('| critical | nuclei | multi | CVE-2026-0001, CVE-2026-0002 |');
+    expect(md).not.toContain('CVE-2026-0003');
+  });
+});
