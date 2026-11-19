@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, resolveOutputPath } from './lib/runner.js';
 import { openDb } from './lib/db.js';
-import { parseWpscanStdout, wpscanCve, type WpscanParsed } from './lib/wpscan-parse.js';
+import { parseWpscanStdout, wpscanRows, type WpscanParsed } from './lib/wpscan-parse.js';
 import { finishWithWhy, partialReasons, rowsAtRisk, wpscanFailed } from './lib/run-partial.js';
 
 async function main(): Promise<void> {
@@ -39,14 +39,9 @@ Pass --enumerate flags after '--'. Output: JSONL to --out (default: wpscan.jsonl
         wstream.write(JSON.stringify({ target: url, wpscan: parsed }) + '\n');
         ok++;
         if (db) {
-          const emit = (title: string, severity: string | null, category: string, cve: string | null, meta: unknown) => {
-            db.insertFinding({ tool: 'wpscan', target: url, category, severity, title, cve, matched_at: url, meta }, now, runId);
+          for (const row of wpscanRows(parsed)) {
+            db.insertFinding({ tool: 'wpscan', target: url, ...row, matched_at: row.matched_at ?? url }, now, runId);
             findings++;
-          };
-          for (const f of parsed.interesting_findings ?? []) emit(f.to_s ?? 'interesting finding', 'info', f.type ?? 'interesting', null, f);
-          for (const v of parsed.version?.vulnerabilities ?? []) emit(v.title ?? 'core vuln', 'high', 'core-vulnerability', wpscanCve(v), v);
-          for (const [name, p] of Object.entries(parsed.plugins ?? {})) {
-            for (const v of p.vulnerabilities ?? []) emit(`${name}: ${v.title ?? 'plugin vuln'}`, 'high', 'plugin-vulnerability', wpscanCve(v), v);
           }
         }
         if (rowsAtRisk(findings - rowsBefore, wpscanFailed(r.code, parsed))) incomplete++;

@@ -1,0 +1,116 @@
+{
+  "banner": {
+    "description": "WordPress Security Scanner by the WPScan Team",
+    "version": "3.8.28",
+    "authors": [
+      "@_WPScan_",
+      "@ethicalhack3r",
+      "@erwan_lr",
+      "@firefart"
+    ],
+    "sponsor": "Sponsored by Automattic - https://automattic.com/"
+  },
+  "target_url": "http://wp.example/",
+  "target_ip": "192.0.2.10",
+  "effective_url": "http://wp.example/",
+  "interesting_findings": [
+    {
+      "url": "http://wp.example/",
+      "to_s": "Headers",
+      "type": "headers",
+      "found_by": "Headers (Passive Detection)",
+      "confidence": 100,
+      "confirmed_by": {},
+      "references": {},
+      "interesting_entries": [
+        "Server: BaseHTTP/0.6 Python/3.12.3",
+        "X-WP-TotalPages: 1"
+      ]
+    }
+  ],
+  "version": {
+    "number": "6.4.2",
+    "release_date": "2023-12-06",
+    "status": "insecure",
+    "found_by": "Meta Generator (Passive Detection)",
+    "confidence": 60,
+    "interesting_entries": [
+      "http://wp.example/, Match: 'WordPress 6.4.2'"
+    ],
+    "confirmed_by": {},
+    "vulnerabilities": []
+  },
+  "main_theme": {
+    "slug": "demo-theme",
+    "location": "http://wp.example/wp-content/themes/demo-theme/",
+    "latest_version": null,
+    "last_updated": null,
+    "outdated": false,
+    "readme_url": false,
+    "directory_listing": false,
+    "error_log_url": null,
+    "style_url": "http://wp.example/wp-content/themes/demo-theme/style.css?ver=1.2.3",
+    "style_name": "Demo Theme",
+    "style_uri": null,
+    "description": null,
+    "author": "Example Author",
+    "author_uri": null,
+    "template": null,
+    "license": null,
+    "license_uri": null,
+    "tags": null,
+    "text_domain": null,
+    "found_by": "Css Style In Homepage (Passive Detection)",
+    "confidence": 70,
+    "interesting_entries": [],
+    "confirmed_by": {},
+    "vulnerabilities": [],
+    "version": {
+      "number": "1.2.3",
+      "confidence": 80,
+      "found_by": "Style (Passive Detection)",
+      "interesting_entries": [
+        "http://wp.example/wp-content/themes/demo-theme/style.css?ver=1.2.3, Match: 'Version: 1.2.3'"
+      ],
+      "confirmed_by": {}
+    },
+    "parents": []
+  },
+  "plugins": {
+    "demo-plugin": {
+      "slug": "demo-plugin",
+      "location": "http://wp.example/wp-content/plugins/demo-plugin/",
+      "latest_version": null,
+      "last_updated": null,
+      "outdated": false,
+      "readme_url": null,
+      "directory_listing": null,
+      "error_log_url": null,
+      "found_by": "Urls In Homepage (Passive Detection)",
+      "confidence": 80,
+      "interesting_entries": [],
+      "confirmed_by": {},
+      "vulnerabilities": [],
+      "version": {
+        "number": "2.0.1",
+        "confidence": 80,
+        "found_by": "Readme - Stable Tag (Aggressive Detection)",
+        "interesting_entries": [
+          "http://wp.example/wp-content/plugins/demo-plugin/readme.txt"
+        ],
+        "confirmed_by": {}
+      }
+    }
+  },
+  "config_backups": {
+    "http://wp.example/wp-config.php~": {
+      "found_by": "Direct Access (Aggressive Detection)",
+      "confidence": 100,
+      "interesting_entries": [],
+      "confirmed_by": {}
+    }
+  },
+  "vuln_api": {
+    "error": "No WPScan API Token given, as a result vulnerability data has not been output.\nYou can get a free API token with 25 daily requests by registering at https://wpscan.com/register"
+  }
+}
