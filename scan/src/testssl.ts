@@ -5,7 +5,7 @@ import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, resolveO
 import { normalizeTestsslFinding } from './lib/testssl-parse.js';
 import { parseCertificates } from './lib/testssl-cert.js';
 import { openDb, type Db } from './lib/db.js';
-import { finishWithWhy, partialReasons, rowsAtRisk } from './lib/run-partial.js';
+import { finishWithWhy, partialReasons, rowsAtRisk, testsslAborted } from './lib/run-partial.js';
 
 interface TestsslFinding { id?: string; severity?: string; finding?: string; cve?: string; port?: string }
 
@@ -159,6 +159,7 @@ Anything after '--' is passed to testssl.sh verbatim.`));
           db.insertCertificate({ target: host, ...cert }, now, runId);
         }
       }
+      if (rowsAtRisk(findings - rowsBefore, testsslAborted(res.findings, res.code))) incomplete++;
     } else {
       wstream.write(JSON.stringify({ target: host, error: res.stderr || 'no output', code: res.code }) + '\n');
     }

@@ -51,3 +51,35 @@ export function finishWithWhy(db: Db, id: number, f: Omit<RunFinish, 'partial'>,
   const extra = f.notes ? [f.notes] : [];
   db.finishRun(id, { ...f, ...partialFinish(why, extra) });
 }
+
+/**
+ * testssl 3.2 turns a failed connectivity check into a FATAL scanProblem record
+ * and exits 246 (ERR_*, 242 and up); its EXIT trap still closes the JSON, so the
+ * file parses although the vulnerability checks never ran.
+ */
+export function testsslAborted(findings: unknown, code: number): boolean {
+  if (code >= 242) return true;
+  if (!Array.isArray(findings)) return false;
+  return findings.some((f: unknown) => {
+    const r = f as { id?: unknown; severity?: unknown; finding?: unknown } | null;
+    if (!r) return false;
+    return (r.id === 'scanProblem' && r.severity === 'FATAL')
+      || (r.id === 'scanTime' && r.finding === 'Scan interrupted');
+  });
+}
+
+/**
+ * wpscan (cms_scanner) exits 0 clean and 5 when vulnerable; 1 to 4 are CLI error,
+ * interrupt, exception and unfinished scan. A scan_aborted key can accompany exit 0.
+ * An empty vuln_api reply (no token, 429, http error, exhausted quota) leaves the
+ * vulnerability rows missing while the exit stays 0.
+ */
+export function wpscanFailed(code: number, parsed: unknown): boolean {
+  if (code !== 0 && code !== 5) return true;
+  const p = parsed as { scan_aborted?: unknown; vuln_api?: { error?: unknown; http_error?: unknown; requests_remaining?: unknown } } | null;
+  if (!p || typeof p !== 'object') return false;
+  if (p.scan_aborted !== undefined) return true;
+  const api = p.vuln_api;
+  if (!api || typeof api !== 'object') return false;
+  return api.error !== undefined || api.http_error !== undefined || api.requests_remaining === 0;
+}

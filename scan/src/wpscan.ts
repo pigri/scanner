@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, resolveOutputPath } from './lib/runner.js';
 import { openDb } from './lib/db.js';
-import { finishWithWhy, partialReasons, rowsAtRisk } from './lib/run-partial.js';
+import { finishWithWhy, partialReasons, rowsAtRisk, wpscanFailed } from './lib/run-partial.js';
 
 async function main(): Promise<void> {
   const opts = parseCommonCli(process.argv);
@@ -53,6 +53,7 @@ Pass --enumerate flags after '--'. Output: JSONL to --out (default: wpscan.jsonl
             for (const v of p.vulnerabilities ?? []) emit(`${name}: ${v.title ?? 'plugin vuln'}`, 'high', 'plugin-vulnerability', v.references?.cve?.[0] ?? null, v);
           }
         }
+        if (rowsAtRisk(findings - rowsBefore, wpscanFailed(r.code, parsed))) incomplete++;
       } catch {
         if (rowsAtRisk(findings - rowsBefore, true)) incomplete++;
         wstream.write(JSON.stringify({ target: url, error: 'non-json output', raw: r.stdout.slice(0, 500) }) + '\n');

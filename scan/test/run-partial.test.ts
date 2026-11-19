@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { openDb } from '../src/lib/db.js';
 import {
-  exitFailed, exitReason, finishWithWhy, partialFinish, partialNote, partialReasons, rowsAtRisk,
+  exitFailed, exitReason, finishWithWhy, partialFinish, partialNote, partialReasons, rowsAtRisk, testsslAborted, wpscanFailed,
 } from '../src/lib/run-partial.js';
 
 describe('rowsAtRisk', () => {
@@ -76,5 +76,51 @@ describe('finishWithWhy', () => {
     finishWithWhy(db, id, { targetsCount: 1, findingsCount: 1, at: '2026-11-01T00:01:00.000Z' }, []);
     expect(notesOf(db, id).notes).toBeNull();
     expect(markers(db, id)).toBe(0);
+  });
+});
+
+describe('testsslAborted', () => {
+  const rec = (id: string, severity: string, finding: string) => ({ id, severity, finding });
+  it('is true on a scanProblem FATAL record', () => {
+    expect(testsslAborted([rec('TLS1', 'HIGH', 'x'), rec('scanProblem', 'FATAL', 'no connect')], 0)).toBe(true);
+  });
+  it('is true when scanTime says the scan was interrupted', () => {
+    expect(testsslAborted([rec('scanTime', 'INFO', 'Scan interrupted')], 0)).toBe(true);
+  });
+  it('is true for the ERR_* exit range and false below it', () => {
+    expect(testsslAborted([], 242)).toBe(true);
+    expect(testsslAborted([], 246)).toBe(true);
+    expect(testsslAborted([], 255)).toBe(true);
+    expect(testsslAborted([], 241)).toBe(false);
+    expect(testsslAborted([], 0)).toBe(false);
+  });
+  it('is false for a finished scan and for non-array input', () => {
+    expect(testsslAborted([rec('scanTime', 'INFO', '55'), rec('scanProblem', 'WARN', 'x')], 3)).toBe(false);
+    expect(testsslAborted(null, 0)).toBe(false);
+    expect(testsslAborted({ id: 'scanProblem', severity: 'FATAL' }, 0)).toBe(false);
+  });
+});
+
+describe('wpscanFailed', () => {
+  const ok = { vuln_api: { plan: 'free', requests_remaining: 20 } };
+  it('treats exit 0 and exit 5 as normal', () => {
+    expect(wpscanFailed(0, ok)).toBe(false);
+    expect(wpscanFailed(5, ok)).toBe(false);
+  });
+  it.each([1, 2, 3, 4, -1])('treats exit %i as failed', (code) => {
+    expect(wpscanFailed(code, ok)).toBe(true);
+  });
+  it('is failed on a scan_aborted key', () => {
+    expect(wpscanFailed(0, { ...ok, scan_aborted: 'x' })).toBe(true);
+  });
+  it('is failed on a vuln_api error, http_error or exhausted quota', () => {
+    expect(wpscanFailed(0, { vuln_api: { error: 'No token' } })).toBe(true);
+    expect(wpscanFailed(0, { vuln_api: { http_error: 'HTTP 500' } })).toBe(true);
+    expect(wpscanFailed(0, { vuln_api: { requests_remaining: 0 } })).toBe(true);
+  });
+  it('accepts unlimited quota and a missing vuln_api block as not failed by the api', () => {
+    expect(wpscanFailed(0, { vuln_api: { requests_remaining: 'Unlimited' } })).toBe(false);
+    expect(wpscanFailed(0, {})).toBe(false);
+    expect(wpscanFailed(0, null)).toBe(false);
   });
 });
