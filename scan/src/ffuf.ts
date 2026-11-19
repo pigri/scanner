@@ -101,6 +101,24 @@ export interface FfufOpts {
   notes?: string[];
 }
 
+/**
+ * The paths ffuf requests below a seed: each wordlist entry, and with `-e` each
+ * entry plus an extension. Null when that cannot be known: the wordlist cannot
+ * be read, or the passthrough adds a wordlist or recursion.
+ */
+export function requestedPaths(wl: string, passthrough: readonly string[]): string[] | null {
+  if (passthrough.some((a) => a === '-recursion' || a === '-w')) return null;
+  let words: string[];
+  try {
+    words = fs.readFileSync(wl, 'utf8').split('\n').map((w) => w.replace(/\r$/, '')).filter(Boolean);
+  } catch {
+    return null;
+  }
+  const i = passthrough.indexOf('-e');
+  const exts = i >= 0 ? (passthrough[i + 1] ?? '').split(',').filter(Boolean) : [];
+  return words.flatMap((w) => [w, ...exts.map((x) => `${w}${x}`)]);
+}
+
 export async function ffufHosts(db: Db, live: readonly LiveUrl[], o: FfufOpts): Promise<{ findings: number; reviewFindings: number }> {
   const { now, runId, wl, threads, timeoutSec, hostTimeoutSec, passthrough } = o;
   const deps = o.deps ?? { run, fetchCanary, probeUrl };
@@ -108,8 +126,9 @@ export async function ffufHosts(db: Db, live: readonly LiveUrl[], o: FfufOpts): 
   let findings = 0;
   let reviewFindings = 0;
   // Before this run's rows move the watermark.
-  const outside = targetsOutsideSeedOrigin(db, 'ffuf', live.map((l) => ({ target: l.target, url: l.seed })));
-  o.notes?.push(...originGuardNote('ffuf', outside));
+  const paths = requestedPaths(wl, passthrough);
+  const outside = paths ? targetsOutsideSeedOrigin(db, 'ffuf', live.map((l) => ({ target: l.target, url: l.seed })), { paths }) : null;
+  o.notes?.push(...(paths ? originGuardNote('ffuf', outside) : ['coverage skipped: cannot tell which paths ffuf requests (wordlist unreadable, or -recursion or -w passed)']));
   for (const { target, seed } of live) {
     // Canary: fetch an unlikely-to-exist path first. If the host is a catch-all
     // responder (Zorp/decoy/SPA-that-serves-index-html-for-everything), the

@@ -105,20 +105,32 @@ describe('scanSigs coverage and the origin of open findings', () => {
 
   const PATH_SEED: LiveUrl = { target: 'a.example', seed: 'https://a.example/app' };
 
-  it('does not cover a host whose open finding lies outside the seed path', async () => {
-    for (const matched of ['https://a.example/.git/HEAD', 'https://a.example/apple/.git/HEAD']) {
-      const db = openDb(':memory:');
-      open(db, matched);
-      await scan(db, [PATH_SEED], probes(() => miss), true, []);
-      expect(cov(db), matched).toEqual([]);
-    }
+  it('does not cover a host whose seed moved from a path to the root', async () => {
+    const db = openDb(':memory:');
+    open(db, 'https://a.example/app/.git/HEAD');
+    await scan(db, [A], probes(() => miss), true, []);
+    expect(cov(db)).toEqual([]);
   });
 
-  it('covers a host whose open finding lies under the seed path', async () => {
+  it('does not cover a host whose seed moved from the root to a path', async () => {
+    const db = openDb(':memory:');
+    open(db, 'https://a.example/.git/HEAD');
+    await scan(db, [PATH_SEED], probes(() => miss), true, []);
+    expect(cov(db)).toEqual([]);
+  });
+
+  it('covers a host whose open finding is the seed plus a signature path', async () => {
     const db = openDb(':memory:');
     open(db, 'https://a.example/app/.git/HEAD');
     await scan(db, [PATH_SEED], probes(() => miss), true, []);
     expect(cov(db)).toHaveLength(1);
+  });
+
+  it('does not cover a host whose open finding is on a path no signature requests', async () => {
+    const db = openDb(':memory:');
+    open(db, 'https://a.example/.git/gone');
+    await scan(db, [A], probes(() => miss), true, []);
+    expect(cov(db)).toEqual([]);
   });
 
   it('covers a host whose open findings all came from the seed origin', async () => {

@@ -29,13 +29,14 @@ function deps(sc: Scenario): FfufDeps {
   };
 }
 
-async function scan(db: Db, sc: Scenario, withRun = true, notes?: string[], now = AT, host: LiveUrl = HOST) {
+async function scan(db: Db, sc: Scenario, withRun = true, notes?: string[], now = AT, host: LiveUrl = HOST, words: string[] | null = ['admin/'], passthrough: string[] = []) {
   const dir = join(tmpdir(), `ffuf-test-${randomBytes(6).toString('hex')}`);
   mkdirSync(dir, { recursive: true });
   dirs.push(dir);
   const runId = withRun ? db.startRun('ffuf', {}, now) : null;
+  if (words) writeFileSync(join(dir, 'wl.txt'), words.join('\n') + '\n');
   return ffufHosts(db, [host], {
-    now, runId, wl: join(dir, 'wl.txt'), threads: 1, timeoutSec: 2, hostTimeoutSec: 5, passthrough: [],
+    now, runId, wl: join(dir, 'wl.txt'), threads: 1, timeoutSec: 2, hostTimeoutSec: 5, passthrough,
     outPath: (t) => join(dir, `${t}.json`), deps: deps(sc), ...(notes ? { notes } : {}),
   });
 }
@@ -143,20 +144,53 @@ describe('ffufHosts coverage and the origin of open findings', () => {
 
   const PATH_SEED: LiveUrl = { target: 'a.example', seed: 'https://a.example/app' };
 
-  it('does not cover a host whose open finding lies outside the seed path', async () => {
-    for (const matched of ['https://a.example/other/x', 'https://a.example/apple/x']) {
-      const db = openDb(':memory:');
-      open(db, matched);
-      await scan(db, {}, true, [], AT, PATH_SEED);
-      expect(cov(db), matched).toEqual([]);
-    }
+  it('does not cover a host whose seed moved from a path to the root', async () => {
+    const db = openDb(':memory:');
+    open(db, 'https://a.example/app/.env');
+    await scan(db, {}, true, [], AT, HOST, ['.env', 'app']);
+    expect(cov(db)).toEqual([]);
   });
 
-  it('covers a host whose open finding lies under the seed path', async () => {
+  it('does not cover a host whose seed moved from the root to a path', async () => {
     const db = openDb(':memory:');
-    open(db, 'https://a.example/app/admin');
-    await scan(db, {}, true, [], AT, PATH_SEED);
+    open(db, 'https://a.example/.env');
+    await scan(db, {}, true, [], AT, PATH_SEED, ['.env']);
+    expect(cov(db)).toEqual([]);
+  });
+
+  it('covers a host whose open finding is the seed plus a wordlist entry, even one with a slash', async () => {
+    const db = openDb(':memory:');
+    open(db, 'https://a.example/app/admin/login');
+    await scan(db, {}, true, [], AT, PATH_SEED, ['admin/login']);
     expect(cov(db)).toHaveLength(1);
+  });
+
+  it('does not cover a host whose open finding is on a word removed from the wordlist', async () => {
+    const db = openDb(':memory:');
+    open(db, 'https://a.example/old');
+    await scan(db, {}, true, [], AT, HOST, ['new']);
+    expect(cov(db)).toEqual([]);
+  });
+
+  it('counts a word plus an -e extension as requested', async () => {
+    const db = openDb(':memory:');
+    open(db, 'https://a.example/backup.zip');
+    await scan(db, {}, true, [], AT, HOST, ['backup'], ['-e', '.zip']);
+    expect(cov(db)).toHaveLength(1);
+  });
+
+  it('records no coverage, and says so, when the wordlist cannot be read', async () => {
+    const db = openDb(':memory:');
+    const notes: string[] = [];
+    await scan(db, {}, true, notes, AT, HOST, null);
+    expect(cov(db)).toEqual([]);
+    expect(notes.join(';')).toContain('coverage skipped: cannot tell which paths ffuf requests');
+  });
+
+  it('records no coverage under -recursion', async () => {
+    const db = openDb(':memory:');
+    await scan(db, {}, true, [], AT, HOST, ['admin/'], ['-recursion']);
+    expect(cov(db)).toEqual([]);
   });
 
   it('covers a host whose open findings all came from the seed origin', async () => {
@@ -208,7 +242,7 @@ describe('ffufHosts keeps an open finding open once the pair has a coverage row'
     const db = openDb(':memory:');
     db.insertFinding({ tool: 'ffuf', target: 'a.example', category: 'path-200', severity: 'medium', title: 'F', matched_at: 'https://a.example/old/', meta: {} }, T1, null);
     db.recordCoverage('ffuf', ['a.example'], T1, null);
-    await scan(db, { report: ONE_HIT }, true, undefined, T2);
+    await scan(db, { report: ONE_HIT }, true, undefined, T2, HOST, ['admin/', 'old/']);
     expect(state(db)).toEqual({ f: 1, cov: [T2] });
   });
 });

@@ -40,32 +40,37 @@ export function liveSeeds(db: Db, targets: readonly string[]): { target: string;
   return [...best.values()];
 }
 
-const trimPath = (p: string): string => p.replace(/\/+$/, '');
+const hrefOf = (url: string | null | undefined): string => {
+  try { return new URL(url ?? '').href; } catch { return ''; }
+};
 
 /**
- * Whether a finding's URL is one this run could have fetched from `seed`. With
- * `prefix`, the origin matches and the path is the seed's or below it, split on
- * segments (`/app` does not cover `/apple`): ffuf and content-sigs fetch below
- * the seed. With `exact`, only the seed URL itself: headers fetches that URL.
+ * Whether a finding's URL is one this run requested from `seed`: the seed URL
+ * itself (`exact`, headers), or the seed followed by `/` and one of the run's
+ * paths (ffuf's wordlist, content-sigs' signature paths). Both sides go through
+ * URL parsing, so a default port drops and the query stays as written.
  */
-function reachedFrom(seed: string, matched: string | null, match: 'prefix' | 'exact'): boolean {
-  if (!originOf(seed) || originOf(matched) !== originOf(seed)) return false;
-  const [a, b] = [new URL(seed), new URL(matched!)];
-  const [sp, mp] = [trimPath(a.pathname), trimPath(b.pathname)];
-  if (match === 'exact') return mp === sp && a.search === b.search;
-  return mp === sp || mp.startsWith(`${sp}/`);
+function requested(seed: string, matched: string | null, match: SeedMatch): boolean {
+  const m = hrefOf(matched);
+  if (!m || !originOf(seed)) return false;
+  if (match === 'exact') return m === hrefOf(seed);
+  const base = seed.replace(/\/+$/, '');
+  return match.paths.some((p) => hrefOf(`${base}/${p}`) === m);
 }
 
+/** What a run requested from a seed: the seed URL, or the seed plus each of these paths. */
+export type SeedMatch = 'exact' | { paths: readonly string[] };
+
 /**
- * Targets that have an open finding of `tool` that the seed's run could not
- * have fetched (see `reachedFrom`), or null when the findings cannot be read.
+ * Targets that have an open finding of `tool` that this run did not
+ * request from the seed (see `requested`), or null when the findings cannot be read.
  * Such a target is not covered: this run never looked there. A finding with no
  * readable matched_at counts as outside. Call it before the run inserts its own rows,
  * which would move the watermark. One indexed read per target
  * (idx_findings_logical on target, tool).
  */
 export function targetsOutsideSeedOrigin(
-  db: Db, tool: string, seeds: readonly { target: string; url: string }[], match: 'prefix' | 'exact' = 'prefix',
+  db: Db, tool: string, seeds: readonly { target: string; url: string }[], match: SeedMatch,
 ): Set<string> | null {
   const outside = new Set<string>();
   try {
@@ -77,7 +82,7 @@ export function targetsOutsideSeedOrigin(
     );
     for (const s of seeds) {
       const rows = stmt.all({ t: s.target, tool }) as { u: string | null }[];
-      if (rows.some((r) => !reachedFrom(s.url, r.u, match))) outside.add(s.target);
+      if (rows.some((r) => !requested(s.url, r.u, match))) outside.add(s.target);
     }
   } catch {
     return null;

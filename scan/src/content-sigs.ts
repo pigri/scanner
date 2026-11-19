@@ -278,7 +278,7 @@ export async function scanSigs(db: Db, live: readonly LiveUrl[], o: SigsOpts): P
   const outcomes: { target: string; ok: boolean }[] = [];
   let findings = 0;
   // Before this run's rows move the watermark.
-  const outside = targetsOutsideSeedOrigin(db, 'content-sigs', live.map((l) => ({ target: l.target, url: l.seed })));
+  const outside = targetsOutsideSeedOrigin(db, 'content-sigs', live.map((l) => ({ target: l.target, url: l.seed })), { paths: SIGS.map((g) => g.path) });
   o.notes?.push(...originGuardNote('content-sigs', outside));
 
   // Per-host worker fan-out: each host runs SIGS through its own bounded
