@@ -306,6 +306,8 @@ Missing output is never a signal. A crashed, killed or silent run records no cov
 
 If `tool_coverage` or `partial_stamps` is missing (an old DB), the readers skip that step and the UI still answers.
 
+**Frozen pairs.** A `(target, tool)` pair with no coverage row whose newest stamp carries a marker keeps its watermark behind that stamp (`''` when every stamp is marked), so its rows stay current and retention keeps them all. `npm run frozen-pairs -- --sqlite scan.db [--json] [--top N]` lists them, read-only. Per tool it prints the pairs whose newest stamp is marked, how many of them have every stamp marked, the finding rows they hold current, and the age of the oldest marker since the watermark (the first marked stamp after it); `--top N` adds the N biggest pairs. Sticky tools are left out. A DB without `partial_stamps` prints nothing and exits 0.
+
 | Tool (`findings.tool`) | Records coverage | Marks the run partial when |
 |---|---|---|
 | `nuclei`, `nuclei-url` | `nuclei-url` only (the `--from-urls` pass) | non-zero exit, unparseable row, skipped host, row not stored, `nuclei-url` host with rows but no coverage |
