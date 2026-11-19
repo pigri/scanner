@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, writeLines, resolveOutputPath } from './lib/runner.js';
 import { openDb, type Db } from './lib/db.js';
+import { partialReasons, finishWithWhy, rowsAtRisk } from './lib/run-partial.js';
 import { isBlockedAnswer } from './lib/real-answer.js';
 import { fetchCanary, probeUrl, hashBody, isNearCanary } from './lib/catchall.js';
 
@@ -111,13 +112,23 @@ export interface FfufOpts {
   deps?: FfufDeps;
 }
 
-export async function ffufHosts(db: Db, live: readonly LiveUrl[], o: FfufOpts): Promise<{ findings: number; reviewFindings: number }> {
+export interface FfufResult { findings: number; reviewFindings: number; incomplete: number }
+
+export function finishFfufRun(db: Db, runId: number, targetsCount: number, res: FfufResult, at: string): void {
+  const why = partialReasons([[res.incomplete, 'host(s) incomplete']]);
+  finishWithWhy(db, runId, { targetsCount, findingsCount: res.findings, at }, why);
+}
+
+export async function ffufHosts(db: Db, live: readonly LiveUrl[], o: FfufOpts): Promise<FfufResult> {
   const { now, runId, wl, threads, timeoutSec, hostTimeoutSec, passthrough } = o;
   const deps = o.deps ?? { run, fetchCanary, probeUrl };
   const covered: string[] = [];
   let findings = 0;
   let reviewFindings = 0;
+  let incomplete = 0;
   for (const { target, seed } of live) {
+    const rowsBefore = findings;
+    let hostCovered = false;
     // Canary: fetch an unlikely-to-exist path first. If the host is a catch-all
     // responder (Zorp/decoy/SPA-that-serves-index-html-for-everything), the
     // canary tells us exactly what "no such thing" looks like there. Any ffuf
@@ -306,15 +317,16 @@ export async function ffufHosts(db: Db, live: readonly LiveUrl[], o: FfufOpts): 
       // unreachable hosts (empty report); the canary rules out the latter.
       // A blocked or rate-limited canary means ffuf's empty or uniform report
       // came from the block, not from the app.
-      if (canary && !isBlockedAnswer(canary.status, canary.mitigated === true) && r.code === 0 && !STOPPED_EARLY.test(r.stderr)) covered.push(target);
+      if (canary && !isBlockedAnswer(canary.status, canary.mitigated === true) && r.code === 0 && !STOPPED_EARLY.test(r.stderr)) { covered.push(target); hostCovered = true; }
     } catch (e) {
       console.error(`  ${target}: parse error: ${e instanceof Error ? e.message : String(e)}`);
     }
+    if (rowsAtRisk(findings - rowsBefore, !hostCovered)) incomplete++;
   }
   if (runId !== null && !db.recordCoverage('ffuf', covered, now, runId)) {
     console.error('ffuf: tool_coverage write failed: scan.db busy');
   }
-  return { findings, reviewFindings };
+  return { findings, reviewFindings, incomplete };
 }
 
 
@@ -376,15 +388,15 @@ Wrapper flags (before '--'):
   const wl = resolveOutputPath({ ...opts, outFile: null }, runId, 'ffuf-wordlist.txt');
   writeLines(wl, [...CURATED_PATHS]);
 
-  const { findings, reviewFindings } = await ffufHosts(db, live, {
+  const res = await ffufHosts(db, live, {
     now, runId, wl, threads, timeoutSec, hostTimeoutSec, passthrough,
     outPath: (target) => resolveOutputPath({ ...opts, outFile: null }, runId, `ffuf-${target.replace(/[^a-z0-9._-]/gi, '_')}.json`),
   });
-  db.finishRun(runId, { targetsCount: live.length, findingsCount: findings, at: new Date().toISOString() });
+  finishFfufRun(db, runId, live.length, res, new Date().toISOString());
   db.close();
   console.error(
-    `ffuf done: +${findings} finding(s) across ${live.length} host(s), ` +
-      `${reviewFindings} flagged needs_review, run #${runId}`
+    `ffuf done: +${res.findings} finding(s) across ${live.length} host(s), ` +
+      `${res.reviewFindings} flagged needs_review, run #${runId}`
   );
   console.error(`  sqlite: ${path.resolve(opts.sqlite)}`);
   console.error(`  review flagged findings with:  npm run query -- review --limit 50`);

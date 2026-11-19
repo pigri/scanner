@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, resolveOutputPath } from './lib/runner.js';
 import { openDb, type Db } from './lib/db.js';
+import { partialReasons, finishWithWhy, exitFailed, exitReason } from './lib/run-partial.js';
 import { ingestAndFinishRun, SSLYZE_SCAN_FLAGS } from './lib/sslyze-ingest.js';
 
 // Live-HTTPS targets from either http_probes (https://) or a 443/tcp port.
@@ -97,12 +98,13 @@ Wrapper flags (before '--'):
   if (r.code !== 0 && r.stderr) console.error(r.stderr.slice(0, 500));
 
   if (!fs.existsSync(outFile)) {
-    db.finishRun(runId, { targetsCount: scanTargets.length, findingsCount: 0, at: new Date().toISOString() });
+    finishWithWhy(db, runId, { targetsCount: scanTargets.length, findingsCount: 0, at: new Date().toISOString() },
+      partialReasons([[exitFailed(r.code), exitReason(r.code)]]));
     db.close();
     return;
   }
 
-  const ingested = ingestAndFinishRun(db, () => fs.readFileSync(outFile, 'utf8'), now, runId, scanTargets.length);
+  const ingested = ingestAndFinishRun(db, () => fs.readFileSync(outFile, 'utf8'), now, runId, scanTargets.length, r.code);
   if (!ingested) return;
   const { rows, findings, certs } = ingested;
   console.error(`sslyze done: +${findings} finding(s), +${certs} cert(s) across ${rows} scanned host(s), run #${runId}`);

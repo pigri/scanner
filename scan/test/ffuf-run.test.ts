@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { openDb, type Db } from '../src/lib/db.js';
-import { ffufHosts, type FfufDeps, type LiveUrl } from '../src/ffuf.js';
+import { ffufHosts, finishFfufRun, type FfufDeps, type LiveUrl } from '../src/ffuf.js';
+import { currentFindingsSelect } from '../src/lib/current-findings.js';
 
 const AT = '2026-11-18T10:00:00.000Z';
 const HOST: LiveUrl = { target: 'a.example', seed: 'https://a.example' };
@@ -122,5 +123,60 @@ describe('ffufHosts coverage', () => {
     db.raw.exec("CREATE TRIGGER t BEFORE INSERT ON findings BEGIN SELECT RAISE(ABORT,'database is locked'); END");
     await scan(db, { report: ONE_HIT });
     expect(cov(db)).toEqual([]);
+  });
+});
+
+describe('ffuf partial runs', () => {
+  const T0 = '2026-11-17T10:00:00.000Z';
+  const ENV_HIT = JSON.stringify({ results: [{ url: 'https://a.example/.env', input: { FUZZ: '.env' }, status: 200, length: 90 }] });
+  const OPEN = { coverage: true, partial: true } as const;
+
+  async function runAt(db: Db, sc: Scenario, at: string) {
+    const dir = join(tmpdir(), `ffuf-test-${randomBytes(6).toString('hex')}`);
+    mkdirSync(dir, { recursive: true });
+    dirs.push(dir);
+    const runId = db.startRun('ffuf', {}, at);
+    const res = await ffufHosts(db, [HOST], {
+      now: at, runId, wl: join(dir, 'wl.txt'), threads: 1, timeoutSec: 2, hostTimeoutSec: 5, passthrough: [],
+      outPath: (t) => join(dir, `${t}.json`), deps: deps(sc),
+    });
+    finishFfufRun(db, runId, 1, res, at);
+    return runId;
+  }
+  const resolved = (db: Db) => (db.raw.prepare(currentFindingsSelect(OPEN)).all() as Array<{ title: string; resolved: number }>)
+    .map((r) => [r.title.includes('.env') ? '.env' : 'admin', r.resolved] as [string, number])
+    .sort();
+  const note = (db: Db, id: number) => (db.raw.prepare('SELECT notes, finished_at FROM runs WHERE id = ?').get(id) as { notes: string | null; finished_at: string | null });
+
+  it.each([
+    ['a non-zero exit with a report', { code: 1, report: ENV_HIT }],
+    ['a job that stopped early', { report: ENV_HIT, stderr: 'Maximum running time for this job reached' }],
+    ['a blocked canary', { report: ENV_HIT, canary: { ...CANARY, status: 429 } }],
+  ] as Array<[string, Scenario]>)('keeps an older finding open after %s', async (_n, sc) => {
+    const db = openDb(':memory:');
+    await runAt(db, { report: ONE_HIT, canary: { ...CANARY, status: 429 } }, T0);
+    const id = await runAt(db, sc, AT);
+    expect(resolved(db)).toEqual([['.env', 0], ['admin', 0]]);
+    expect(note(db, id).notes).toContain('partial run: 1 host(s) incomplete');
+  });
+
+  it('a clean run still closes an older finding', async () => {
+    const db = openDb(':memory:');
+    await runAt(db, { report: ONE_HIT, canary: { ...CANARY, status: 429 } }, T0);
+    const id = await runAt(db, { report: ENV_HIT }, AT);
+    expect(resolved(db)).toEqual([['.env', 0], ['admin', 1]]);
+    expect(note(db, id).notes ?? '').not.toContain('partial');
+  });
+
+  it('a clean run with no hits is complete, not partial', async () => {
+    const db = openDb(':memory:');
+    const id = await runAt(db, {}, AT);
+    expect(note(db, id).notes ?? '').not.toContain('partial');
+  });
+
+  it('a failure that wrote no rows is not partial', async () => {
+    const db = openDb(':memory:');
+    const id = await runAt(db, { code: 1, report: null }, AT);
+    expect(note(db, id).notes ?? '').not.toContain('partial');
   });
 });

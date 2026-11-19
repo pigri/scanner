@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, writeLines, resolveOutputPath } from './lib/runner.js';
 import { openDb } from './lib/db.js';
+import { exitFailed, exitReason, finishWithWhy, partialReasons, rowsAtRisk } from './lib/run-partial.js';
+import { nucleiSkippedHosts, parseMatched } from './lib/nuclei-coverage.js';
 
 async function main(): Promise<void> {
   const opts = parseCommonCli(process.argv);
@@ -34,6 +36,8 @@ Runs nuclei with just the subdomain-takeover templates. Fast, cheap, high-signal
 
   if (db && runId !== null && fs.existsSync(outFile)) {
     let count = 0;
+    let bad = 0;
+    const rowHosts = new Set<string>();
     for (const line of fs.readFileSync(outFile, 'utf8').split('\n')) {
       if (!line.trim()) continue;
       try {
@@ -41,9 +45,10 @@ Runs nuclei with just the subdomain-takeover templates. Fast, cheap, high-signal
           'template-id'?: string; info?: { name?: string; severity?: string };
           host?: string; 'matched-at'?: string;
         };
+        const rowTarget = row.host ?? row['matched-at'] ?? '';
         db.insertFinding({
           tool: 'takeover',
-          target: row.host ?? row['matched-at'] ?? '',
+          target: rowTarget,
           category: row['template-id'] ?? 'takeover',
           severity: row.info?.severity ?? 'high',
           title: row.info?.name ?? row['template-id'] ?? 'subdomain takeover',
@@ -52,9 +57,16 @@ Runs nuclei with just the subdomain-takeover templates. Fast, cheap, high-signal
           meta: row,
         }, now, runId);
         count++;
-      } catch { /* ignore */ }
+        rowHosts.add(parseMatched(rowTarget).hostname);
+      } catch { bad++; }
     }
-    db.finishRun(runId, { targetsCount: targets.length, findingsCount: count, at: new Date().toISOString() });
+    // nuclei exits 0 after skipping an unresponsive host; only a skipped host that wrote rows can move a watermark.
+    const skippedWithRows = [...nucleiSkippedHosts(r.stderr, [], 1)].filter((h) => rowHosts.has(h)).length;
+    const failed = exitFailed(r.code) || bad > 0 || skippedWithRows > 0;
+    const why = rowsAtRisk(count, failed)
+      ? partialReasons([[exitFailed(r.code), exitReason(r.code)], [bad, 'unreadable or unsaved line(s)'], [skippedWithRows, 'skipped host(s)']])
+      : [];
+    finishWithWhy(db, runId, { targetsCount: targets.length, findingsCount: count, at: new Date().toISOString() }, why);
     db.close();
     console.error(`  sqlite: ${path.resolve(opts.sqlite!)} (+${count} findings, run #${runId})`);
   }
