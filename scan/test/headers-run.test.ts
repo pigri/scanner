@@ -10,9 +10,9 @@ function fetchReturning(status: number, headers: Record<string, string> = {}): t
 }
 const failing: typeof fetch = (async () => { throw new TypeError('fetch failed'); }) as unknown as typeof fetch;
 
-async function audit(db: Db, urls: LiveUrl[], fetchFn: typeof fetch, withRun = true) {
+async function audit(db: Db, urls: LiveUrl[], fetchFn: typeof fetch, withRun = true, notes?: string[]) {
   const runId = withRun ? db.startRun('headers', {}, AT) : null;
-  return auditUrls(db, urls, { now: AT, runId, timeoutSec: 2, concurrency: 2, write: () => {}, fetchFn });
+  return auditUrls(db, urls, { now: AT, runId, timeoutSec: 2, concurrency: 2, write: () => {}, fetchFn, ...(notes ? { notes } : {}) });
 }
 const cov = (db: Db) => db.raw.prepare('SELECT target, tool, seen_at, run_id FROM tool_coverage ORDER BY target').all();
 
@@ -106,5 +106,38 @@ describe('auditUrls coverage', () => {
     db.raw.exec("CREATE TRIGGER t BEFORE INSERT ON findings BEGIN SELECT RAISE(ABORT,'database is locked'); END");
     await audit(db, [URL_A], fetchReturning(200));
     expect(cov(db)).toEqual([]);
+  });
+});
+
+describe('auditUrls coverage and the origin of open findings', () => {
+  const open = (db: Db, matched: string) => db.insertFinding({
+    tool: 'headers', target: 'a.example', category: 'hsts', severity: 'low', title: 'HSTS missing', matched_at: matched, meta: {},
+  }, '2026-11-10T10:00:00.000Z', null);
+
+  it('does not cover a target with an open finding from another origin, and says so', async () => {
+    const db = openDb(':memory:');
+    open(db, 'http://a.example:8080/');
+    const notes: string[] = [];
+    await audit(db, [URL_A], fetchReturning(200), true, notes);
+    expect(cov(db)).toEqual([]);
+    expect(notes).toEqual(['1 target(s) not covered: an open finding came from an origin outside this run']);
+  });
+
+  it('covers a target whose open findings all came from the audited origin', async () => {
+    const db = openDb(':memory:');
+    open(db, 'https://a.example/');
+    const notes: string[] = [];
+    await audit(db, [URL_A], fetchReturning(200), true, notes);
+    expect(cov(db)).toHaveLength(1);
+    expect(notes).toEqual([]);
+  });
+
+  it('records no coverage and says so when the open findings cannot be read', async () => {
+    const db = openDb(':memory:');
+    db.raw.exec('DROP TABLE findings');
+    const notes: string[] = [];
+    await audit(db, [URL_A], fetchReturning(200, { 'x-a': '1' }), true, notes).catch(() => 0);
+    expect(cov(db)).toEqual([]);
+    expect(notes).toEqual(['coverage skipped: cannot read open headers findings']);
   });
 });

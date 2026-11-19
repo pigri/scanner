@@ -16,9 +16,9 @@ function probes(reply: (seed: string, path: string) => Reply): ProbeFn {
   return async (seed, sig) => reply(seed, sig.path);
 }
 
-async function scan(db: Db, live: LiveUrl[], probeFn: ProbeFn, withRun = true) {
+async function scan(db: Db, live: LiveUrl[], probeFn: ProbeFn, withRun = true, notes?: string[]) {
   const runId = withRun ? db.startRun('content-sigs', {}, AT) : null;
-  return scanSigs(db, live, { now: AT, runId, timeoutSec: 2, maxKb: 8, concurrency: 2, hostConcurrency: 4, write: () => {}, probeFn });
+  return scanSigs(db, live, { now: AT, runId, timeoutSec: 2, maxKb: 8, concurrency: 2, hostConcurrency: 4, write: () => {}, probeFn, ...(notes ? { notes } : {}) });
 }
 const cov = (db: Db) => db.raw.prepare('SELECT target, tool, seen_at FROM tool_coverage ORDER BY target').all();
 
@@ -85,5 +85,38 @@ describe('scanSigs coverage', () => {
     db.raw.exec("CREATE TRIGGER t BEFORE INSERT ON findings BEGIN SELECT RAISE(ABORT,'database is locked'); END");
     await expect(scan(db, [A], probes((_s, p) => (p === '.git/HEAD' ? gitHead : miss)))).rejects.toThrow();
     expect(cov(db)).toEqual([]);
+  });
+});
+
+describe('scanSigs coverage and the origin of open findings', () => {
+  const open = (db: Db, matched: string) => db.insertFinding({
+    tool: 'content-sigs', target: 'a.example', category: 'exposure-.git_HEAD', severity: 'high', title: 'Exposed .git/HEAD', matched_at: matched, meta: {},
+  }, '2026-11-10T10:00:00.000Z', null);
+
+  it('does not cover a host with an open finding from another origin, and says so', async () => {
+    const db = openDb(':memory:');
+    open(db, 'http://a.example:8080/.git/HEAD');
+    const notes: string[] = [];
+    await scan(db, [A], probes(() => miss), true, notes);
+    expect(cov(db)).toEqual([]);
+    expect(notes).toEqual(['1 target(s) not covered: an open finding came from an origin outside this run']);
+  });
+
+  it('covers a host whose open findings all came from the seed origin', async () => {
+    const db = openDb(':memory:');
+    open(db, 'https://a.example/.git/HEAD');
+    const notes: string[] = [];
+    await scan(db, [A], probes(() => miss), true, notes);
+    expect(cov(db)).toEqual([{ target: 'a.example', tool: 'content-sigs', seen_at: AT }]);
+    expect(notes).toEqual([]);
+  });
+
+  it('records no coverage and says so when the open findings cannot be read', async () => {
+    const db = openDb(':memory:');
+    db.raw.exec('DROP TABLE findings');
+    const notes: string[] = [];
+    await scan(db, [A], probes(() => miss), true, notes);
+    expect(cov(db)).toEqual([]);
+    expect(notes).toEqual(['coverage skipped: cannot read open content-sigs findings']);
   });
 });

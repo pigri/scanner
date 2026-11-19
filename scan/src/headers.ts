@@ -10,27 +10,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { openDb, type Db } from './lib/db.js';
 import { coveredTargets } from './lib/coverage.js';
+import { liveSeeds, originGuardNote, targetsOutsideSeedOrigin } from './lib/live-seed.js';
 
 export interface LiveUrl { target: string; url: string; scheme: 'http' | 'https' }
 
 function loadLive(db: Db, targets: readonly string[]): LiveUrl[] {
-  if (!targets.length) return [];
-  const placeholders = targets.map(() => '?').join(',');
-  const rows = db.raw.prepare(
-    `SELECT DISTINCT target, url FROM http_probes
-     WHERE target IN (${placeholders})
-       AND (url LIKE 'http://%' OR url LIKE 'https://%')`
-  ).all(...targets) as { target: string; url: string }[];
-  // Prefer HTTPS per target, but keep http entries when only http exists.
-  const bySeed = new Map<string, LiveUrl>();
-  for (const r of rows) {
-    const scheme: 'http' | 'https' = r.url.startsWith('https://') ? 'https' : 'http';
-    const existing = bySeed.get(r.target);
-    if (!existing || (existing.scheme === 'http' && scheme === 'https')) {
-      bySeed.set(r.target, { target: r.target, url: r.url, scheme });
-    }
-  }
-  return [...bySeed.values()];
+  return liveSeeds(db, targets).map((r) => ({ target: r.target, url: r.url, scheme: r.url.startsWith('https://') ? 'https' : 'http' }));
 }
 
 interface Verdict { severity: 'info' | 'low' | 'medium' | 'high'; title: string; meta?: Record<string, unknown> }
@@ -162,6 +147,8 @@ export interface AuditOpts {
   concurrency: number;
   write: (line: string) => void;
   fetchFn?: typeof fetch;
+  /** Receives run notes about coverage this run did not record. */
+  notes?: string[];
 }
 
 export async function auditUrls(db: Db, urls: readonly LiveUrl[], opts: AuditOpts): Promise<number> {
@@ -170,6 +157,9 @@ export async function auditUrls(db: Db, urls: readonly LiveUrl[], opts: AuditOpt
   const outcomes: { target: string; ok: boolean }[] = [];
   let findings = 0;
   let idx = 0;
+  // Before this run's rows move the watermark.
+  const outside = targetsOutsideSeedOrigin(db, 'headers', urls);
+  opts.notes?.push(...originGuardNote('headers', outside));
   async function worker(): Promise<void> {
     for (;;) {
       const i = idx++;
@@ -215,7 +205,7 @@ export async function auditUrls(db: Db, urls: readonly LiveUrl[], opts: AuditOpt
     }
   }
   await Promise.all(Array.from({ length: Math.min(opts.concurrency, urls.length) }, worker));
-  if (runId !== null && !db.recordCoverage('headers', coveredTargets(outcomes), now, runId)) {
+  if (runId !== null && !db.recordCoverage('headers', (outside ? coveredTargets(outcomes).filter((t) => !outside.has(t)) : []), now, runId)) {
     console.error('headers: tool_coverage write failed: scan.db busy');
   }
   return findings;
@@ -273,10 +263,11 @@ Wrapper flags (before '--'):
   const outFile = resolveOutputPath(opts, runId, 'headers.jsonl');
   const wstream = fs.createWriteStream(outFile);
 
-  const findings = await auditUrls(db, urls, { now, runId, timeoutSec, concurrency, write: (l) => wstream.write(l) });
+  const notes: string[] = [];
+  const findings = await auditUrls(db, urls, { notes, now, runId, timeoutSec, concurrency, write: (l) => wstream.write(l) });
   await new Promise<void>((res) => wstream.end(() => res()));
 
-  db.finishRun(runId, { targetsCount: urls.length, findingsCount: findings, at: new Date().toISOString() });
+  db.finishRun(runId, { targetsCount: urls.length, findingsCount: findings, ...(notes.length ? { notes: notes.join('; ') } : {}), at: new Date().toISOString() });
   db.close();
   console.error(`headers done: +${findings} finding(s) across ${urls.length} target(s), run #${runId}`);
   console.error(`  sqlite: ${path.resolve(opts.sqlite)}`);
