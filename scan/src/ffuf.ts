@@ -104,7 +104,7 @@ export interface FfufOpts {
 // Flags (ffuf -h) that leave the set of requested URLs alone. A flag that takes
 // a value is true. Anything else, a filter or matcher included, ends coverage.
 const PASSTHROUGH_FLAGS = new Map<string, boolean>([
-  ['t', true], ['rate', true], ['p', true], ['maxtime', true], ['x', true], ['replay-proxy', true],
+  ['t', true], ['rate', true], ['p', true], ['maxtime', true], ['replay-proxy', true],
   ['s', false], ['c', false], ['v', false], ['noninteractive', false], ['http2', false],
 ]);
 

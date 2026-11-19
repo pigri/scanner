@@ -193,7 +193,7 @@ describe('ffufHosts coverage and the origin of open findings', () => {
     expect(cov(db)).toEqual([]);
   });
 
-  for (const flags of [['-u', 'https://b.example/FUZZ'], ['--recursion=true'], ['-recursion=true'], ['-w=other.txt'], ['-request', 'req.txt'], ['-x-unknown'], ['-e=.zip', '-mc', '200']]) {
+  for (const flags of [['-u', 'https://b.example/FUZZ'], ['-x', 'http://127.0.0.1:8080'], ['--recursion=true'], ['-recursion=true'], ['-w=other.txt'], ['-request', 'req.txt'], ['-x-unknown'], ['-e=.zip', '-mc', '200']]) {
     it(`records no coverage, and says so, under the passthrough ${flags.join(' ')}`, async () => {
       const db = openDb(':memory:');
       const notes: string[] = [];
@@ -203,7 +203,7 @@ describe('ffufHosts coverage and the origin of open findings', () => {
     });
   }
 
-  for (const flags of [['-rate', '10'], ['-rate=10', '-v'], ['-p', '0.1-2.0', '-maxtime', '60'], ['-x', 'http://127.0.0.1:8080', '-c']]) {
+  for (const flags of [['-rate', '10'], ['-rate=10', '-v'], ['-p', '0.1-2.0', '-maxtime', '60'], ['-replay-proxy', 'http://127.0.0.1:8080', '-c']]) {
     it(`still covers under the allowlisted passthrough ${flags.join(' ')}`, async () => {
       const db = openDb(':memory:');
       await scan(db, {}, true, [], AT, HOST, ['admin/'], flags);
