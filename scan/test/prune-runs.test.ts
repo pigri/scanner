@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { parseRunIds, parseExpect, applyPrune } from '../src/prune-runs.js';
 import { openDb } from '../src/lib/db.js';
-import { currentFindingsSelect } from '../src/lib/current-findings.js';
+import { currentFindingsSelect, findingsRuleOpts } from '../src/lib/current-findings.js';
 import { recordRiskScores, deleteRiskScoresForRuns } from '../src/lib/risk-latest.js';
 
 describe('parseRunIds', () => {
@@ -69,7 +69,7 @@ describe('applyPrune and tool_coverage', () => {
   const cov = (raw: ReturnType<typeof openDb>['raw']) =>
     raw.prepare('SELECT target, tool, run_id FROM tool_coverage ORDER BY target, tool').all();
   const resolved = (raw: ReturnType<typeof openDb>['raw']) =>
-    (raw.prepare(currentFindingsSelect({ coverage: true })).all() as { title: string; resolved: number }[])
+    (raw.prepare(currentFindingsSelect(findingsRuleOpts(raw))).all() as { title: string; resolved: number }[])
       .map((r) => `${r.title}:${r.resolved}`).sort();
 
   function seed() {
