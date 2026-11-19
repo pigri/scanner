@@ -70,7 +70,7 @@ export interface CheckdmarcIngest { rows: number; findings: number }
 export async function ingestCheckdmarcRows(
   db: Db, rows: CheckdmarcResult[], now: string, runId: number,
   lookupSpf: typeof lookupSpfViaCname = lookupSpfViaCname,
-  exitCode = 0,
+  exitCode: number,
 ): Promise<CheckdmarcIngest> {
   let findings = 0;
   const emit = (target: string, category: string, severity: string, title: string, meta: unknown): void => {

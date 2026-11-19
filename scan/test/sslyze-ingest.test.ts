@@ -272,7 +272,7 @@ describe('sslyze coverage', () => {
     const { db, runId } = setup();
     vi.spyOn(db, 'recordCoverage').mockReturnValue(false);
     const finish = vi.spyOn(db, 'finishRun');
-    const r = ingestAndFinishRun(db, () => toText({ server_scan_results: [good()] }), NOW, runId, 1);
+    const r = ingestAndFinishRun(db, () => toText({ server_scan_results: [good()] }), NOW, runId, 1, 0);
     expect(r?.findings).toBe(3);
     expect(finish).toHaveBeenCalledWith(runId, expect.objectContaining({ notes: 'tool_coverage write failed: scan.db busy' }));
   });
@@ -285,7 +285,7 @@ describe('ingestAndFinishRun', () => {
     const { db, runId } = setup();
     const finish = vi.spyOn(db, 'finishRun');
     const close = vi.spyOn(db, 'close');
-    const r = ingestAndFinishRun(db, () => text(), NOW, runId, 9);
+    const r = ingestAndFinishRun(db, () => text(), NOW, runId, 9, 0);
     expect(r).toEqual({ rows: 1, findings: 3, certs: 1, covered: ['host.example.com'] });
     expect(finish).toHaveBeenCalledWith(runId, expect.objectContaining({ targetsCount: 1, findingsCount: 3 }));
     expect(close).toHaveBeenCalledTimes(1);
@@ -295,7 +295,7 @@ describe('ingestAndFinishRun', () => {
     const { db, runId } = setup();
     const finish = vi.spyOn(db, 'finishRun');
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    expect(ingestAndFinishRun(db, () => 'null', NOW, runId, 9)).toBeNull();
+    expect(ingestAndFinishRun(db, () => 'null', NOW, runId, 9, 0)).toBeNull();
     expect(finish).toHaveBeenCalledWith(runId, expect.objectContaining({ targetsCount: 9, findingsCount: 0 }));
   });
 
@@ -305,7 +305,7 @@ describe('ingestAndFinishRun', () => {
     const finish = vi.spyOn(db, 'finishRun');
     const close = vi.spyOn(db, 'close');
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
-    expect(() => ingestAndFinishRun(db, () => text(), NOW, runId, 9)).toThrow('boom');
+    expect(() => ingestAndFinishRun(db, () => text(), NOW, runId, 9, 0)).toThrow('boom');
     expect(finish).toHaveBeenCalledWith(runId, expect.objectContaining({ targetsCount: 9, findingsCount: 0 }));
     expect(close).toHaveBeenCalledTimes(1);
     expect(log.mock.calls.map((c) => String(c[0])).join('\n')).toContain('boom');
@@ -317,7 +317,7 @@ describe('ingestAndFinishRun', () => {
     const close = vi.spyOn(db, 'close');
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     const read = (): string => { throw Object.assign(new Error('EACCES: /secret/path'), { code: 'EACCES' }); };
-    expect(ingestAndFinishRun(db, read, NOW, runId, 9)).toBeNull();
+    expect(ingestAndFinishRun(db, read, NOW, runId, 9, 0)).toBeNull();
     expect(finish).toHaveBeenCalledWith(runId, expect.objectContaining({ targetsCount: 9, findingsCount: 0 }));
     expect(close).toHaveBeenCalledTimes(1);
     expect(log).toHaveBeenCalledTimes(1);
@@ -357,7 +357,7 @@ describe('ingestAndFinishRun partial runs', () => {
     const db = firstRun();
     const id = db.startRun('sslyze', {}, NOW);
     finishArg(db);
-    ingestAndFinishRun(db, () => toText({ server_scan_results: [without({ heartbleed: errored })] }), NOW, id, 1);
+    ingestAndFinishRun(db, () => toText({ server_scan_results: [without({ heartbleed: errored })] }), NOW, id, 1, 0);
     expect(tls10Resolved(db)).toEqual([0]);
     expect((db.raw.prepare('SELECT notes FROM runs WHERE id = ?').get(id) as { notes: string }).notes).toContain('partial run: 1 host(s) incomplete');
   });
@@ -366,7 +366,7 @@ describe('ingestAndFinishRun partial runs', () => {
     const db = firstRun();
     const id = db.startRun('sslyze', {}, NOW);
     const finish = finishArg(db);
-    ingestAndFinishRun(db, () => toText({ server_scan_results: [without()] }), NOW, id, 1);
+    ingestAndFinishRun(db, () => toText({ server_scan_results: [without()] }), NOW, id, 1, 0);
     expect(tls10Resolved(db)).toEqual([1]);
     expect(finish.mock.calls[0]![1].partial ?? false).toBe(false);
   });
@@ -392,7 +392,7 @@ describe('ingestAndFinishRun partial runs', () => {
     vi.spyOn(db, 'insertFinding').mockImplementation((row, at, id) => { if (++n > 1) throw new Error('boom'); return real(row, at, id); });
     const finish = finishArg(db);
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    expect(() => ingestAndFinishRun(db, () => text(), NOW, runId, 1)).toThrow('boom');
+    expect(() => ingestAndFinishRun(db, () => text(), NOW, runId, 1, 0)).toThrow('boom');
     expect(finish).toHaveBeenCalledWith(runId, expect.objectContaining({ partial: true, notes: 'partial run: ingest failed' }));
   });
 });

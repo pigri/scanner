@@ -70,7 +70,7 @@ describe('ingestCheckdmarcRows', () => {
 
   it('records coverage with the stamp, run and domain the findings use', async () => {
     const { db, runId } = setup();
-    const r = await ingestCheckdmarcRows(db, [weak, clean('ok.example.com')], NOW, runId, noSpf);
+    const r = await ingestCheckdmarcRows(db, [weak, clean('ok.example.com')], NOW, runId, noSpf, 0);
     expect(r.findings).toBeGreaterThan(0);
     const f = db.raw.prepare('SELECT DISTINCT target, seen_at, run_id FROM findings ORDER BY target').all();
     expect(f).toEqual([
@@ -86,14 +86,14 @@ describe('ingestCheckdmarcRows', () => {
   it('does not cover a timed-out domain', async () => {
     const { db, runId } = setup();
     const slow = { domain: 'slow.example.com', dmarc: { record: null, error: 'The resolution lifetime expired after 5.0 seconds' } };
-    await ingestCheckdmarcRows(db, [slow], NOW, runId, noSpf);
+    await ingestCheckdmarcRows(db, [slow], NOW, runId, noSpf, 0);
     expect(coverage(db)).toEqual([]);
   });
 
   it('adds a run note when the coverage write fails and still finishes the run', async () => {
     const { db, runId } = setup();
     vi.spyOn(db, 'recordCoverage').mockReturnValue(false);
-    await ingestCheckdmarcRows(db, [clean('ok.example.com')], NOW, runId, noSpf);
+    await ingestCheckdmarcRows(db, [clean('ok.example.com')], NOW, runId, noSpf, 0);
     const run = db.raw.prepare('SELECT notes, finished_at FROM runs WHERE id = ?').get(runId) as { notes: string; finished_at: string | null };
     expect(run.notes).toBe('tool_coverage write failed: scan.db busy');
     expect(run.finished_at).not.toBeNull();
@@ -102,7 +102,7 @@ describe('ingestCheckdmarcRows', () => {
   it('covers nothing and throws when a findings insert fails', async () => {
     const { db, runId } = setup();
     db.raw.exec("CREATE TRIGGER t BEFORE INSERT ON findings BEGIN SELECT RAISE(ABORT, 'database is locked'); END");
-    await expect(ingestCheckdmarcRows(db, [weak], NOW, runId, noSpf)).rejects.toThrow(/locked/);
+    await expect(ingestCheckdmarcRows(db, [weak], NOW, runId, noSpf, 0)).rejects.toThrow(/locked/);
     expect(coverage(db)).toEqual([]);
   });
 
@@ -120,9 +120,9 @@ describe('ingestCheckdmarcRows', () => {
 
     it('keeps an older finding open after a run with a resolver failure', async () => {
       const db = openDb(':memory:');
-      await ingestCheckdmarcRows(db, [slowMissing], NOW, db.startRun('checkdmarc', {}, NOW), noSpf);
+      await ingestCheckdmarcRows(db, [slowMissing], NOW, db.startRun('checkdmarc', {}, NOW), noSpf, 0);
       const id = db.startRun('checkdmarc', {}, NOW2);
-      await ingestCheckdmarcRows(db, [slowPolicy], NOW2, id, noSpf);
+      await ingestCheckdmarcRows(db, [slowPolicy], NOW2, id, noSpf, 0);
       expect(missingResolved(db)).toEqual([0]);
       expect(notes(db, id)).toContain('partial run: 1 inconclusive row(s)');
     });
@@ -137,7 +137,7 @@ describe('ingestCheckdmarcRows', () => {
 
     it('a clean run still closes an older finding', async () => {
       const db = openDb(':memory:');
-      await ingestCheckdmarcRows(db, [slowMissing], NOW, db.startRun('checkdmarc', {}, NOW), noSpf);
+      await ingestCheckdmarcRows(db, [slowMissing], NOW, db.startRun('checkdmarc', {}, NOW), noSpf, 0);
       const id = db.startRun('checkdmarc', {}, NOW2);
       await ingestCheckdmarcRows(db, [okPolicy], NOW2, id, noSpf, 0);
       expect(missingResolved(db)).toEqual([1]);
