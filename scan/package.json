@@ -33,6 +33,7 @@
     "spf-chain": "tsx src/spf-chain.ts",
     "deep-audit": "tsx src/deep-audit.ts",
     "resolved": "tsx src/resolved.ts",
+    "frozen-pairs": "tsx src/frozen-pairs.ts",
     "history": "tsx src/history.ts",
     "content-sigs": "tsx src/content-sigs.ts",
     "export-csv": "tsx src/export-csv.ts",
