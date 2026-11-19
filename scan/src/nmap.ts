@@ -5,7 +5,7 @@ import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, writeLines, resolveOutputPath } from './lib/runner.js';
 import { parseNmapXml, vulnersCoveredTargets, hostTarget } from './lib/nmap-parse.js';
 import { openDb } from './lib/db.js';
-import { tableExists, watermarkSelect } from './lib/current-findings.js';
+import { findingsRuleOpts, watermarkSelect } from './lib/current-findings.js';
 
 // Data-store ports that fall OUTSIDE nmap's top-1000 (all rank by open-frequency,
 // and the NoSQL/cache/graph stores sit well under the top-1000 cutoff of
@@ -49,7 +49,7 @@ function topTcpPorts(n: number): number[] | null {
 function openVulnersPorts(raw: Database.Database, targets: readonly string[]): Map<string, Set<number>> {
   const stmt = raw.prepare(
     `SELECT DISTINCT json_extract(f.meta_json, '$.port') AS port
-     FROM findings f JOIN (${watermarkSelect({ coverage: tableExists(raw, 'tool_coverage'), targetParam: '@t' })}) wm
+     FROM findings f JOIN (${watermarkSelect({ ...findingsRuleOpts(raw), targetParam: '@t' })}) wm
        ON wm.target = f.target AND wm.tool = f.tool
      WHERE f.target = @t AND f.tool = 'nmap-vulners' AND f.seen_at >= wm.w`,
   );
@@ -171,6 +171,7 @@ Wrapper flags (before '--'):
 
   if (db && runId !== null) {
     let cveFindings = 0;
+    const withRows = new Set<string>();
     // Read before inserting: this run's rows would move the watermark past the old ones.
     let openFindingPorts: Map<string, Set<number>> | null = new Map();
     if (vulners && !narrowed) {
@@ -212,6 +213,7 @@ Wrapper flags (before '--'):
               meta: { cvss, is_exploit: c.is_exploit, product: p.product, version: p.version, service: p.service, port: p.port },
             }, now, runId);
             cveFindings++;
+            withRows.add(target);
           }
         }
       }
@@ -221,7 +223,14 @@ Wrapper flags (before '--'):
     if (!db.recordCoverage('nmap-vulners', covered, now, runId)) {
       notes.push('tool_coverage write failed: scan.db busy');
     }
-    db.finishRun(runId, { targetsCount: targets.length, findingsCount: totalPorts + cveFindings, ...(notes.length ? { notes: notes.join('; ') } : {}), at: new Date().toISOString() });
+    // A timed-out host moves no watermark unless its target got rows in this run.
+    const timedOut = hosts.filter((h) => h.timedOut && withRows.has(hostTarget(h))).length;
+    const why: string[] = [];
+    if (r.code !== 0) why.push(`exit ${r.code}`);
+    if (timedOut > 0) why.push(`${timedOut} timed-out host(s)`);
+    if (narrowed) why.push('narrowed port scan');
+    if (why.length) notes.push(`partial run: ${why.join(', ')}`);
+    db.finishRun(runId, { targetsCount: targets.length, findingsCount: totalPorts + cveFindings, ...(notes.length ? { notes: notes.join('; ') } : {}), at: new Date().toISOString(), partial: why.length > 0 });
     db.close();
     console.error(`  sqlite: ${path.resolve(opts.sqlite!)} (+${totalPorts} ports${cveFindings ? `, +${cveFindings} CVE findings` : ''}, run #${runId})`);
   }

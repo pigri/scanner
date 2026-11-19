@@ -497,3 +497,98 @@ describe('cves.open', () => {
     }
   });
 });
+
+describe('partial_stamps markers', () => {
+  const T = '2026-11-01T00:00:00.000Z';
+  const f = (title: string) => ({ tool: 'nuclei', target: 'a.example', title, severity: 'high' as const });
+  const markers = (d: Db) =>
+    d.raw.prepare('SELECT tool, seen_at, run_id FROM partial_stamps ORDER BY run_id, tool, seen_at').all() as {
+      tool: string; seen_at: string; run_id: number;
+    }[];
+  const count = (d: Db) => (d.raw.prepare('SELECT COUNT(*) n FROM findings').get() as { n: number }).n;
+
+  it('writes one marker for the first finding of a run and none for the second', () => {
+    const id = db.startRun('nuclei', {}, T);
+    db.insertFinding(f('one'), T, id);
+    expect(markers(db)).toEqual([{ tool: 'nuclei', seen_at: T, run_id: id }]);
+    db.raw.exec('DELETE FROM partial_stamps');
+    db.insertFinding(f('two'), T, id);
+    expect(markers(db)).toEqual([]);
+    expect(count(db)).toBe(2);
+  });
+
+  it('removes the run markers on a clean finishRun and keeps them when partial', () => {
+    const a = db.startRun('nuclei', {}, T);
+    const b = db.startRun('nuclei', {}, T);
+    db.insertFinding(f('one'), T, a);
+    db.insertFinding(f('two'), T, b);
+    db.finishRun(a, { at: T, partial: true });
+    expect(markers(db).map((m) => m.run_id)).toEqual([a, b]);
+    db.finishRun(b, { at: T });
+    expect(markers(db).map((m) => m.run_id)).toEqual([a]);
+    db.finishRun(a, { at: T });
+    expect(markers(db)).toEqual([]);
+  });
+
+  it('writes no marker for a finding without a run id', () => {
+    db.insertFinding(f('one'), T, null);
+    expect(markers(db)).toEqual([]);
+    expect(count(db)).toBe(1);
+  });
+
+  it('creates the table on a legacy DB and reopens cleanly', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-partial-legacy-'));
+    try {
+      const file = path.join(dir, 'legacy.db');
+      const first = openDb(file);
+      first.raw.exec('DROP TABLE partial_stamps');
+      first.close();
+      for (let i = 0; i < 2; i++) {
+        const d = openDb(file);
+        expect(d.raw.prepare("SELECT name FROM sqlite_master WHERE name = 'partial_stamps'").all()).toHaveLength(1);
+        d.close();
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('throws and stores no finding while another connection holds the write lock', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-partial-busy-'));
+    try {
+      const file = path.join(dir, 'scan.db');
+      const d = openDb(file);
+      const id = d.startRun('nuclei', {}, T);
+      d.raw.pragma('busy_timeout = 50');
+      const other = new Database(file);
+      other.exec('BEGIN IMMEDIATE');
+      try {
+        expect(() => d.insertFinding(f('one'), T, id)).toThrow(/locked|busy/i);
+      } finally {
+        other.exec('ROLLBACK');
+        other.close();
+      }
+      expect(count(d)).toBe(0);
+      expect(markers(d)).toEqual([]);
+      d.insertFinding(f('one'), T, id);
+      expect(count(d)).toBe(1);
+      expect(markers(d)).toHaveLength(1);
+      d.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('writes the marker again after an outer transaction rolled the first one back', () => {
+    const id = db.startRun('nuclei', {}, T);
+    expect(() =>
+      db.raw.transaction(() => {
+        db.insertFinding(f('one'), T, id);
+        throw new Error('rollback');
+      })(),
+    ).toThrow('rollback');
+    expect(markers(db)).toEqual([]);
+    db.insertFinding(f('two'), T, id);
+    expect(markers(db)).toEqual([{ tool: 'nuclei', seen_at: T, run_id: id }]);
+  });
+});

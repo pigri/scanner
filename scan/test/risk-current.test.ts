@@ -125,3 +125,31 @@ describe('dry run: current findings effect', () => {
     expect(r.currentFindings.samples).toEqual({ [-22]: ['a.example'] });
   });
 });
+
+describe('loadRiskSignals: partial runs', () => {
+  const find = (db: Db, title: string, severity: 'critical' | 'low', at: string, run: number): void =>
+    db.insertFinding({ tool: 'nuclei', target: 'a.example', title, severity }, at, run);
+
+  it('keeps a critical after a partial run that did not report it', () => {
+    const db = openDb(':memory:');
+    const r1 = db.startRun('nuclei', {}, D1);
+    find(db, 'old critical', 'critical', D1, r1);
+    db.finishRun(r1, { at: D1 });
+    const r2 = db.startRun('nuclei', {}, D2);
+    find(db, 'new low', 'low', D2, r2);
+    db.finishRun(r2, { at: D2, partial: true });
+    expect(signals(db).get('a.example')!.findings.map((f) => f.title).sort()).toEqual(['new low', 'old critical']);
+    expect(score(db, 'a.example')).toBe(score(db, 'a.example', 'all'));
+  });
+
+  it('drops it once the later run finishes clean', () => {
+    const db = openDb(':memory:');
+    const r1 = db.startRun('nuclei', {}, D1);
+    find(db, 'old critical', 'critical', D1, r1);
+    db.finishRun(r1, { at: D1 });
+    const r2 = db.startRun('nuclei', {}, D2);
+    find(db, 'new low', 'low', D2, r2);
+    db.finishRun(r2, { at: D2 });
+    expect(signals(db).get('a.example')!.findings.map((f) => f.title)).toEqual(['new low']);
+  });
+});

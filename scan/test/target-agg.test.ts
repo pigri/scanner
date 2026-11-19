@@ -52,7 +52,7 @@ describe('targetAggSql versionMatch', () => {
     // host y: no version-match findings at all
     ins(db, { target: 'y', tool: 'nuclei', severity: 'high', cve: 'CVE-7' });
 
-    const agg = db.prepare(targetAggSql(false)).all() as {
+    const agg = db.prepare(targetAggSql({ coverage: false, partial: false })).all() as {
       target: string; versionMatch: number; cves: number; findings: number;
     }[];
     const x = agg.find((r) => r.target === 'x');
@@ -70,7 +70,7 @@ describe('targetAggSql versionMatch', () => {
 
 type Agg = Record<string, number | string>;
 const aggOf = (db: Database.Database, coverage: boolean, target: string): Agg | undefined =>
-  (db.prepare(targetAggSql(coverage)).all() as Agg[]).find((r) => r.target === target);
+  (db.prepare(targetAggSql({ coverage: coverage, partial: false })).all() as Agg[]).find((r) => r.target === target);
 const T1 = '2026-11-10T00:00:00.000Z';
 const T2 = '2026-11-11T00:00:00.000Z';
 function withCoverage(db: Database.Database, rows: [string, string, string][]): void {
@@ -134,5 +134,19 @@ describe('targetAggSql open findings', () => {
     db.exec('DROP TABLE tool_coverage');
     ins(db, { target: 'x', tool: 'nuclei', severity: 'high', title: 'n', cve: 'CVE-2' });
     expect(aggOf(db, false, 'x')).toMatchObject({ high: 1, findings: 1, cves: 1 });
+  });
+});
+
+describe('targetAggSql with partial runs', () => {
+  it('keeps the counts of a finding that a later partial run did not report', () => {
+    const db = newDb();
+    ins(db, { target: 'x', tool: 'nuclei', severity: 'critical', title: 'old', cve: 'CVE-1', seen_at: T1 });
+    ins(db, { target: 'x', tool: 'nuclei', severity: 'low', title: 'new', seen_at: T2 });
+    db.prepare("INSERT INTO partial_stamps (tool, seen_at, run_id) VALUES ('nuclei', ?, 7)").run(T2);
+    const rule = { coverage: true, partial: true };
+    const row = (db.prepare(targetAggSql(rule)).all() as Agg[]).find((r) => r.target === 'x');
+    expect(row).toMatchObject({ critical: 1, low: 1, findings: 2, cves: 1 });
+    const legacy = (db.prepare(targetAggSql({ coverage: true, partial: false })).all() as Agg[]).find((r) => r.target === 'x');
+    expect(legacy).toMatchObject({ critical: 0, low: 1, findings: 1 });
   });
 });

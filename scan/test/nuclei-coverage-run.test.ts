@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { openDb } from '../src/lib/db.js';
+import { currentFindingsSelect, findingsRuleOpts } from '../src/lib/current-findings.js';
 
 const scanDir = path.resolve(__dirname, '..');
 const tsx = path.join(scanDir, 'node_modules', '.bin', 'tsx');
@@ -24,6 +25,7 @@ done
 cp "$FAKE_ROWS" "$out"
 [ -n "$FAKE_ELOG" ] && [ -n "$elog" ] && cp "$FAKE_ELOG" "$elog"
 [ -n "$FAKE_STDERR" ] && printf '%s\\n' "$FAKE_STDERR" >&2
+[ -n "$FAKE_SLEEP" ] && exec sleep "$FAKE_SLEEP"
 exit "\${FAKE_EXIT:-0}"
 `;
 
@@ -31,7 +33,7 @@ const row = (type: string, matchedAt: string, host = HOST) => JSON.stringify({
   'template-id': 't-' + type, type, info: { name: 'T', severity: 'info' }, host, 'matched-at': matchedAt,
 });
 
-function runNuclei(extra: string[], rows: string[], exit = 0, opt: { trigger?: string; stderrLines?: string[]; elog?: string[] } = {}) {
+function runNuclei(extra: string[], rows: string[], exit = 0, opt: { trigger?: string; stderrLines?: string[]; elog?: string[]; sleep?: number } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nuclei-cov-'));
   dirs.push(dir);
   const bin = path.join(dir, 'bin');
@@ -56,7 +58,7 @@ function runNuclei(extra: string[], rows: string[], exit = 0, opt: { trigger?: s
     const child = spawn(tsx, ['src/nuclei.ts', '--targets', targets, '--sqlite', dbPath,
       '--run-dir', path.join(dir, 'runs'), '--', '--live-only', ...extra], {
       cwd: scanDir,
-      env: { PATH: `${bin}:${process.env['PATH'] ?? ''}`, HOME: dir, FAKE_ROWS: rowsFile, FAKE_EXIT: String(exit), FAKE_ELOG: opt.elog ? elogFile : '', FAKE_STDERR: (opt.stderrLines ?? []).join('\n') },
+      env: { PATH: `${bin}:${process.env['PATH'] ?? ''}`, HOME: dir, FAKE_ROWS: rowsFile, FAKE_EXIT: String(exit), FAKE_ELOG: opt.elog ? elogFile : '', FAKE_STDERR: (opt.stderrLines ?? []).join('\n'), FAKE_SLEEP: opt.sleep ? String(opt.sleep) : '' },
       stdio: ['ignore', 'ignore', 'pipe'],
     });
     let stderr = '';
@@ -172,5 +174,44 @@ describe('nuclei coverage', () => {
       });
       expect(fs.readFileSync(argsOut, 'utf8').includes('-elog')).toBe(expected);
     }
+  }, 100_000);
+});
+
+describe('nuclei partial runs', () => {
+  const OLDER = '2026-01-01T00:00:00.000Z';
+  const seedOlder = `INSERT INTO findings(tool, target, category, severity, title, seen_at)
+    VALUES ('nuclei', '${HOST}', 'cve', 'high', 'older finding', '${OLDER}')`;
+  const state = (dbPath: string) => {
+    const db = openDb(dbPath);
+    const logical = db.raw.prepare(currentFindingsSelect(findingsRuleOpts(db.raw))).all() as { title: string; resolved: number }[];
+    const markers = (db.raw.prepare('SELECT COUNT(*) n FROM partial_stamps').get() as { n: number }).n;
+    const notes = (db.raw.prepare("SELECT notes FROM runs WHERE tool LIKE 'nuclei%'").all() as { notes: string | null }[]).map((n) => n.notes ?? '');
+    db.close();
+    return { older: logical.find((l) => l.title === 'older finding')?.resolved, markers, notes: notes.join(';') };
+  };
+
+  it('keeps an older finding open, with a marker and a note, when nuclei exits 1', async () => {
+    const r = await runNuclei([], [row('ssl', `${HOST}:443`)], 1, { trigger: seedOlder });
+    const st = state(r.db);
+    expect(st.older).toBe(0);
+    expect(st.markers).toBe(1);
+    expect(st.notes).toContain('partial run: exit 1');
+  }, 100_000);
+
+  it('keeps an older finding open when --scan-timeout kills nuclei', async () => {
+    const r = await runNuclei(['--scan-timeout', '1'], [row('ssl', `${HOST}:443`)], 0, { trigger: seedOlder, sleep: 30 });
+    const st = state(r.db);
+    expect(st.older).toBe(0);
+    expect(st.markers).toBe(1);
+    expect(st.notes).toContain('partial run:');
+  }, 100_000);
+
+  it('resolves the older finding and leaves no marker when nuclei exits 0', async () => {
+    const r = await runNuclei([], [row('ssl', `${HOST}:443`)], 0, { trigger: seedOlder });
+    expect(r.code, r.stderr).toBe(0);
+    const st = state(r.db);
+    expect(st.older).toBe(1);
+    expect(st.markers).toBe(0);
+    expect(st.notes).not.toContain('partial run');
   }, 100_000);
 });

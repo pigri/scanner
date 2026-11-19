@@ -7,11 +7,11 @@
 // columns and `findings` count OPEN logical findings. `cves` counts DISTINCT
 // non-empty CVE ids among current rows, and `versionMatch` the distinct ones
 // from `version-match` (the scorer's versionMatchCves set, lib/risk.ts).
-import { currentRowsFrom, openLogicalFrom, watermarkSelect } from './current-findings.js';
+import { currentRowsFrom, openLogicalFrom, watermarkSelect, type FindingsRuleOpts } from './current-findings.js';
 
-/** `coverage` is tableExists(db, 'tool_coverage') at query time. */
-export function targetAggSql(coverage: boolean): string {
-  return `WITH wm AS MATERIALIZED (${watermarkSelect({ coverage })}),
+/** `rule` is findingsRuleOpts(db) at query time. */
+export function targetAggSql(rule: FindingsRuleOpts): string {
+  return `WITH wm AS MATERIALIZED (${watermarkSelect(rule)}),
      sev AS MATERIALIZED (
        SELECT l.target target,
          SUM(l.severity='critical') critical, SUM(l.severity='high') high,

@@ -540,3 +540,46 @@ describe('runRetention keeps findings that are still current', () => {
     expect(build(false)).toEqual(withoutTable);
   });
 });
+
+describe('runRetention with partial runs', () => {
+  const stamp = (raw: Database.Database, run: number, at: string) =>
+    raw.prepare("INSERT INTO partial_stamps(tool, seen_at, run_id) VALUES('nuclei', ?, ?)").run(at, run);
+  const F = (s: string) => new Date(s).toISOString();
+
+  it('keeps the rows of the last complete run when a newer partial run follows', () => {
+    const db = openDb(':memory:');
+    const r1 = mk(db, 'nuclei', OLD);
+    const r2 = mk(db, 'nuclei', OLD2);
+    const r3 = mk(db, 'nuclei', RECENT);
+    for (const [r, at] of [[r1, OLD], [r2, OLD2], [r3, RECENT]] as const)
+      db.raw.prepare('INSERT INTO findings(tool, target, title, seen_at, run_id) VALUES(?,?,?,?,?)').run('nuclei', 'a.example.com', `t${r}`, F(at), r);
+    stamp(db.raw, r3, F(RECENT));
+    runRetention(db.raw, opts());
+    expect((db.raw.prepare('SELECT title FROM findings ORDER BY id').all() as { title: string }[]).map((x) => x.title))
+      .toEqual([`t${r2}`, `t${r3}`]);
+  });
+
+  it('removes the markers of a run it deletes', () => {
+    const db = openDb(':memory:');
+    const r1 = mk(db, 'nmap', OLD);
+    const r2 = mk(db, 'nmap', RECENT);
+    port(db, 'a.example.com', r1, OLD);
+    port(db, 'a.example.com', r2, RECENT);
+    stamp(db.raw, r1, F(OLD));
+    stamp(db.raw, r2, F(RECENT));
+    runRetention(db.raw, opts());
+    expect(runIds(db.raw)).toEqual([r2]);
+    expect(db.raw.prepare('SELECT run_id FROM partial_stamps').all()).toEqual([{ run_id: r2 }]);
+  });
+
+  it('prune-runs removes the markers of the runs it deletes', async () => {
+    const { applyPrune } = await import('../src/prune-runs.js');
+    const db = openDb(':memory:');
+    const a = mk(db, 'nuclei', OLD);
+    const b = mk(db, 'nuclei', RECENT);
+    stamp(db.raw, a, F(OLD));
+    stamp(db.raw, b, F(RECENT));
+    applyPrune(db.raw, [a]);
+    expect(db.raw.prepare('SELECT run_id FROM partial_stamps').all()).toEqual([{ run_id: b }]);
+  });
+});

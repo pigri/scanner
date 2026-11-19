@@ -1,12 +1,13 @@
 import { CERT_ORG_SQL } from './cert-org.js';
+import type { FindingsRuleOpts } from './current-findings.js';
 import { targetAggSql } from './target-agg.js';
 
 // One row per non-URL target for the Targets list (risk_latest never holds URL
 // targets, see lib/risk-latest.ts): score and assessment times
 // from risk_latest, plus the findings aggregate, cert organization and host
 // state. Shared by src/ui.ts and test/target-rows-sql.test.ts (no drift).
-/** `coverage` is tableExists(db, 'tool_coverage') at query time. */
-export const targetRowsSql = (coverage: boolean): string => `WITH agg AS MATERIALIZED (${targetAggSql(coverage)}),
+/** `rule` is findingsRuleOpts(db) at query time. */
+export const targetRowsSql = (rule: FindingsRuleOpts): string => `WITH agg AS MATERIALIZED (${targetAggSql(rule)}),
        certorg AS MATERIALIZED (${CERT_ORG_SQL})
        SELECT rl.target target, rl.score score, rl.created_at, rl.updated_at,
          COALESCE(agg.critical,0) critical, COALESCE(agg.high,0) high, COALESCE(agg.medium,0) medium,

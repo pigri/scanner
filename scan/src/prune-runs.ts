@@ -60,7 +60,7 @@ function parseArgs(argv: string[]): Opts {
 function usage(): void {
   console.error(`Usage: prune-runs --runs <ids> [--expect id:tool ...] [--sqlite scan.db] [--yes]
 
-Deletes the given runs and their child rows (findings, risk_scores, tool_coverage) from the DB.
+Deletes the given runs and their child rows (findings, risk_scores, tool_coverage, partial_stamps) from the DB.
 Backs up to <db>.bak first. With --expect, aborts unless each run's tool matches.
 
   --runs <ids>       comma/space separated run ids (e.g. "21,22")
@@ -69,13 +69,14 @@ Backs up to <db>.bak first. With --expect, aborts unless each run's tool matches
   --yes              actually delete (dry-run prints the plan otherwise)`);
 }
 
-/** Delete the given runs, their findings, risk_scores and tool_coverage in one write transaction. */
+/** Delete the given runs, their findings, risk_scores, tool_coverage and partial_stamps in one write transaction. */
 export function applyPrune(raw: Database.Database, runs: number[]): void {
   const placeholders = runs.map(() => '?').join(',');
   raw.transaction(() => {
     raw.prepare(`DELETE FROM findings WHERE run_id IN (${placeholders})`).run(...runs);
     deleteRiskScoresForRuns(raw, runs);
     raw.prepare(`DELETE FROM tool_coverage WHERE run_id IN (${placeholders})`).run(...runs);
+    raw.prepare(`DELETE FROM partial_stamps WHERE run_id IN (${placeholders})`).run(...runs);
     raw.prepare(`DELETE FROM runs WHERE id IN (${placeholders})`).run(...runs);
   }).immediate();
 }
@@ -107,6 +108,7 @@ function main(): void {
     findings: countChildren('findings'),
     risk_scores: countChildren('risk_scores'),
     tool_coverage: countChildren('tool_coverage'),
+    partial_stamps: countChildren('partial_stamps'),
     runs: opts.runs.length,
   };
 

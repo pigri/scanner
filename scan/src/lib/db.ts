@@ -17,6 +17,8 @@ export interface RunFinish {
   findingsCount?: number;
   notes?: string;
   at?: string;
+  /** The run ended early or failed: keep its partial_stamps markers so it cannot close older findings. */
+  partial?: boolean;
 }
 
 export interface PortRow {
@@ -282,10 +284,23 @@ export function openDb(dbPath: string, options: OpenDbOptions = {}): Db {
   const recordCoverageTx = raw.transaction((tool: string, targets: string[], at: string, runId: number | null) => {
     for (const t of targets) upsertCoverageStmt.run(t, tool, at, runId);
   });
+  const stampPartialStmt = raw.prepare('INSERT OR IGNORE INTO partial_stamps(tool, seen_at, run_id) VALUES (?, ?, ?)');
+  const clearPartialStmt = raw.prepare('DELETE FROM partial_stamps WHERE run_id = ?');
+  // Keys already written per run. Not filled while an outer transaction is open:
+  // its rollback would drop the marker and the cache would never write it again.
+  const stamped = new Map<number, Set<string>>();
+  const finishRunTx = raw.transaction((id: number, f: RunFinish) => {
+    finishRunStmt.run(f.at ?? new Date().toISOString(), f.targetsCount ?? 0, f.findingsCount ?? 0, f.notes ?? null, id);
+    if (!f.partial) clearPartialStmt.run(id);
+  });
   const insertFindingStmt = raw.prepare(`
     INSERT INTO findings(tool, target, category, severity, title, cve, matched_at, meta_json, seen_at, run_id, needs_review)
     VALUES(@tool, @target, @category, @severity, @title, @cve, @matched_at, @meta_json, @seen_at, @run_id, @needs_review)
   `);
+  const insertFindingTx = raw.transaction((params: Record<string, unknown>, stamp: boolean) => {
+    insertFindingStmt.run(params);
+    if (stamp) stampPartialStmt.run(params['tool'], params['seen_at'], params['run_id']);
+  });
   const insertShotStmt = raw.prepare(`
     INSERT INTO screenshots(target, url, path, status, title, seen_at, run_id)
     VALUES(@target, @url, @path, @status, @title, @seen_at, @run_id)
@@ -350,13 +365,8 @@ export function openDb(dbPath: string, options: OpenDbOptions = {}): Db {
       return Number(info.lastInsertRowid);
     },
     finishRun(id, f): void {
-      finishRunStmt.run(
-        f.at ?? new Date().toISOString(),
-        f.targetsCount ?? 0,
-        f.findingsCount ?? 0,
-        f.notes ?? null,
-        id
-      );
+      finishRunTx(id, f);
+      if (!f.partial) stamped.delete(id);
     },
     insertPort(row, at, runId): void {
       insertPortStmt.run({
@@ -381,17 +391,28 @@ export function openDb(dbPath: string, options: OpenDbOptions = {}): Db {
       });
     },
     insertFinding(row, at, runId): void {
-      insertFindingStmt.run({
-        tool: row.tool, target: row.target,
-        category: row.category ?? null,
-        severity: row.severity ?? null,
-        title: row.title,
-        cve: row.cve ?? null,
-        matched_at: row.matched_at ?? null,
-        meta_json: row.meta !== undefined ? JSON.stringify(row.meta) : null,
-        seen_at: at, run_id: runId,
-        needs_review: row.needsReview ? 1 : 0,
-      });
+      const key = `${row.tool}\0${at}`;
+      const known = runId !== null && !!stamped.get(runId)?.has(key);
+      const outer = raw.inTransaction;
+      insertFindingTx(
+        {
+          tool: row.tool, target: row.target,
+          category: row.category ?? null,
+          severity: row.severity ?? null,
+          title: row.title,
+          cve: row.cve ?? null,
+          matched_at: row.matched_at ?? null,
+          meta_json: row.meta !== undefined ? JSON.stringify(row.meta) : null,
+          seen_at: at, run_id: runId,
+          needs_review: row.needsReview ? 1 : 0,
+        },
+        runId !== null && !known,
+      );
+      if (runId !== null && !known && !outer) {
+        const set = stamped.get(runId) ?? new Set<string>();
+        set.add(key);
+        stamped.set(runId, set);
+      }
     },
     recordCoverage(tool, targets, at, runId): boolean {
       const uniq = [...new Set(targets.filter((t) => t !== ''))];

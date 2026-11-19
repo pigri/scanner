@@ -597,6 +597,42 @@ describe('findings open/resolved follows tool_coverage', () => {
   }, 40_000);
 });
 
+describe('findings stay open after a partial run', () => {
+  const seedPartial = (dropTable: boolean) =>
+    seed(false, (raw) => {
+      const ins = raw.prepare(
+        `INSERT INTO findings (target, tool, severity, category, title, seen_at)
+         VALUES ('host.example', 'nuclei', 'high', 'cve', ?, ?)`,
+      );
+      ins.run('older', iso(5));
+      ins.run('newer', iso(1));
+      raw.prepare("INSERT INTO partial_stamps (tool, seen_at, run_id) VALUES ('nuclei', ?, 1)").run(iso(1));
+      if (dropTable) raw.exec('DROP TABLE partial_stamps');
+    });
+
+  it('lists both rows as open in /api/findings and /api/target', async () => {
+    const base = await startUi(seedPartial(false));
+    const open = (await (await fetch(`${base}/api/findings?status=open&limit=100`)).json()) as any;
+    expect(open.rows.map((r: any) => r.title).sort()).toEqual(['newer', 'older']);
+    const d = (await (await fetch(`${base}/api/target?t=host.example`)).json()) as any;
+    expect(d.findingsSummary).toEqual({ open: 2, resolved: 0 });
+  }, 40_000);
+
+  it('counts both rows in /api/targets', async () => {
+    const base = await startUi(seedPartial(false));
+    const t = (await (await fetch(`${base}/api/targets?limit=100`)).json()) as any;
+    expect(t.rows.find((r: any) => r.target === 'host.example')).toMatchObject({ high: 2, findings: 2 });
+  }, 40_000);
+
+  it('answers 200 with the legacy rule when partial_stamps is missing', async () => {
+    const base = await startUi(seedPartial(true));
+    const l = await fetch(`${base}/api/findings?status=open&limit=100`);
+    expect(l.status).toBe(200);
+    expect(((await l.json()) as any).rows.map((x: any) => x.title)).toEqual(['newer']);
+    expect((await fetch(`${base}/api/target?t=host.example`)).status).toBe(200);
+  }, 40_000);
+});
+
 describe('overview and targets count open findings', () => {
   const seedCounts = (dropTable: boolean) =>
     seed(false, (raw) => {

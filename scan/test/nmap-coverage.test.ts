@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { openDb } from '../src/lib/db.js';
+import { currentFindingsSelect, findingsRuleOpts } from '../src/lib/current-findings.js';
 
 const scanDir = path.resolve(__dirname, '..');
 const tsx = path.join(scanDir, 'node_modules', '.bin', 'tsx');
@@ -31,11 +32,11 @@ XML
 exit ${exit}
 `;
 
-function runNmap(opts: { xml?: string; exit?: number; extra?: string[]; noSqlite?: boolean; seed?: (db: ReturnType<typeof openDb>) => void }): Promise<{ code: number | null; stderr: string; db: string }> {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nmap-cov-'));
-  dirs.push(dir);
+function runNmap(opts: { dir?: string; xml?: string; exit?: number; extra?: string[]; noSqlite?: boolean; seed?: (db: ReturnType<typeof openDb>) => void }): Promise<{ code: number | null; stderr: string; db: string; dir: string }> {
+  const dir = opts.dir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'nmap-cov-'));
+  if (!opts.dir) dirs.push(dir);
   const bin = path.join(dir, 'bin');
-  fs.mkdirSync(bin);
+  fs.mkdirSync(bin, { recursive: true });
   fs.writeFileSync(path.join(bin, 'nmap'), fakeNmap(opts.xml ?? XML, opts.exit ?? 0), { mode: 0o755 });
   const dbPath = path.join(dir, 'scan.db');
   const seedDb = openDb(dbPath);
@@ -53,7 +54,7 @@ function runNmap(opts: { xml?: string; exit?: number; extra?: string[]; noSqlite
     let stderr = '';
     child.stderr.on('data', (b) => (stderr += b));
     const timer = setTimeout(() => child.kill('SIGKILL'), 90_000);
-    child.on('close', (code) => { clearTimeout(timer); resolve({ code, stderr, db: dbPath }); });
+    child.on('close', (code) => { clearTimeout(timer); resolve({ code, stderr, db: dbPath, dir }); });
   });
 }
 
@@ -150,5 +151,83 @@ describe('nmap vulners coverage', () => {
     const r = await runNmap({ seed: (db) => db.raw.exec("CREATE TRIGGER t_lock BEFORE INSERT ON findings BEGIN SELECT RAISE(ABORT, 'database is locked'); END") });
     expect(r.code).toBe(1);
     expect(coverage(r.db).cov).toEqual([]);
+  }, 100_000);
+});
+
+describe('nmap partial runs', () => {
+  const resolved = (dbPath: string, title: string) => {
+    const db = openDb(dbPath);
+    const rows = db.raw.prepare(currentFindingsSelect(findingsRuleOpts(db.raw))).all() as { title: string; resolved: number }[];
+    db.close();
+    return rows.find((r) => r.title === title)?.resolved;
+  };
+  const prior = (db: ReturnType<typeof openDb>) => priorFinding(8080)(db);
+  const title = `CVE-2020-0001 on nginx (${HOST}:8080)`;
+
+  it('keeps a prior finding open when nmap exits 1', async () => {
+    const r = await runNmap({ exit: 1, seed: prior });
+    expect(resolved(r.db, title)).toBe(0);
+  }, 100_000);
+
+  const TIMED_OUT = XML.replace('<host>', '<host starttime="1" endtime="2" timedout="true">');
+  const state = (dbPath: string) => {
+    const db = openDb(dbPath);
+    const marks = db.raw.prepare('SELECT run_id FROM partial_stamps').all() as { run_id: number }[];
+    const notes = (db.raw.prepare('SELECT notes FROM runs ORDER BY id DESC LIMIT 1').get() as { notes: string | null }).notes;
+    db.close();
+    return { marks, notes };
+  };
+
+  it('keeps a prior finding open and marks the run partial when a host timed out', async () => {
+    const r = await runNmap({ xml: TIMED_OUT, seed: prior });
+    expect(r.code, r.stderr).toBe(0);
+    expect(resolved(r.db, title)).toBe(0);
+    const st = state(r.db);
+    expect(st.marks).toHaveLength(1);
+    expect(st.notes).toContain('partial run: 1 timed-out host(s)');
+  }, 100_000);
+
+  const hostXml = (ip: string, name: string, timedOut: boolean) =>
+    `<host${timedOut ? ' starttime="1" endtime="2" timedout="true"' : ''}><status state="up"/><address addr="${ip}" addrtype="ipv4"/>
+<hostnames><hostname name="${name}" type="user"/></hostnames>
+<ports><port protocol="tcp" portid="22"><state state="open"/><service name="ssh"/></port></ports></host>`;
+  const withHosts = (...extra: string[]) => XML.replace('</nmaprun>', `${extra.join('\n')}</nmaprun>`);
+
+  it('ignores a timed-out host that wrote no rows when another host of the batch did', async () => {
+    const r = await runNmap({ xml: withHosts(hostXml('192.0.2.20', 'quiet.example.test', true)), seed: prior });
+    expect(r.code, r.stderr).toBe(0);
+    expect(resolved(r.db, title)).toBe(1);
+    expect(state(r.db).marks).toEqual([]);
+    expect(state(r.db).notes ?? '').not.toContain('partial run');
+  }, 100_000);
+
+  it('is partial when a timed-out host shares its target with a host that wrote rows', async () => {
+    const r = await runNmap({ xml: withHosts(hostXml('192.0.2.11', HOST, true)), seed: prior });
+    expect(r.code, r.stderr).toBe(0);
+    expect(resolved(r.db, title)).toBe(0);
+    expect(state(r.db).marks).toHaveLength(1);
+    expect(state(r.db).notes).toContain('partial run: 1 timed-out host(s)');
+  }, 100_000);
+
+  it('keeps a prior finding open and marks the run partial when the port scan was narrowed', async () => {
+    const r = await runNmap({ extra: ['--vulners', '-p', '80'], seed: prior });
+    expect(r.code, r.stderr).toBe(0);
+    expect(resolved(r.db, title)).toBe(0);
+    const st = state(r.db);
+    expect(st.marks).toHaveLength(1);
+    expect(st.notes).toContain('partial run: narrowed port scan');
+  }, 100_000);
+
+  it('does not cover a host in a clean run that follows a partial one', async () => {
+    const first = await runNmap({ exit: 1, seed: prior });
+    const second = await runNmap({ dir: first.dir });
+    expect(second.code, second.stderr).toBe(0);
+    expect(coverage(second.db).cov).toEqual([]);
+  }, 100_000);
+
+  it('resolves the prior finding when nmap exits 0 (control)', async () => {
+    const r = await runNmap({ seed: prior });
+    expect(r.code, r.stderr).toBe(0);
+    expect(resolved(r.db, title)).toBe(1);
   }, 100_000);
 });
