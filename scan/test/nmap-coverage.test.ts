@@ -187,6 +187,28 @@ describe('nmap partial runs', () => {
     expect(st.notes).toContain('partial run: 1 timed-out host(s)');
   }, 100_000);
 
+  const hostXml = (ip: string, name: string, timedOut: boolean) =>
+    `<host${timedOut ? ' starttime="1" endtime="2" timedout="true"' : ''}><status state="up"/><address addr="${ip}" addrtype="ipv4"/>
+<hostnames><hostname name="${name}" type="user"/></hostnames>
+<ports><port protocol="tcp" portid="22"><state state="open"/><service name="ssh"/></port></ports></host>`;
+  const withHosts = (...extra: string[]) => XML.replace('</nmaprun>', `${extra.join('\n')}</nmaprun>`);
+
+  it('ignores a timed-out host that wrote no rows when another host of the batch did', async () => {
+    const r = await runNmap({ xml: withHosts(hostXml('192.0.2.20', 'quiet.example.test', true)), seed: prior });
+    expect(r.code, r.stderr).toBe(0);
+    expect(resolved(r.db, title)).toBe(1);
+    expect(state(r.db).marks).toEqual([]);
+    expect(state(r.db).notes ?? '').not.toContain('partial run');
+  }, 100_000);
+
+  it('is partial when a timed-out host shares its target with a host that wrote rows', async () => {
+    const r = await runNmap({ xml: withHosts(hostXml('192.0.2.11', HOST, true)), seed: prior });
+    expect(r.code, r.stderr).toBe(0);
+    expect(resolved(r.db, title)).toBe(0);
+    expect(state(r.db).marks).toHaveLength(1);
+    expect(state(r.db).notes).toContain('partial run: 1 timed-out host(s)');
+  }, 100_000);
+
   it('keeps a prior finding open and marks the run partial when the port scan was narrowed', async () => {
     const r = await runNmap({ extra: ['--vulners', '-p', '80'], seed: prior });
     expect(r.code, r.stderr).toBe(0);
