@@ -209,7 +209,7 @@ npm run worker  -- --batch-size 5 --max-batches 1 --scope scope.txt
 sqlite3 scan.db "UPDATE scan_queue SET status='pending', error=NULL, abandoned=0 WHERE status='failed'"
 ```
 
-Before changing the `networkChanged` bump in `src/lib/risk.ts`, measure it on a copy of the DB. The dry run opens the DB read-only and prints to stdout only:
+Before changing the `networkChanged` bump in `src/lib/risk.ts`, or the rule that picks which findings the score counts, measure it on a copy of the DB. The dry run opens the DB read-only and prints to stdout only. It reports three effects: (a) the country source, (b) each `--bumps` value, and (c) the old findings rule (every row, each CVE row counted) against the current one (see [Open and current findings](#open-and-current-findings)):
 
 ```bash
 npm run risk-dry-run -- --sqlite scan-copy.db --bumps 1,2,3,5 --suffix gov.hu [--discovery-db ../discovery/recon.db]
@@ -217,7 +217,7 @@ npm run risk-dry-run -- --sqlite scan-copy.db --bumps 1,2,3,5 --suffix gov.hu [-
 
 ### retention
 
-Prune superseded rows. A target's latest evidence per tool is never deleted, however old.
+Prune superseded rows. A target's latest evidence per tool is never deleted, however old. Neither is a finding that is still current under the [closing rule](#open-and-current-findings).
 
 ```
 npm run retention -- --older-than 90           # dry-run: counts per table, runs to remove
@@ -229,13 +229,24 @@ npm run retention -- --older-than 90 --risk-older-than 30   # dry-run, also risk
 - `--risk-older-than N` — also prune `risk_scores` rows older than N days (default: `risk_scores` is not touched)
 - `--apply` — actually delete (default is dry-run)
 
-A row of `findings`, `ports`, `http_probes` or `screenshots` is pruned only when its run is older than N days **and** the same target has a newer, finished run of the same tool with rows in the same table (later `started_at`, ties by run id). A target that was not rescanned keeps all its rows. Deletes run in transactions of 1000 rows with a 60 s busy timeout, so live workers are not blocked for long.
+A row of `findings`, `ports`, `http_probes` or `screenshots` is pruned only when its run is older than N days **and** the same target has a newer, finished run of the same tool with rows in the same table (later `started_at`, ties by run id). A target that was not rescanned keeps all its rows. A `findings` row is also kept while it is current: a sticky tool's row, or a row at or after its pair's watermark. Deletes run in transactions of 1000 rows with a 60 s busy timeout, so live workers are not blocked for long.
 
 With `--risk-older-than N`, a `risk_scores` row is pruned when its `computed_at` is older than N days **and** it is not its target's latest row (the one with the greatest `computed_at`, ties by highest id; URL targets too). Each target keeps its latest score however old, so `risk_latest` needs no refresh and its `created_at` does not change. History queries (`query risk --since/--until`, `enqueue --from-risk`) then see only N days. The dry run and the apply output print a `risk_scores` count line.
 
-A run row and its `runs/<id>/` directory are removed only when no row in any table that references `runs` is left (so `risk_scores`, `scan_queue`, `dns_records` and the others keep their runs alive). Those tables are never modified, except `risk_scores` with `--risk-older-than`: a risk run whose rows are all pruned is removed with the others. `--keep-min` is gone: the per-target rule replaces it.
+A run row and its `runs/<id>/` directory are removed only when no row in any table that references `runs` is left (so `risk_scores`, `scan_queue`, `dns_records` and the others keep their runs alive). The run's `partial_stamps` markers are deleted with the run row. Those tables are never modified, except `risk_scores` with `--risk-older-than`: a risk run whose rows are all pruned is removed with the others. `--keep-min` is gone: the per-target rule replaces it.
 
 The weekly `retention.timer` in `deploy/` runs this with `--apply`; dry-run first (see `deploy/README.md`).
+
+### prune-runs
+
+Delete named runs and their child rows, for example to remove test pollution.
+
+```
+npm run prune-runs -- --runs 21,22 --expect 21:nuclei --expect 22:nuclei           # dry-run: prints the plan
+npm run prune-runs -- --runs 21,22 --expect 21:nuclei --expect 22:nuclei --yes     # delete
+```
+
+It backs up the DB to `<db>.bak` first. With `--expect id:tool`, it aborts unless each run's tool matches. One transaction deletes the runs' `findings`, `risk_scores`, `tool_coverage` rows and `partial_stamps` markers, then the runs. A pruned run's coverage therefore stops closing findings, and older findings it had closed are open again.
 
 ## SQLite backing store
 
@@ -269,11 +280,50 @@ The UI reads target scores from the `risk_latest` table. Any scan tool creates a
 
 Flags: `--sqlite <path>` (scan DB, default `scan.db`), `--recon-db <path>` (auto-detected at `../discovery/recon.db`), `--port` / `-p`, `--host` (default `127.0.0.1`). Env: `UI_PORT`, `UI_HOST`.
 
-Views: **Overview** (inventory counts, severity breakdown, highest-risk targets, top ports, recent runs), **Targets** (multi-select severity facets, CVE-presence, risk-score range, sort — incl. created/updated — and name search; each row shows created/updated timestamps → per-target drill-down of ports / HTTP / findings / CVEs / certs / DNS), **Graph** (per-host subgraph + a **Global** infrastructure overview), **Findings** (de-duplicated to one row per issue with **open/resolved** status from scan history, plus multi-select severity, status, tool, category, CVE-presence, date range, sort, and target/title/CVE search — all with live facet counts), **CVEs** (each id links to NVD), **Ports** (by prevalence → hosts per port), **Recon** (hosts/IPs by country + ASN + source), **News** (new findings by day). The whole UI is read-only — only `GET` is served and every DB connection allows only SELECT-class statements. Bind `--host 0.0.0.0` only behind an SSH tunnel — the UI has no auth.
+Views: **Overview** (inventory counts, severity breakdown, highest-risk targets, top ports, recent runs), **Targets** (multi-select severity facets, CVE-presence, risk-score range, sort — incl. created/updated — and name search; each row shows created/updated timestamps → per-target drill-down of ports / HTTP / findings / CVEs / certs / DNS), **Graph** (per-host subgraph + a **Global** infrastructure overview), **Findings** (de-duplicated to one row per issue with **open/resolved** status from scan history, plus multi-select severity, status, tool, category, CVE-presence, date range, sort, and target/title/CVE search — all with live facet counts), **CVEs** (each id links to NVD; `status=open|resolved|all`, default open, see below), **Ports** (by prevalence → hosts per port), **Recon** (hosts/IPs by country + ASN + source), **News** (new findings by day). The whole UI is read-only — only `GET` is served and every DB connection allows only SELECT-class statements. Bind `--host 0.0.0.0` only behind an SSH tunnel — the UI has no auth.
 
-**News** is a read-only feed of *newly-discovered* findings: each finding grouped by the day it was **first** observed (`MIN(seen_at)` per `target·tool·severity·category·title`, so re-scans don't re-report it), with day-chips (per-day new counts, today highlighted), a severity filter, and target/title/CVE search — sourced entirely from `scan.db`.
+**News** is a read-only feed of *newly-discovered* findings: each finding grouped by the day it was **first** observed (`MIN(seen_at)` per `target·tool·severity·category·title`, so re-scans don't re-report it; the host-pass and URL-pass nuclei results count as one tool here), with day-chips (per-day new counts, today highlighted), a severity filter, and target/title/CVE search — sourced entirely from `scan.db`.
 
-**Open vs resolved.** The Findings and per-target views collapse each issue to a single logical finding and mark it **resolved** when a *later* run of the same tool on the same host stopped reporting it (its `last_seen` predates that tool's most recent scan of the host), else **open**. This is inferred from scan history — a tool that simply never re-ran a host leaves its findings **open**, so "resolved" means "confirmed gone by a later scan", not "not-yet-rechecked".
+### Open and current findings
+
+The Findings page, the per-target view, the severity counts, the CVE list, the risk score and retention all share one rule (`src/lib/current-findings.ts`). Each `(target, tool)` pair has a **watermark** `w`. A finding row is **current** when `seen_at >= w`. A logical finding (one per target, tool, severity, category and title) is **open** when its `last_seen >= w`, else **resolved**. A tool that never re-ran a host leaves its findings open, so "resolved" means "confirmed gone by a later scan", not "not yet rechecked".
+
+The watermark is the first of these that applies:
+
+1. **Sticky tools** (`synthesize-eol`, `manual`, `manual-triage`): `''`. Their findings never close.
+2. **Coverage:** `tool_coverage.seen_at` for the pair, when a row exists. A tool writes it when its run conclusively examined the target, even if it found nothing (see the table below). It only moves forward.
+3. **Otherwise** the newest `seen_at` of the pair that no partial run wrote.
+
+Missing output is never a signal. A crashed, killed or silent run records no coverage, so it closes nothing.
+
+**Partial runs.** A run is partial when it failed or stopped early and wrote rows. Rule 3 reads the newest stamp as proof that the tool saw the target again. A partial run's stamp must not close the older findings it never reached. So:
+
+- `insertFinding` with a run id records `(tool, seen_at, run_id)` in `partial_stamps`.
+- `finishRun(id, {partial})` deletes the run's markers unless `partial` is true. A run is therefore partial from its first row until it finishes cleanly. A run that never finishes (crash, kill) stays partial and needs no wrapper code. Rows written before this table existed have no markers and behave as before.
+- Rule 3 skips a stamp that carries a marker. If every row of the pair is partial, all of them stay current.
+- A wrapper that marks a run partial adds a `partial run: <reasons>` note to `runs.notes`.
+- A later complete run, or coverage (rule 2), still resolves the older findings.
+
+If `tool_coverage` or `partial_stamps` is missing (an old DB), the readers skip that step and the UI still answers.
+
+| Tool (`findings.tool`) | Records coverage | Marks the run partial when |
+|---|---|---|
+| `nuclei`, `nuclei-url` | `nuclei-url` only (the `--from-urls` pass) | non-zero exit, unparseable row, skipped host, row not stored |
+| `nmap-vulners` | yes, per host (needs `--vulners`) | non-zero exit, timed-out host with rows, narrowed port scan |
+| `version-match` | yes, per target (NVD lookup available, not a dry run) | insert skipped because the DB was busy, failed target |
+| `checkdmarc` | yes, per domain with a conclusive row | non-zero exit or an inconclusive row, with rows written |
+| `sslyze` | yes, per host whose scan and commands all completed | non-zero exit, incomplete host, ingest error |
+| `ffuf` | yes, per host | host with rows but no coverage |
+| `headers`, `content-sigs` | yes, per target | never (a crash is covered by the markers) |
+| `takeover`, `wpscan`, `testssl`, `kiterunner`, `secrets`, SMB wrappers | no | a failure signal of the wrapper with rows written (non-zero exit, unreadable output, skipped or unfetched target) |
+
+A tool that records no coverage keeps rule 3.
+
+**Same finding, two nuclei passes.** The host pass writes `tool='nuclei'` and the `--from-urls` pass writes `tool='nuclei-url'`. Every reader folds them into `nuclei`: a match both passes report is one finding, with summed occurrences, and it is open if either pass still has it open. Each pass keeps its own watermark. News and the digest key on the folded tool, so a URL-pass finding is not announced again as new.
+
+**Scores and counts.** The risk score reads current rows only, so a conclusive empty run lowers it. The known-CVE bucket counts distinct CVE ids, so one CVE reported under two titles counts once. The UI severity counts, the overview and the recent-targets list count open logical findings. The CVE column counts distinct ids.
+
+**CVEs.** `cve-rollup` sets `cves.open` to 1 when at least one current finding row carries the CVE. The CVEs view lists open ones by default; `status=resolved` or `status=all` changes that. A `--since` rollup recomputes `open` only for CVEs with a row in its window.
 
 **Graph** has two scopes. *Host*: type/search a host (or click `graph ▸` on a target) for its `host → ports / tech / CVEs / DNS peers` subgraph. *Global*: an aggregated **infrastructure overview** — ASN hubs (sized by host count) and shared-IP clusters (IPs co-hosting ≥ N hosts, tunable), optionally expanded to host nodes; tap a host to drill into its subgraph. Built from `recon.db` (ASN-aware; falls back to `scan.db` host↔IP without ASN). The Graph view lazy-loads Cytoscape from a CDN, so it needs browser internet; every other view is fully self-contained.
 
@@ -326,6 +376,8 @@ Runs `httpx -sc -title -td -web-server -tech-detect -follow-redirects -threads 5
 npm run nuclei -- --targets hosts.txt --scope scope.txt --sqlite scan.db -- -severity critical
 ```
 Runs `nuclei -jsonl -severity medium,high,critical -rate-limit 150 -stats`. Rows into `findings` (tool='nuclei').
+
+With `--from-urls` the run scans URLs instead of bare hosts and writes `tool='nuclei-url'`, with its own `runs.tool` and watermark. Every reader merges it with `nuclei` (see [Open and current findings](#open-and-current-findings)).
 
 Update templates weekly: `nuclei -update-templates`.
 
@@ -398,7 +450,7 @@ Idempotent — creates the schema if missing, otherwise no-op.
 
 ### risk
 
-Compute a per-target threat risk score (0–100) from findings + ports + hostname patterns + (optional) discovery signals. Stores every score row with a timestamp so trends are queryable.
+Compute a per-target threat risk score (0–100) from findings + ports + hostname patterns + (optional) discovery signals. Stores every score row with a timestamp so trends are queryable. Only current findings count (see [Open and current findings](#open-and-current-findings)); the same logical finding is counted once.
 
 ```
 npm run risk -- --db scan.db --suffix gov.hu --discovery-db ../discovery/recon.db --top 25 --breakdown
@@ -413,7 +465,7 @@ npm run risk -- --db scan.db --suffix gov.hu --discovery-db ../discovery/recon.d
 | Medium findings | +5 each (first 5), +1 each extra | 30 |
 | Low findings | +1 each (first 10), +0.3 each extra | 15 |
 | Info findings | +0.2 each (first 20), +0.05 each extra | 5 |
-| Known CVE | +10 each (first 3), +2 each extra | 60 |
+| Known CVE (distinct ids) | +10 each (first 3), +2 each extra | 60 |
 | Version-match CVE (distinct) | +3 each (first 5), +0.5 each extra | 20 |
 | Subdomain takeover | +30 | flat |
 | Weak TLS (testssl LOW/MED/HIGH/CRITICAL) | +8 | flat |
