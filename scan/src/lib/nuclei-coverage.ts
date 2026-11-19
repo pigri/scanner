@@ -121,19 +121,21 @@ export function withRowRoots(targets: readonly string[], inputs: ReadonlySet<str
 
 /**
  * Input keys of each target's open nuclei-url rows: nuclei's `url` (the input it
- * scanned), else `matched_at`. Read before this run inserts anything, or its rows
- * would move the watermark past the old ones. Throws when the read fails.
+ * scanned), else `self:<target>`: dns, tcp and ssl rows have no url, and their
+ * `matched-at` is a host or host:port, not an input. Read before this run
+ * inserts anything, or its rows would move the watermark past the old ones.
+ * Throws when the read fails.
  */
 export function openNucleiUrlKeys(raw: Database.Database, targets: readonly string[]): Map<string, string[]> {
   const stmt = raw.prepare(
-    `SELECT DISTINCT COALESCE(json_extract(f.meta_json, '$.url'), f.matched_at) AS u
+    `SELECT DISTINCT json_extract(f.meta_json, '$.url') AS u
      FROM findings f JOIN (${watermarkSelect({ ...findingsRuleOpts(raw), targetParam: '@t' })}) wm
        ON wm.target = f.target AND wm.tool = f.tool
      WHERE f.target = @t AND f.tool = '${NUCLEI_URL_TOOL}' AND f.seen_at >= wm.w`,
   );
   const out = new Map<string, string[]>();
   for (const t of new Set(targets)) {
-    const keys = (stmt.all({ t }) as { u: string | null }[]).map((r) => inputKey(r.u));
+    const keys = (stmt.all({ t }) as { u: string | null }[]).map((r) => (r.u ? inputKey(r.u) : selfKey(t)));
     if (keys.length) out.set(t, keys);
   }
   return out;

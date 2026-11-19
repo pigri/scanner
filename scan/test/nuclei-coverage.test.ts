@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { nucleiCoveredTargets, nucleiSkippedHosts, parseMatched, hostOf, nucleiInputKeys, inputKey, targetsWithKeysOutside } from '../src/lib/nuclei-coverage.js';
+import { nucleiCoveredTargets, nucleiSkippedHosts, parseMatched, hostOf, nucleiInputKeys, selfKey, inputKey, targetsWithKeysOutside } from '../src/lib/nuclei-coverage.js';
 
 const T = 'www.example.test';
 const ssl = { type: 'ssl', 'matched-at': `${T}:443`, stored: true };
@@ -139,6 +139,15 @@ describe('open findings outside this run\'s inputs', () => {
     const row = { type: 'http', 'matched-at': `http://${T}/`, url: T, scheme: 'http', stored: true };
     expect(nucleiCoveredTargets([T], [http, row], { ...opts, openKeys: open(`http://${T}`) })).toEqual([T]);
     expect(nucleiCoveredTargets([T], [http, row], { ...opts, openKeys: open(`https://${T}`) })).toEqual([]);
+  });
+
+  it('counts an open row with no url as inside when the bare target was an input', () => {
+    expect(nucleiCoveredTargets([T], [http], { ...opts, openKeys: new Map([[T, [selfKey(T)]]]) })).toEqual([T]);
+  });
+
+  it('counts an open row with no url as outside when the target was not an input', () => {
+    const other = nucleiInputKeys([], [`https://${T}/app/login`]);
+    expect(nucleiCoveredTargets([T], [http], { fromUrls: true, exitCode: 0, inputs: other, openKeys: new Map([[T, [selfKey(T)]]]) })).toEqual([]);
   });
 
   it('treats an open row with no key as outside', () => {

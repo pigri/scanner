@@ -267,6 +267,17 @@ describe('nuclei-url coverage and the source of open findings', () => {
     expect(state(r.db).cov).toEqual([HOST]);
   }, 100_000);
 
+  const noUrl = (matchedAt: string, extra = '') => `${extra}
+    INSERT INTO findings(tool, target, category, severity, title, matched_at, meta_json, seen_at)
+    VALUES ('nuclei-url', '${HOST}', 'cve', 'high', 'older finding', '${matchedAt}', '${JSON.stringify({ type: 'x' })}', '${OLDER}')`;
+
+  for (const [kind, matchedAt] of [['dns', HOST], ['tcp', `${HOST}:22`], ['ssl', `${HOST}:8443`], ['ssl', `${HOST}:443`]] as const) {
+    it(`covers a target whose open ${kind} finding (${matchedAt}) has no url, when its bare host was scanned`, async () => {
+      const r = await runNuclei(['--from-urls'], [hit], 0, { trigger: noUrl(matchedAt) });
+      expect(state(r.db).cov).toEqual([HOST]);
+    }, 100_000);
+  }
+
   it('records no coverage, and says so, when the open findings cannot be read', async () => {
     const bad = `INSERT INTO findings(tool, target, category, severity, title, matched_at, meta_json, seen_at)
       VALUES ('nuclei-url', '${HOST}', 'cve', 'high', 'bad row', 'x', 'not json', '${OLDER}')`;
