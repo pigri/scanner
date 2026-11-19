@@ -94,10 +94,12 @@ function authorityOf(t: string): string {
   try { return new URL(`https://${t}`).host.toLowerCase(); } catch { return ''; }
 }
 
-/** The key of the input behind a row, with the scheme nuclei chose when the url has none. */
+/** The key of the input behind a row, only when the url or the `scheme` field names an http(s) scheme. */
 function rowInputKey(r: NucleiRowEvidence): string {
   if (!r.url) return '';
-  return inputKey(/^https?:\/\//i.test(r.url) || !r.scheme ? r.url : `${r.scheme}://${r.url}`);
+  if (/^https?:\/\//i.test(r.url)) return inputKey(r.url);
+  const scheme = r.scheme?.toLowerCase();
+  return scheme === 'http' || scheme === 'https' ? inputKey(`${scheme}://${r.url}`) : '';
 }
 
 /**

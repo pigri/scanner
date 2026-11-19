@@ -141,6 +141,14 @@ describe('open findings outside this run\'s inputs', () => {
     expect(nucleiCoveredTargets([T], [http, row], { ...opts, openKeys: open(`https://${T}`) })).toEqual([]);
   });
 
+  const js = { type: 'javascript', 'matched-at': T, host: T, url: T, stored: true };
+  const tcp = (url: string) => ({ type: 'tcp', 'matched-at': url, host: T, url, scheme: undefined, stored: true });
+
+  it('adds no root key from a row whose url and scheme field name no scheme', () => {
+    expect(nucleiCoveredTargets([T], [bareRow('http'), js], { ...opts, openKeys: open(`https://${T}`) })).toEqual([]);
+    expect(nucleiCoveredTargets([T], [bareRow('http'), tcp(`${T}:443`)], { ...opts, openKeys: open(`https://${T}`) })).toEqual([]);
+  });
+
   it('counts an open row with no url as inside when the bare target was an input', () => {
     expect(nucleiCoveredTargets([T], [http], { ...opts, openKeys: new Map([[T, [selfKey(T)]]]) })).toEqual([T]);
   });

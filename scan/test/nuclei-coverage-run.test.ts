@@ -267,7 +267,7 @@ describe('nuclei-url coverage and the source of open findings', () => {
     expect(state(r.db).cov).toEqual([HOST]);
   }, 100_000);
 
-  const noUrl = (matchedAt: string, extra = '') => `${extra}
+  const noUrl = (matchedAt: string) => `
     INSERT INTO findings(tool, target, category, severity, title, matched_at, meta_json, seen_at)
     VALUES ('nuclei-url', '${HOST}', 'cve', 'high', 'older finding', '${matchedAt}', '${JSON.stringify({ type: 'x' })}', '${OLDER}')`;
 
@@ -277,6 +277,12 @@ describe('nuclei-url coverage and the source of open findings', () => {
       expect(state(r.db).cov).toEqual([HOST]);
     }, 100_000);
   }
+
+  it('does not cover an open https root finding when the run saw an http root row and a javascript row on the bare target', async () => {
+    const js = JSON.stringify({ 'template-id': 't-js', type: 'javascript', info: { name: 'T', severity: 'info' }, host: HOST, url: HOST, 'matched-at': HOST });
+    const r = await runNuclei(['--from-urls'], [bare('http'), js], 0, { trigger: seed(`https://${HOST}`) });
+    expect(state(r.db).cov).toEqual([]);
+  }, 100_000);
 
   it('does not let a closed finding outside the inputs block coverage', async () => {
     const closed = `${seed(`https://${HOST}/gone`)};
