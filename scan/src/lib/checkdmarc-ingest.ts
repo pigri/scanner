@@ -2,7 +2,8 @@
 // checkdmarc.ts so it can be tested without spawning the tool.
 import { run } from './runner.js';
 import type { Db } from './db.js';
-import { checkdmarcCoveredTargets } from './checkdmarc-coverage.js';
+import { checkdmarcCoveredTargets, checkdmarcRowConclusive } from './checkdmarc-coverage.js';
+import { rowsAtRisk, partialReasons, finishWithWhy, exitFailed, exitReason } from './run-partial.js';
 
 export interface CheckdmarcResult {
   domain?: string;
@@ -69,6 +70,7 @@ export interface CheckdmarcIngest { rows: number; findings: number }
 export async function ingestCheckdmarcRows(
   db: Db, rows: CheckdmarcResult[], now: string, runId: number,
   lookupSpf: typeof lookupSpfViaCname = lookupSpfViaCname,
+  exitCode: number,
 ): Promise<CheckdmarcIngest> {
   let findings = 0;
   const emit = (target: string, category: string, severity: string, title: string, meta: unknown): void => {
@@ -203,10 +205,15 @@ export async function ingestCheckdmarcRows(
   }
 
   const coverageWritten = db.recordCoverage('checkdmarc', checkdmarcCoveredTargets(rows), now, runId);
-  db.finishRun(runId, {
+  // checkdmarc turns a resolver timeout into "does not exist", so an inconclusive row's findings are not proof.
+  const inconclusive = rows.filter((r) => typeof r.domain === 'string' && r.domain !== '' && !checkdmarcRowConclusive(r)).length;
+  const why = rowsAtRisk(findings, exitFailed(exitCode) || inconclusive > 0)
+    ? partialReasons([[exitFailed(exitCode), exitReason(exitCode)], [inconclusive, 'inconclusive row(s)']])
+    : [];
+  finishWithWhy(db, runId, {
     targetsCount: rows.length, findingsCount: findings,
     ...(coverageWritten ? {} : { notes: 'tool_coverage write failed: scan.db busy' }),
     at: new Date().toISOString(),
-  });
+  }, why);
   return { rows: rows.length, findings };
 }

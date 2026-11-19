@@ -68,7 +68,7 @@ Wrapper flags (before '--'):
 
   const parsed = JSON.parse(fs.readFileSync(outFile, 'utf8')) as CheckdmarcResult | CheckdmarcResult[];
   const rows: CheckdmarcResult[] = Array.isArray(parsed) ? parsed : [parsed];
-  const { findings } = await ingestCheckdmarcRows(db, rows, now, runId);
+  const { findings } = await ingestCheckdmarcRows(db, rows, now, runId, undefined, r.code);
   db.close();
   console.error(`  sqlite: ${path.resolve(opts.sqlite!)} (+${findings} findings across ${rows.length} domains, run #${runId})`);
 }

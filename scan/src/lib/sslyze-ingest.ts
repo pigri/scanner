@@ -2,6 +2,7 @@ import type { Db } from './db.js';
 import { coveredTargets } from './coverage.js';
 import { toCertRecords, quoteBigSerials, type SslyzeCertResult } from './sslyze-cert.js';
 import { classifyRobot } from './sslyze-robot.js';
+import { rowsAtRisk, partialReasons, finishWithWhy, exitFailed, exitReason } from './run-partial.js';
 
 export interface SslyzeResult {
   server_scan_results?: Array<{
@@ -75,7 +76,7 @@ function allCommandsCompleted(scanResult: unknown): boolean {
 }
 
 // `covered`: hosts whose every server row is COMPLETED with every command read COMPLETED. `coverageNote` is set only when the coverage write failed.
-export interface SslyzeIngest { rows: number; findings: number; certs: number; covered: string[]; coverageNote?: string }
+export interface SslyzeIngest { rows: number; findings: number; certs: number; covered: string[]; coverageNote?: string; incomplete?: number }
 
 type ServerRow = NonNullable<SslyzeResult['server_scan_results']>[number];
 type ScanResult = NonNullable<ServerRow['scan_result']>;
@@ -116,9 +117,11 @@ export function ingestSslyzeOutput(db: Db, text: string, now: string, runId: num
   if (!raw) return null;
   const rows = usableRows(raw);
   let findings = 0;
+  const perTarget = new Map<string, number>();
   const emit = (target: string, category: string, severity: string, title: string, meta: unknown): void => {
     db.insertFinding({ tool: 'sslyze', target, category, severity, title, matched_at: target, meta }, now, runId);
     findings++;
+    perTarget.set(target, (perTarget.get(target) ?? 0) + 1);
   };
 
   const outcomes: { target: string; ok: boolean }[] = [];
@@ -211,6 +214,9 @@ export function ingestSslyzeOutput(db: Db, text: string, now: string, runId: num
 
   const covered = coveredTargets(outcomes);
   const result: SslyzeIngest = { rows: rows.length, findings, certs, covered };
+  // A host that wrote rows without a clean outcome moved the watermark on a scan that did not finish.
+  const incomplete = [...perTarget].filter(([t, n]) => rowsAtRisk(n, !covered.includes(t))).length;
+  if (incomplete > 0) result.incomplete = incomplete;
   if (!db.recordCoverage('sslyze', covered, now, runId)) result.coverageNote = 'tool_coverage write failed: scan.db busy';
   return result;
 }
@@ -218,8 +224,9 @@ export function ingestSslyzeOutput(db: Db, text: string, now: string, runId: num
 // Reads and ingests one sslyze output, and always finishes the run and closes the db.
 // A failed read counts as unusable output: one line with the error name, no message.
 // A throw after a successful read is logged and rethrown, not swallowed.
-export function ingestAndFinishRun(db: Db, read: () => string, now: string, runId: number, scanned: number): SslyzeIngest | null {
+export function ingestAndFinishRun(db: Db, read: () => string, now: string, runId: number, scanned: number, exitCode: number): SslyzeIngest | null {
   let result: SslyzeIngest | null = null;
+  let threw = false;
   try {
     let text: string;
     try {
@@ -231,15 +238,22 @@ export function ingestAndFinishRun(db: Db, read: () => string, now: string, runI
     result = ingestSslyzeOutput(db, text, now, runId);
     return result;
   } catch (err) {
+    threw = true;
     console.error(`sslyze: ingest failed: ${err instanceof Error ? err.message : String(err)}`);
     throw err;
   } finally {
-    db.finishRun(runId, {
+    // An ingest that threw may have written rows already: keep its markers.
+    const why = partialReasons([
+      [rowsAtRisk(result?.findings ?? 0, exitFailed(exitCode)), exitReason(exitCode)],
+      [result?.incomplete ?? 0, 'host(s) incomplete'],
+      [threw, 'ingest failed'],
+    ]);
+    finishWithWhy(db, runId, {
       targetsCount: result ? result.rows : scanned,
       findingsCount: result ? result.findings : 0,
       ...(result?.coverageNote ? { notes: result.coverageNote } : {}),
       at: new Date().toISOString(),
-    });
+    }, why);
     db.close();
   }
 }

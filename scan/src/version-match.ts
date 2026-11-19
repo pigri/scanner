@@ -11,6 +11,7 @@ import { parseCommonCli, prepareTargets, run } from './lib/runner.js';
 import { openNvdLookup, type VulnLookup } from './lib/nvd-db.js';
 import { coveredTargets } from './lib/coverage.js';
 import { isSqliteBusy } from './lib/sqlite-busy.js';
+import { finishWithWhy, partialReasons } from './lib/run-partial.js';
 import { resolveAlias } from './lib/cpe-aliases.js';
 import {
   parseServerHeader, parseTechToken, evidenceFromPort, matchCves, severityForCvss,
@@ -150,16 +151,16 @@ export async function runVersionMatch(opts: VersionMatchOpts): Promise<VersionMa
   const windowDays = opts.windowDays ?? DEFAULT_SWEEP_WINDOW_DAYS;
   let targets = opts.targets;
   const runId = opts.dryRun ? null : db.startRun('version-match', { nvdDb: opts.nvdDb, maxAgeDays: opts.maxAgeDays, ...(sweep ? { all: true, windowDays } : {}) }, at);
-  const finish = (notes: string | undefined): void => {
+  const finish = (notes: string | undefined, why: readonly string[] = []): void => {
     if (runId === null) return;
-    db.finishRun(runId, { targetsCount: targets.length, findingsCount: result.inserted, ...(notes !== undefined ? { notes } : {}), at: new Date().toISOString() });
+    finishWithWhy(db, runId, { targetsCount: targets.length, findingsCount: result.inserted, ...(notes !== undefined ? { notes } : {}), at: new Date().toISOString() }, why);
   };
 
   const lookup = opts.lookup !== undefined ? opts.lookup : openNvdLookup(opts.nvdDb);
   if (!lookup) {
     const note = `nvd.db unavailable (${opts.nvdDb}): missing, unreadable or wrong schema; no version-match findings`;
     log(`WARN: ${note}`);
-    finish(note);
+    finish(note, ['nvd.db unavailable']);
     return result;
   }
 
@@ -247,7 +248,10 @@ export async function runVersionMatch(opts: VersionMatchOpts): Promise<VersionMa
       notes.push('sweep incomplete: no marker written, the next run re-matches this snapshot');
     }
   }
-  finish(notes.length ? notes.join('; ') : undefined);
+  finish(notes.length ? notes.join('; ') : undefined, partialReasons([
+    [result.busySkipped, 'finding(s) skipped: scan.db busy'],
+    [result.failedTargets, 'target(s) failed'],
+  ]));
   log(`version-match: ${result.matched} match(es), ${result.inserted} inserted, ${result.skippedVersions} skipped version(s), ${result.busySkipped} busy, ${result.failedTargets} failed target(s)${opts.dryRun ? ' (dry run)' : ''}`);
   return result;
 }

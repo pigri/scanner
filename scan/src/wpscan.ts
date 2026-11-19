@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, resolveOutputPath } from './lib/runner.js';
 import { openDb } from './lib/db.js';
+import { parseWpscanStdout, wpscanCve, type WpscanParsed } from './lib/wpscan-parse.js';
+import { finishWithWhy, partialReasons, rowsAtRisk, wpscanFailed } from './lib/run-partial.js';
 
 async function main(): Promise<void> {
   const opts = parseCommonCli(process.argv);
@@ -23,21 +25,17 @@ Pass --enumerate flags after '--'. Output: JSONL to --out (default: wpscan.jsonl
   const outFile = resolveOutputPath(opts, runId, 'wpscan.jsonl');
   const token = process.env['WPSCAN_API_TOKEN'];
   const wstream = fs.createWriteStream(outFile);
-  let ok = 0, fail = 0, findings = 0;
+  let ok = 0, fail = 0, findings = 0, incomplete = 0;
   for (const target of targets) {
     const url = target.startsWith('http') ? target : `https://${target}`;
     const args = ['--url', url, '--format', 'json', '--random-user-agent', '--disable-tls-checks', ...opts.extraArgs];
     if (token) args.push('--api-token', token);
     console.error(`wpscan ${url}`);
     const r = await run('wpscan', args, { timeoutMs: 300_000 });
+    const rowsBefore = findings;
     if (r.stdout.trim()) {
-      const line = r.stdout.trim().split('\n').filter(Boolean).slice(-1)[0] ?? '';
       try {
-        const parsed = JSON.parse(line) as {
-          interesting_findings?: { to_s?: string; type?: string; url?: string; references?: unknown }[];
-          version?: { number?: string; vulnerabilities?: { title?: string; references?: { cve?: string[] } }[] };
-          plugins?: Record<string, { version?: { number?: string }; vulnerabilities?: { title?: string; references?: { cve?: string[] } }[] }>;
-        };
+        const parsed = parseWpscanStdout(r.stdout) as WpscanParsed;
         wstream.write(JSON.stringify({ target: url, wpscan: parsed }) + '\n');
         ok++;
         if (db) {
@@ -46,12 +44,14 @@ Pass --enumerate flags after '--'. Output: JSONL to --out (default: wpscan.jsonl
             findings++;
           };
           for (const f of parsed.interesting_findings ?? []) emit(f.to_s ?? 'interesting finding', 'info', f.type ?? 'interesting', null, f);
-          for (const v of parsed.version?.vulnerabilities ?? []) emit(v.title ?? 'core vuln', 'high', 'core-vulnerability', v.references?.cve?.[0] ?? null, v);
+          for (const v of parsed.version?.vulnerabilities ?? []) emit(v.title ?? 'core vuln', 'high', 'core-vulnerability', wpscanCve(v), v);
           for (const [name, p] of Object.entries(parsed.plugins ?? {})) {
-            for (const v of p.vulnerabilities ?? []) emit(`${name}: ${v.title ?? 'plugin vuln'}`, 'high', 'plugin-vulnerability', v.references?.cve?.[0] ?? null, v);
+            for (const v of p.vulnerabilities ?? []) emit(`${name}: ${v.title ?? 'plugin vuln'}`, 'high', 'plugin-vulnerability', wpscanCve(v), v);
           }
         }
+        if (rowsAtRisk(findings - rowsBefore, wpscanFailed(r.code, parsed))) incomplete++;
       } catch {
+        if (rowsAtRisk(findings - rowsBefore, true)) incomplete++;
         wstream.write(JSON.stringify({ target: url, error: 'non-json output', raw: r.stdout.slice(0, 500) }) + '\n');
         fail++;
       }
@@ -63,7 +63,7 @@ Pass --enumerate flags after '--'. Output: JSONL to --out (default: wpscan.jsonl
   await new Promise<void>((r) => wstream.end(() => r()));
   console.error(`wpscan done: ${ok} ok, ${fail} failed. Output: ${outFile}`);
   if (db && runId !== null) {
-    db.finishRun(runId, { targetsCount: targets.length, findingsCount: findings, at: new Date().toISOString() });
+    finishWithWhy(db, runId, { targetsCount: targets.length, findingsCount: findings, at: new Date().toISOString() }, partialReasons([[incomplete, 'target(s) incomplete']]));
     db.close();
     console.error(`  sqlite: ${path.resolve(opts.sqlite!)} (+${findings} findings, run #${runId})`);
   }
