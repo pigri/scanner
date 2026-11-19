@@ -21,8 +21,9 @@ export function openReportFindings(raw: Database.Database, target: string): Repo
     .all({ t: target }) as (Omit<ReportFinding, 'cve'> & { category: string | null })[];
   const current = raw
     .prepare(
-      `SELECT f.tool, f.category, f.title, f.cve
-       FROM findings f JOIN (${watermarkSelect(opts)}) wm ON wm.target = f.target AND wm.tool = f.tool
+      `WITH wm AS MATERIALIZED (${watermarkSelect(opts)})
+       SELECT f.tool, f.category, f.title, f.cve
+       FROM findings f JOIN wm ON wm.target = f.target AND wm.tool = f.tool
        WHERE f.target = @t AND f.seen_at >= wm.w AND f.cve IS NOT NULL AND f.cve != ''`,
     )
     .all({ t: target }) as { tool: string; category: string | null; title: string; cve: string }[];
