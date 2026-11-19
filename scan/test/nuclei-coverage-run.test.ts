@@ -215,3 +215,49 @@ describe('nuclei partial runs', () => {
     expect(st.notes).not.toContain('partial run');
   }, 100_000);
 });
+
+describe('nuclei-url coverage and the source of open findings', () => {
+  const OLDER = '2026-01-01T00:00:00.000Z';
+  const seed = (url: string, extra = '') => `${extra}
+    INSERT INTO findings(tool, target, category, severity, title, matched_at, meta_json, seen_at)
+    VALUES ('nuclei-url', '${HOST}', 'cve', 'high', 'older finding', '${url}', '${JSON.stringify({ url })}', '${OLDER}')`;
+  const second = `INSERT INTO discovered_urls(target, url, source, status, seen_at)
+    VALUES ('${HOST}', 'https://${HOST}/app/zzz', 'katana', 200, '${NOW}');`;
+  const state = (dbPath: string) => {
+    const db = openDb(dbPath);
+    const notes = (db.raw.prepare("SELECT notes FROM runs WHERE tool = 'nuclei-url'").all() as { notes: string | null }[]).map((n) => n.notes ?? '');
+    db.close();
+    return { notes: notes.join(';'), cov: coverage(dbPath).rows.map((x) => x.target) };
+  };
+  const hit = row('http', `https://${HOST}/app/login`);
+
+  it('records no coverage when --urls-per-host 1 drops an open finding\'s URL from the sample', async () => {
+    const r = await runNuclei(['--from-urls', '--urls-per-host', '1'], [hit], 0, { trigger: seed(`https://${HOST}/app/zzz`, second) });
+    expect(r.code, r.stderr).toBe(0);
+    const st = state(r.db);
+    expect(st.cov).toEqual([]);
+    expect(st.notes).toContain('1 target(s) not covered: an open finding came from a URL outside this run');
+  }, 100_000);
+
+  it('records coverage when the cap lets the open finding\'s URL into the sample', async () => {
+    const r = await runNuclei(['--from-urls'], [hit], 0, { trigger: seed(`https://${HOST}/app/zzz`, second) });
+    const st = state(r.db);
+    expect(st.cov).toEqual([HOST]);
+    expect(st.notes).not.toContain('not covered');
+  }, 100_000);
+
+  it('does not cover a target whose open finding has a URL no input carries', async () => {
+    const r = await runNuclei(['--from-urls'], [hit], 0, { trigger: seed(`https://${HOST}/gone`) });
+    const st = state(r.db);
+    expect(st.cov).toEqual([]);
+  }, 100_000);
+
+  it('records no coverage, and says so, when the open findings cannot be read', async () => {
+    const bad = `INSERT INTO findings(tool, target, category, severity, title, matched_at, meta_json, seen_at)
+      VALUES ('nuclei-url', '${HOST}', 'cve', 'high', 'bad row', 'x', 'not json', '${OLDER}')`;
+    const r = await runNuclei(['--from-urls'], [hit], 0, { trigger: bad });
+    const st = state(r.db);
+    expect(st.cov).toEqual([]);
+    expect(st.notes).toContain('coverage skipped: cannot read open nuclei-url findings');
+  }, 100_000);
+});

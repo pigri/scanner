@@ -1,54 +1,56 @@
 import { describe, it, expect } from 'vitest';
-import { nucleiCoveredTargets, nucleiSkippedHosts, parseMatched, hostOf } from '../src/lib/nuclei-coverage.js';
+import { nucleiCoveredTargets, nucleiSkippedHosts, parseMatched, hostOf, nucleiInputKeys, inputKey, targetsWithKeysOutside } from '../src/lib/nuclei-coverage.js';
 
 const T = 'www.example.test';
 const ssl = { type: 'ssl', 'matched-at': `${T}:443`, stored: true };
+const inputs = nucleiInputKeys([T], [`https://${T}/app/login`]);
+const base = { inputs, openKeys: new Map<string, string[]>() };
 const http = { type: 'http', 'matched-at': `https://${T}/app/login`, stored: true };
 
 describe('nucleiCoveredTargets', () => {
   it('covers nothing on the host pass', () => {
-    expect(nucleiCoveredTargets([T], [ssl, http], { fromUrls: false, exitCode: 0 })).toEqual([]);
+    expect(nucleiCoveredTargets([T], [ssl, http], { fromUrls: false, exitCode: 0, ...base })).toEqual([]);
   });
 
   it('covers nothing when nuclei did not exit 0 (error or scan-timeout kill)', () => {
-    expect(nucleiCoveredTargets([T], [ssl], { fromUrls: true, exitCode: -1 })).toEqual([]);
-    expect(nucleiCoveredTargets([T], [ssl], { fromUrls: true, exitCode: 1 })).toEqual([]);
+    expect(nucleiCoveredTargets([T], [ssl], { fromUrls: true, exitCode: -1, ...base })).toEqual([]);
+    expect(nucleiCoveredTargets([T], [ssl], { fromUrls: true, exitCode: 1, ...base })).toEqual([]);
   });
 
   it('does not cover a target that only has dns rows', () => {
     const dns = { type: 'dns', 'matched-at': T, stored: true };
-    expect(nucleiCoveredTargets([T], [dns], { fromUrls: true, exitCode: 0 })).toEqual([]);
+    expect(nucleiCoveredTargets([T], [dns], { fromUrls: true, exitCode: 0, ...base })).toEqual([]);
   });
 
   it('does not cover a target with no row, nor one matched off-target', () => {
     const other = { type: 'http', 'matched-at': 'https://other.example.test/', host: T, stored: true };
-    expect(nucleiCoveredTargets([T], [], { fromUrls: true, exitCode: 0 })).toEqual([]);
-    expect(nucleiCoveredTargets([T], [other], { fromUrls: true, exitCode: 0 })).toEqual([]);
-    expect(nucleiCoveredTargets([T], [{ type: 'http', 'matched-at': `https://evil.example.test/${T}`, stored: true }], { fromUrls: true, exitCode: 0 })).toEqual([]);
+    expect(nucleiCoveredTargets([T], [], { fromUrls: true, exitCode: 0, ...base })).toEqual([]);
+    expect(nucleiCoveredTargets([T], [other], { fromUrls: true, exitCode: 0, ...base })).toEqual([]);
+    expect(nucleiCoveredTargets([T], [{ type: 'http', 'matched-at': `https://evil.example.test/${T}`, stored: true }], { fromUrls: true, exitCode: 0, ...base })).toEqual([]);
   });
 
   it('covers a target through an ssl row on host:443', () => {
-    expect(nucleiCoveredTargets([T], [ssl], { fromUrls: true, exitCode: 0 })).toEqual([T]);
+    expect(nucleiCoveredTargets([T], [ssl], { fromUrls: true, exitCode: 0, ...base })).toEqual([T]);
   });
 
   it('covers a target through a URL-sample row', () => {
-    expect(nucleiCoveredTargets([T], [http], { fromUrls: true, exitCode: 0 })).toEqual([T]);
+    expect(nucleiCoveredTargets([T], [http], { fromUrls: true, exitCode: 0, ...base })).toEqual([T]);
   });
 
   it('compares hostnames case-insensitively and ignores the port', () => {
     const r = { type: 'http', 'matched-at': 'https://WWW.Example.test:8443/x', stored: true };
-    expect(nucleiCoveredTargets([T], [r], { fromUrls: true, exitCode: 0 })).toEqual([T]);
+    expect(nucleiCoveredTargets([T], [r], { fromUrls: true, exitCode: 0, ...base })).toEqual([T]);
   });
 
   it('returns each covered target once, in target order', () => {
     const rows = [http, { type: 'ssl', 'matched-at': 'a.example.test:443', stored: true }];
-    expect(nucleiCoveredTargets([T, 'a.example.test', T, 'b.example.test'], rows, { fromUrls: true, exitCode: 0 }))
+    expect(nucleiCoveredTargets([T, 'a.example.test', T, 'b.example.test'], rows, { fromUrls: true, exitCode: 0, ...base }))
       .toEqual([T, 'a.example.test']);
   });
 });
 
 describe('nucleiCoveredTargets storage and skips', () => {
-  const opts = { fromUrls: true, exitCode: 0 };
+  const opts = { fromUrls: true, exitCode: 0, ...base };
 
   it('does not cover a target whose only qualifying row failed to store', () => {
     expect(nucleiCoveredTargets([T], [{ ...ssl, stored: false }], opts)).toEqual([]);
@@ -100,5 +102,42 @@ describe('hostOf', () => {
   it('extracts the host of a URL or host:port', () => {
     expect(hostOf('https://www.example.test/a')).toBe('www.example.test');
     expect(hostOf(undefined)).toBe('');
+  });
+});
+
+describe('open findings outside this run\'s inputs', () => {
+  const opts = { fromUrls: true, exitCode: 0, inputs };
+  const open = (...keys: string[]) => new Map([[T, keys.map(inputKey)]]);
+
+  it('does not cover a target with an open key the run never fed to nuclei', () => {
+    expect(nucleiCoveredTargets([T], [http], { ...opts, openKeys: open(`https://${T}/app/other`) })).toEqual([]);
+  });
+
+  it('does not cover a target with an open key on another origin', () => {
+    expect(nucleiCoveredTargets([T], [http], { ...opts, openKeys: open(`http://${T}/app/login`) })).toEqual([]);
+    expect(nucleiCoveredTargets([T], [http], { ...opts, openKeys: open(`https://${T}:8443/app/login`) })).toEqual([]);
+  });
+
+  it('covers a target whose open keys are all inputs, however the url is written', () => {
+    const keys = open(`https://${T}/app/login`, `https://${T.toUpperCase()}/app/login/`, `https://${T}`, `${T}:443`, `http://${T}`);
+    expect(nucleiCoveredTargets([T], [http], { ...opts, openKeys: keys })).toEqual([T]);
+  });
+
+  it('treats an open row with no key as outside', () => {
+    expect(nucleiCoveredTargets([T], [http], { ...opts, openKeys: open('') })).toEqual([]);
+  });
+
+  it('covers nothing when the open findings could not be read', () => {
+    expect(nucleiCoveredTargets([T], [http], { ...opts, openKeys: null })).toEqual([]);
+  });
+
+  it('lists the targets that have a key outside the inputs', () => {
+    const m = new Map([[T, [`https://${T}/gone`]], ['b.example.test', [`https://b.example.test`]]]);
+    expect(targetsWithKeysOutside(m, nucleiInputKeys([T, 'b.example.test'], []))).toEqual([T]);
+  });
+
+  it('keys an input url by scheme, host, port and path only', () => {
+    expect(inputKey(`HTTPS://WWW.Example.test:443/a/b/?q=1`)).toBe(`https://www.example.test/a/b?q=1`);
+    expect(inputKey('www.example.test:8443')).toBe('https://www.example.test:8443');
   });
 });

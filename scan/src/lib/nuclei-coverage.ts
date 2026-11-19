@@ -1,3 +1,7 @@
+import type Database from 'better-sqlite3';
+import { findingsRuleOpts, watermarkSelect } from './current-findings.js';
+import { NUCLEI_URL_TOOL } from './nuclei-tool.js';
+
 /** Host (with a non-default port) and lowercase hostname of a nuclei matched-at value, from one parse. */
 export function parseMatched(url: string | null | undefined): { host: string; hostname: string } {
   if (!url) return { host: '', hostname: '' };
@@ -51,6 +55,58 @@ export function nucleiSkippedHosts(stderr: string, errorLog: readonly string[], 
 }
 
 /**
+ * Key of an input URL or a finding's `url`: scheme, host, non-default port, path
+ * (no trailing slash) and query. A value without a scheme is read as https, so
+ * an ssl row's `matched-at` of `host:443` keys like the bare host.
+ */
+export function inputKey(url: string | null | undefined): string {
+  if (!url) return '';
+  try {
+    const u = new URL(/^https?:\/\//i.test(url) ? url : `https://${url}`);
+    return `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, '')}${u.search}`;
+  } catch {
+    return '';
+  }
+}
+
+/** Keys of what a `--from-urls` run feeds nuclei. A bare host is probed on either scheme. */
+export function nucleiInputKeys(targets: readonly string[], urlSample: readonly string[]): Set<string> {
+  const keys = new Set<string>();
+  for (const t of targets) {
+    keys.add(inputKey(`http://${t}`));
+    keys.add(inputKey(`https://${t}`));
+  }
+  for (const u of urlSample) keys.add(inputKey(u));
+  keys.delete('');
+  return keys;
+}
+
+/**
+ * Input keys of each target's open nuclei-url rows: nuclei's `url` (the input it
+ * scanned), else `matched_at`. Read before this run inserts anything, or its rows
+ * would move the watermark past the old ones. Throws when the read fails.
+ */
+export function openNucleiUrlKeys(raw: Database.Database, targets: readonly string[]): Map<string, string[]> {
+  const stmt = raw.prepare(
+    `SELECT DISTINCT COALESCE(json_extract(f.meta_json, '$.url'), f.matched_at) AS u
+     FROM findings f JOIN (${watermarkSelect({ ...findingsRuleOpts(raw), targetParam: '@t' })}) wm
+       ON wm.target = f.target AND wm.tool = f.tool
+     WHERE f.target = @t AND f.tool = '${NUCLEI_URL_TOOL}' AND f.seen_at >= wm.w`,
+  );
+  const out = new Map<string, string[]>();
+  for (const t of new Set(targets)) {
+    const keys = (stmt.all({ t }) as { u: string | null }[]).map((r) => inputKey(r.u));
+    if (keys.length) out.set(t, keys);
+  }
+  return out;
+}
+
+/** Targets with an open key that is not among `inputs`. An empty key counts as outside. */
+export function targetsWithKeysOutside(openKeys: ReadonlyMap<string, readonly string[]>, inputs: ReadonlySet<string>): string[] {
+  return [...openKeys].filter(([, keys]) => keys.some((k) => !inputs.has(k))).map(([t]) => t);
+}
+
+/**
  * Targets the `--from-urls` pass conclusively examined. nuclei exits 0 when it
  * skips a host under -mhe or when a host merely errors, so the exit code is not
  * enough: a target counts only when a non-dns row matched on its hostname, every
@@ -59,9 +115,13 @@ export function nucleiSkippedHosts(stderr: string, errorLog: readonly string[], 
 export function nucleiCoveredTargets(
   targets: readonly string[],
   rows: readonly NucleiRowEvidence[],
-  opts: { fromUrls: boolean; exitCode: number; skipped?: ReadonlySet<string> },
+  opts: {
+    fromUrls: boolean; exitCode: number; skipped?: ReadonlySet<string>;
+    inputs: ReadonlySet<string>; openKeys: ReadonlyMap<string, readonly string[]> | null;
+  },
 ): string[] {
-  if (!opts.fromUrls || opts.exitCode !== 0) return [];
+  if (!opts.fromUrls || opts.exitCode !== 0 || !opts.openKeys) return [];
+  const outside = new Set(targetsWithKeysOutside(opts.openKeys, opts.inputs));
   const state = new Map<string, { hit: boolean; failed: boolean }>();
   for (const r of rows) {
     const h = parseMatched(r['matched-at']).hostname;
@@ -77,7 +137,7 @@ export function nucleiCoveredTargets(
   for (const t of targets) {
     const h = t.toLowerCase();
     const s = state.get(h);
-    if (s && s.hit && !s.failed && !opts.skipped?.has(h) && !out.includes(t)) out.push(t);
+    if (s && s.hit && !s.failed && !opts.skipped?.has(h) && !outside.has(t) && !out.includes(t)) out.push(t);
   }
   return out;
 }
