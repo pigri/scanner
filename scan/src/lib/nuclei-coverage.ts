@@ -1,3 +1,7 @@
+import type Database from 'better-sqlite3';
+import { findingsRuleOpts, watermarkSelect } from './current-findings.js';
+import { NUCLEI_URL_TOOL } from './nuclei-tool.js';
+
 /** Host (with a non-default port) and lowercase hostname of a nuclei matched-at value, from one parse. */
 export function parseMatched(url: string | null | undefined): { host: string; hostname: string } {
   if (!url) return { host: '', hostname: '' };
@@ -20,6 +24,9 @@ export interface NucleiRowEvidence {
   'matched-at'?: string | undefined;
   /** The row's `host`, which keys its finding. */
   host?: string | undefined;
+  /** The input nuclei scanned: a URL, or the bare host with the scheme nuclei chose. */
+  url?: string | undefined;
+  scheme?: string | undefined;
   /** Every finding of this row reached the database. */
   stored: boolean;
 }
@@ -51,6 +58,146 @@ export function nucleiSkippedHosts(stderr: string, errorLog: readonly string[], 
 }
 
 /**
+ * Key of an input URL or a finding's `url`: scheme, host, non-default port, path
+ * (no trailing slash) and query. A value without a scheme is read as https.
+ */
+export function inputKey(url: string | null | undefined): string {
+  if (!url) return '';
+  try {
+    const u = new URL(/^https?:\/\//i.test(url) ? url : `https://${url}`);
+    return `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, '')}${u.search}`;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Keys of what a `--from-urls` run feeds nuclei before it runs: the sample URLs
+ * with the authority each one examines, and, per bare target, its `self:` key
+ * (dns). A bare host's root URL is not here: nuclei probes it and scans one
+ * scheme, so `withRowRoots` reads that scheme from the run's own rows.
+ */
+export function nucleiInputKeys(targets: readonly string[], urlSample: readonly string[]): Set<string> {
+  const keys = new Set<string>();
+  for (const t of targets) {
+    keys.add(selfKey(t));
+    keys.add(sslKey(`${t}:443`));
+  }
+  for (const u of urlSample) {
+    keys.add(inputKey(u));
+    keys.add(authorityKey(u));
+    keys.add(authorityKey(u, '', sslKey));
+  }
+  keys.delete('');
+  return keys;
+}
+
+/** Key of a target's own rows: dns, and a non-http row with no port. */
+export function selfKey(target: string): string {
+  return `self:${target}`;
+}
+
+/** Key of an ssl row: it examines only through an input authority, never through another protocol's row. */
+function sslKey(authority: string): string {
+  return `ssl:${authority}`;
+}
+
+const DEFAULT_PORT: Record<string, string> = { 'http:': '80', 'https:': '443' };
+
+/**
+ * `self:host[:port]` of a URL or host[:port]. The port is the explicit one, else
+ * the default of an explicit scheme, else `fallbackPort`. Empty when unparseable.
+ */
+function authorityKey(value: string, fallbackPort = '', key: (authority: string) => string = selfKey): string {
+  const m = /^(?:([a-z][a-z0-9+.-]*):\/\/)?([^/?#]*)/i.exec(value.trim());
+  const authority = (m?.[2] ?? '').toLowerCase();
+  const port = /^(.+):(\d+)$/.exec(authority);
+  const host = port ? port[1]! : authority;
+  if (!host) return '';
+  const p = port?.[2] ?? DEFAULT_PORT[`${(m?.[1] ?? '').toLowerCase()}:`] ?? fallbackPort;
+  return key(p ? `${host}:${p}` : host);
+}
+
+export interface RowShape { type?: string | null | undefined; url?: string | null | undefined; matchedAt?: string | null | undefined }
+
+/**
+ * Key of a row: its input URL for an http row; `self:<target>` for dns; for any
+ * other type `self:host:port` from its url, else its matched-at (no default
+ * port). An ssl row is `ssl:host:port`, 443 by default.
+ */
+export function rowKey(target: string, r: RowShape): string {
+  const type = (r.type ?? 'http').toLowerCase();
+  if (type === 'dns') return selfKey(target);
+  if (type === 'http') return r.url ? inputKey(r.url) : selfKey(target);
+  const src = r.url || r.matchedAt;
+  if (!src) return selfKey(target);
+  return type === 'ssl' ? authorityKey(src, '443', sslKey) : authorityKey(src);
+}
+
+function authorityOf(t: string): string {
+  try { return new URL(`https://${t}`).host.toLowerCase(); } catch { return ''; }
+}
+
+/** The key of the input behind a row, only when the url or the `scheme` field names an http(s) scheme. */
+function rowInputKey(r: NucleiRowEvidence): string {
+  if (!r.url) return '';
+  if (/^https?:\/\//i.test(r.url)) return inputKey(r.url);
+  const scheme = r.scheme?.toLowerCase();
+  return scheme === 'http' || scheme === 'https' ? inputKey(`${scheme}://${r.url}`) : '';
+}
+
+/**
+ * `inputs` plus the root URL of each bare target on the scheme this run's rows
+ * show, plus the authority of each tcp, javascript or other non-http, non-ssl row this run stored. A bare host
+ * with no row of its own gets none, so its open root findings stay outside.
+ */
+export function withRowRoots(targets: readonly string[], inputs: ReadonlySet<string>, rows: readonly NucleiRowEvidence[]): Set<string> {
+  const out = new Set(inputs);
+  const authorities = new Set(targets.map(authorityOf));
+  for (const r of rows) {
+    const type = (r.type ?? 'http').toLowerCase();
+    if (r.stored && type !== 'http' && type !== 'dns' && type !== 'ssl') {
+      const k = rowKey('', { type, url: r.url, matchedAt: r['matched-at'] });
+      if (k && k !== selfKey('')) out.add(k);
+    }
+    const k = rowInputKey(r);
+    if (!k) continue;
+    try {
+      const u = new URL(k);
+      if (!u.pathname.replace(/\/+$/, '') && !u.search && authorities.has(u.host.toLowerCase())) out.add(k);
+    } catch { /* not a url */ }
+  }
+  return out;
+}
+
+/**
+ * Keys of each target's open nuclei-url rows, by `rowKey`: an http row's `url`
+ * (the input it scanned); every other type by its host:port. Read before this run
+ * inserts anything, or its rows would move the watermark past the old ones.
+ * Throws when the read fails.
+ */
+export function openNucleiUrlKeys(raw: Database.Database, targets: readonly string[]): Map<string, string[]> {
+  const stmt = raw.prepare(
+    `SELECT DISTINCT json_extract(f.meta_json, '$.url') AS u, json_extract(f.meta_json, '$.type') AS type, f.matched_at AS m
+     FROM findings f JOIN (${watermarkSelect({ ...findingsRuleOpts(raw), targetParam: '@t' })}) wm
+       ON wm.target = f.target AND wm.tool = f.tool
+     WHERE f.target = @t AND f.tool = '${NUCLEI_URL_TOOL}' AND f.seen_at >= wm.w`,
+  );
+  const out = new Map<string, string[]>();
+  for (const t of new Set(targets)) {
+    const keys = (stmt.all({ t }) as { u: string | null; type: string | null; m: string | null }[])
+      .map((r) => rowKey(t, { type: r.type, url: r.u, matchedAt: r.m }));
+    if (keys.length) out.set(t, keys);
+  }
+  return out;
+}
+
+/** Targets with an open key that is not among `inputs`. An empty key counts as outside. */
+export function targetsWithKeysOutside(openKeys: ReadonlyMap<string, readonly string[]>, inputs: ReadonlySet<string>): string[] {
+  return [...openKeys].filter(([, keys]) => keys.some((k) => !inputs.has(k))).map(([t]) => t);
+}
+
+/**
  * Targets the `--from-urls` pass conclusively examined. nuclei exits 0 when it
  * skips a host under -mhe or when a host merely errors, so the exit code is not
  * enough: a target counts only when a non-dns row matched on its hostname, every
@@ -59,9 +206,13 @@ export function nucleiSkippedHosts(stderr: string, errorLog: readonly string[], 
 export function nucleiCoveredTargets(
   targets: readonly string[],
   rows: readonly NucleiRowEvidence[],
-  opts: { fromUrls: boolean; exitCode: number; skipped?: ReadonlySet<string> },
+  opts: {
+    fromUrls: boolean; exitCode: number; skipped?: ReadonlySet<string>;
+    inputs: ReadonlySet<string>; openKeys: ReadonlyMap<string, readonly string[]> | null;
+  },
 ): string[] {
-  if (!opts.fromUrls || opts.exitCode !== 0) return [];
+  if (!opts.fromUrls || opts.exitCode !== 0 || !opts.openKeys) return [];
+  const outside = new Set(targetsWithKeysOutside(opts.openKeys, withRowRoots(targets, opts.inputs, rows)));
   const state = new Map<string, { hit: boolean; failed: boolean }>();
   for (const r of rows) {
     const h = parseMatched(r['matched-at']).hostname;
@@ -77,7 +228,7 @@ export function nucleiCoveredTargets(
   for (const t of targets) {
     const h = t.toLowerCase();
     const s = state.get(h);
-    if (s && s.hit && !s.failed && !opts.skipped?.has(h) && !out.includes(t)) out.push(t);
+    if (s && s.hit && !s.failed && !opts.skipped?.has(h) && !outside.has(t) && !out.includes(t)) out.push(t);
   }
   return out;
 }

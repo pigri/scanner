@@ -14,6 +14,7 @@ import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, writeLin
 import { openDb, type Db } from './lib/db.js';
 import { partialReasons, finishWithWhy, rowsAtRisk } from './lib/run-partial.js';
 import { isBlockedAnswer } from './lib/real-answer.js';
+import { liveSeeds, originGuardNote, targetsOutsideSeedOrigin } from './lib/live-seed.js';
 import { fetchCanary, probeUrl, hashBody, isNearCanary } from './lib/catchall.js';
 
 // Curated wordlist. Kept short so per-host runtime stays under ~15s: one
@@ -76,20 +77,7 @@ function severityForPath(p: string): 'critical' | 'high' | 'medium' | 'low' | 'i
 export interface LiveUrl { target: string; seed: string }
 
 function loadLive(db: Db, targets: readonly string[]): LiveUrl[] {
-  if (!targets.length) return [];
-  const p = targets.map(() => '?').join(',');
-  const rows = db.raw.prepare(
-    `SELECT DISTINCT target, url FROM http_probes
-     WHERE target IN (${p}) AND (url LIKE 'http://%' OR url LIKE 'https://%')`
-  ).all(...targets) as { target: string; url: string }[];
-  const bySeed = new Map<string, LiveUrl>();
-  for (const r of rows) {
-    const existing = bySeed.get(r.target);
-    if (!existing || (existing.seed.startsWith('http://') && r.url.startsWith('https://'))) {
-      bySeed.set(r.target, { target: r.target, seed: r.url.replace(/\/+$/, '') });
-    }
-  }
-  return [...bySeed.values()];
+  return liveSeeds(db, targets).map((r) => ({ target: r.target, seed: r.url.replace(/\/+$/, '') }));
 }
 
 const STOPPED_EARLY = /Maximum running time|Receiving spurious errors|unusual amount of 403/i;
@@ -110,13 +98,52 @@ export interface FfufOpts {
   passthrough: string[];
   outPath: (target: string) => string;
   deps?: FfufDeps;
+  /** Receives run notes about coverage this run did not record. */
+  notes?: string[];
+}
+
+// Flags (ffuf -h) that leave the set of requested URLs alone. A flag that takes
+// a value is true. Anything else, a filter or matcher included, ends coverage.
+const PASSTHROUGH_FLAGS = new Map<string, boolean>([
+  ['t', true], ['rate', true], ['p', true], ['maxtime', true], ['replay-proxy', true],
+  ['s', false], ['c', false], ['v', false], ['noninteractive', false], ['http2', false],
+]);
+
+/**
+ * The paths ffuf requests below a seed: each wordlist entry, and with `-e` each
+ * entry plus an extension. Null when that cannot be known: the wordlist cannot
+ * be read, or the passthrough holds a flag that may change what is requested
+ * (`-u`, `-request`, `-w`, `-recursion`, or any flag not known to leave it alone).
+ */
+export function requestedPaths(wl: string, passthrough: readonly string[]): string[] | null {
+  let exts: string[] = [];
+  for (let i = 0; i < passthrough.length; i++) {
+    const m = /^--?([^=\s-][^=\s]*)(?:=(.*))?$/.exec(passthrough[i]!);
+    if (!m) return null;
+    const name = m[1]!;
+    let value = m[2];
+    if (name === 'e' || PASSTHROUGH_FLAGS.get(name)) {
+      if (value === undefined) value = passthrough[++i];
+      if (value === undefined) return null;
+      if (name === 'e') exts = value.split(',').filter(Boolean);
+    } else if (!PASSTHROUGH_FLAGS.has(name)) {
+      return null;
+    }
+  }
+  let words: string[];
+  try {
+    words = fs.readFileSync(wl, 'utf8').split('\n').map((w) => w.replace(/\r$/, '')).filter(Boolean);
+  } catch {
+    return null;
+  }
+  return words.flatMap((w) => [w, ...exts.map((x) => `${w}${x}`)]);
 }
 
 export interface FfufResult { findings: number; reviewFindings: number; incomplete: number }
 
-export function finishFfufRun(db: Db, runId: number, targetsCount: number, res: FfufResult, at: string): void {
+export function finishFfufRun(db: Db, runId: number, targetsCount: number, res: FfufResult, at: string, notes: readonly string[] = []): void {
   const why = partialReasons([[res.incomplete, 'host(s) incomplete']]);
-  finishWithWhy(db, runId, { targetsCount, findingsCount: res.findings, at }, why);
+  finishWithWhy(db, runId, { targetsCount, findingsCount: res.findings, at, ...(notes.length ? { notes: notes.join('; ') } : {}) }, why);
 }
 
 export async function ffufHosts(db: Db, live: readonly LiveUrl[], o: FfufOpts): Promise<FfufResult> {
@@ -125,6 +152,10 @@ export async function ffufHosts(db: Db, live: readonly LiveUrl[], o: FfufOpts): 
   const covered: string[] = [];
   let findings = 0;
   let reviewFindings = 0;
+  // Before this run's rows move the watermark.
+  const paths = requestedPaths(wl, passthrough);
+  const outside = paths ? targetsOutsideSeedOrigin(db, 'ffuf', live.map((l) => ({ target: l.target, url: l.seed })), { paths }) : null;
+  o.notes?.push(...(paths ? originGuardNote('ffuf', outside) : ['coverage skipped: cannot tell which paths ffuf requests (wordlist unreadable, or a passthrough flag that may change the requests)']));
   let incomplete = 0;
   for (const { target, seed } of live) {
     const rowsBefore = findings;
@@ -317,7 +348,7 @@ export async function ffufHosts(db: Db, live: readonly LiveUrl[], o: FfufOpts): 
       // unreachable hosts (empty report); the canary rules out the latter.
       // A blocked or rate-limited canary means ffuf's empty or uniform report
       // came from the block, not from the app.
-      if (canary && !isBlockedAnswer(canary.status, canary.mitigated === true) && r.code === 0 && !STOPPED_EARLY.test(r.stderr)) { covered.push(target); hostCovered = true; }
+      if (canary && !isBlockedAnswer(canary.status, canary.mitigated === true) && r.code === 0 && !STOPPED_EARLY.test(r.stderr) && outside && !outside.has(target)) { covered.push(target); hostCovered = true; }
     } catch (e) {
       console.error(`  ${target}: parse error: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -388,11 +419,12 @@ Wrapper flags (before '--'):
   const wl = resolveOutputPath({ ...opts, outFile: null }, runId, 'ffuf-wordlist.txt');
   writeLines(wl, [...CURATED_PATHS]);
 
+  const notes: string[] = [];
   const res = await ffufHosts(db, live, {
-    now, runId, wl, threads, timeoutSec, hostTimeoutSec, passthrough,
+    notes, now, runId, wl, threads, timeoutSec, hostTimeoutSec, passthrough,
     outPath: (target) => resolveOutputPath({ ...opts, outFile: null }, runId, `ffuf-${target.replace(/[^a-z0-9._-]/gi, '_')}.json`),
   });
-  finishFfufRun(db, runId, live.length, res, new Date().toISOString());
+  finishFfufRun(db, runId, live.length, res, new Date().toISOString(), notes);
   db.close();
   console.error(
     `ffuf done: +${res.findings} finding(s) across ${live.length} host(s), ` +

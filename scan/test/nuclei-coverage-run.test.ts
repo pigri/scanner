@@ -215,3 +215,133 @@ describe('nuclei partial runs', () => {
     expect(st.notes).not.toContain('partial run');
   }, 100_000);
 });
+
+describe('nuclei-url coverage and the source of open findings', () => {
+  const OLDER = '2026-01-01T00:00:00.000Z';
+  const seed = (url: string, extra = '') => `${extra}
+    INSERT INTO findings(tool, target, category, severity, title, matched_at, meta_json, seen_at)
+    VALUES ('nuclei-url', '${HOST}', 'cve', 'high', 'older finding', '${url}', '${JSON.stringify({ url })}', '${OLDER}')`;
+  const second = `INSERT INTO discovered_urls(target, url, source, status, seen_at)
+    VALUES ('${HOST}', 'https://${HOST}/app/zzz', 'katana', 200, '${NOW}');`;
+  const state = (dbPath: string) => {
+    const db = openDb(dbPath);
+    const notes = (db.raw.prepare("SELECT notes FROM runs WHERE tool = 'nuclei-url'").all() as { notes: string | null }[]).map((n) => n.notes ?? '');
+    db.close();
+    return { notes: notes.join(';'), cov: coverage(dbPath).rows.map((x) => x.target) };
+  };
+  const hit = row('http', `https://${HOST}/app/login`);
+
+  it('records no coverage when --urls-per-host 1 drops an open finding\'s URL from the sample', async () => {
+    const r = await runNuclei(['--from-urls', '--urls-per-host', '1'], [hit], 0, { trigger: seed(`https://${HOST}/app/zzz`, second) });
+    expect(r.code, r.stderr).toBe(0);
+    const st = state(r.db);
+    expect(st.cov).toEqual([]);
+    expect(st.notes).toContain('1 target(s) not covered: an open finding came from a URL outside this run');
+  }, 100_000);
+
+  it('records coverage when the cap lets the open finding\'s URL into the sample', async () => {
+    const r = await runNuclei(['--from-urls'], [hit], 0, { trigger: seed(`https://${HOST}/app/zzz`, second) });
+    const st = state(r.db);
+    expect(st.cov).toEqual([HOST]);
+    expect(st.notes).not.toContain('not covered');
+  }, 100_000);
+
+  it('does not cover a target whose open finding has a URL no input carries', async () => {
+    const r = await runNuclei(['--from-urls'], [hit], 0, { trigger: seed(`https://${HOST}/gone`) });
+    const st = state(r.db);
+    expect(st.cov).toEqual([]);
+  }, 100_000);
+
+  const bare = (scheme: string) => JSON.stringify({
+    'template-id': 't-http', type: 'http', info: { name: 'T', severity: 'info' }, host: HOST,
+    url: `${scheme}://${HOST}`, scheme, 'matched-at': `${scheme}://${HOST}/`,
+  });
+
+  it('does not cover a target whose open https root finding met a run that scanned the host on http', async () => {
+    const r = await runNuclei(['--from-urls'], [bare('http')], 0, { trigger: seed(`https://${HOST}`) });
+    expect(state(r.db).cov).toEqual([]);
+  }, 100_000);
+
+  it('covers a target whose open https root finding met a run that scanned the host on https', async () => {
+    const r = await runNuclei(['--from-urls'], [bare('https')], 0, { trigger: seed(`https://${HOST}`) });
+    expect(state(r.db).cov).toEqual([HOST]);
+  }, 100_000);
+
+  // The stored shape of each kind: ssl rows have no url, tcp rows carry host:port and no scheme.
+  const noUrl = (type: string, matchedAt: string, url: string | null) => `
+    INSERT INTO findings(tool, target, category, severity, title, matched_at, meta_json, seen_at)
+    VALUES ('nuclei-url', '${HOST}', 'cve', 'high', 'older finding', '${matchedAt}', '${JSON.stringify({ type, 'matched-at': matchedAt, ...(url ? { url } : {}) })}', '${OLDER}')`;
+  const tcpRow = (url: string) => JSON.stringify({
+    'template-id': 't-tcp', type: 'tcp', info: { name: 'T', severity: 'info' }, host: HOST, url, 'matched-at': url,
+  });
+
+  const cases: [string, string, string | null, string[], boolean][] = [
+    ['dns', HOST, null, [], true],
+    ['ssl', `${HOST}:443`, null, [], true],
+    ['ssl', `${HOST}:8443`, null, [], false],
+    ['tcp', `${HOST}:22`, `${HOST}:22`, [], false],
+    ['tcp', `${HOST}:22`, `${HOST}:22`, [tcpRow(`${HOST}:22`)], true],
+    ['tcp', `${HOST}:22`, `${HOST}:22`, [tcpRow(`${HOST}:2222`)], false],
+    ['ssl', `${HOST}:8443`, null, [tcpRow(`${HOST}:8443`)], false],
+  ];
+  for (const [kind, matchedAt, url, extraRows, covers] of cases) {
+    it(`${covers ? 'covers' : 'does not cover'} a target whose open ${kind} finding (${matchedAt}) has ${extraRows.length ? 'a stored row on its authority' : 'no run evidence for its authority'}`, async () => {
+      const r = await runNuclei(['--from-urls'], [hit, ...extraRows], 0, { trigger: noUrl(kind, matchedAt, url) });
+      expect(state(r.db).cov).toEqual(covers ? [HOST] : []);
+    }, 100_000);
+  }
+
+  it('does not cover an open https root finding when the run saw an http root row and a javascript row on the bare target', async () => {
+    const js = JSON.stringify({ 'template-id': 't-js', type: 'javascript', info: { name: 'T', severity: 'info' }, host: HOST, url: HOST, 'matched-at': HOST });
+    const r = await runNuclei(['--from-urls'], [bare('http'), js], 0, { trigger: seed(`https://${HOST}`) });
+    expect(state(r.db).cov).toEqual([]);
+  }, 100_000);
+
+  it('does not let a closed finding outside the inputs block coverage', async () => {
+    const closed = `${seed(`https://${HOST}/gone`)};
+      INSERT INTO findings(tool, target, category, severity, title, matched_at, meta_json, seen_at)
+      VALUES ('nuclei-url', '${HOST}', 'other', 'low', 'newer finding', 'https://${HOST}/app/login', '${JSON.stringify({ url: `https://${HOST}/app/login` })}', '2026-01-02T00:00:00.000Z');
+      INSERT INTO tool_coverage(target, tool, seen_at, run_id) VALUES ('${HOST}', 'nuclei-url', '2026-01-02T00:00:00.000Z', NULL)`;
+    const r = await runNuclei(['--from-urls'], [hit], 0, { trigger: closed });
+    expect(coverage(r.db).rows.filter((x) => x.run_id !== null).map((x) => x.target)).toEqual([HOST]);
+  }, 100_000);
+
+  it('records no coverage, and says so, when the open findings cannot be read', async () => {
+    const bad = `INSERT INTO findings(tool, target, category, severity, title, matched_at, meta_json, seen_at)
+      VALUES ('nuclei-url', '${HOST}', 'cve', 'high', 'bad row', 'x', 'not json', '${OLDER}')`;
+    const r = await runNuclei(['--from-urls'], [hit], 0, { trigger: bad });
+    const st = state(r.db);
+    expect(st.cov).toEqual([]);
+    expect(st.notes).toContain('coverage skipped: cannot read open nuclei-url findings');
+  }, 100_000);
+});
+
+describe('nuclei-url coverage keeps an open finding open once the pair has a coverage row', () => {
+  const T1 = '2026-01-01T00:00:00.000Z';
+  const covered = `INSERT INTO tool_coverage(target, tool, seen_at, run_id) VALUES ('${HOST}', 'nuclei-url', '${T1}', NULL);`;
+  const finding = `INSERT INTO findings(tool, target, category, severity, title, matched_at, meta_json, seen_at)
+    VALUES ('nuclei-url', '${HOST}', 'cve', 'high', 'older finding', 'https://${HOST}/app/zzz', '${JSON.stringify({ url: `https://${HOST}/app/zzz` })}', '${T1}');`;
+  const second = `INSERT INTO discovered_urls(target, url, source, status, seen_at)
+    VALUES ('${HOST}', 'https://${HOST}/app/zzz', 'katana', 200, '${NOW}');`;
+  const hit = row('http', `https://${HOST}/app/login`);
+  const after = (dbPath: string) => {
+    const db = openDb(dbPath);
+    const logical = db.raw.prepare(currentFindingsSelect(findingsRuleOpts(db.raw))).all() as { title: string; resolved: number }[];
+    const cov = db.raw.prepare("SELECT seen_at FROM tool_coverage WHERE target = ? AND tool = 'nuclei-url'").all(HOST) as { seen_at: string }[];
+    db.close();
+    return { f: logical.find((x) => x.title === 'older finding')?.resolved, cov: cov.map((c) => c.seen_at) };
+  };
+
+  it('leaves the finding open when the run examined only another URL', async () => {
+    const r = await runNuclei(['--from-urls', '--urls-per-host', '1'], [hit], 0, { trigger: covered + finding + second });
+    expect(r.code, r.stderr).toBe(0);
+    expect(after(r.db)).toEqual({ f: 0, cov: [T1] });
+  }, 100_000);
+
+  it('resolves the finding when the run examined its URL and did not report it', async () => {
+    const r = await runNuclei(['--from-urls'], [hit], 0, { trigger: covered + finding + second });
+    const st = after(r.db);
+    expect(st.f).toBe(1);
+    expect(st.cov).not.toEqual([T1]);
+  }, 100_000);
+});

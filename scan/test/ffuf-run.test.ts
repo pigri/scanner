@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { openDb, type Db } from '../src/lib/db.js';
+import { currentFindingsSelect, findingsRuleOpts } from '../src/lib/current-findings.js';
 import { ffufHosts, finishFfufRun, type FfufDeps, type LiveUrl } from '../src/ffuf.js';
-import { currentFindingsSelect } from '../src/lib/current-findings.js';
 
 const AT = '2026-11-18T10:00:00.000Z';
 const HOST: LiveUrl = { target: 'a.example', seed: 'https://a.example' };
@@ -29,14 +29,15 @@ function deps(sc: Scenario): FfufDeps {
   };
 }
 
-async function scan(db: Db, sc: Scenario, withRun = true) {
+async function scan(db: Db, sc: Scenario, withRun = true, notes?: string[], now = AT, host: LiveUrl = HOST, words: string[] | null = ['admin/'], passthrough: string[] = []) {
   const dir = join(tmpdir(), `ffuf-test-${randomBytes(6).toString('hex')}`);
   mkdirSync(dir, { recursive: true });
   dirs.push(dir);
-  const runId = withRun ? db.startRun('ffuf', {}, AT) : null;
-  return ffufHosts(db, [HOST], {
-    now: AT, runId, wl: join(dir, 'wl.txt'), threads: 1, timeoutSec: 2, hostTimeoutSec: 5, passthrough: [],
-    outPath: (t) => join(dir, `${t}.json`), deps: deps(sc),
+  const runId = withRun ? db.startRun('ffuf', {}, now) : null;
+  if (words) writeFileSync(join(dir, 'wl.txt'), words.join('\n') + '\n');
+  return ffufHosts(db, [host], {
+    now, runId, wl: join(dir, 'wl.txt'), threads: 1, timeoutSec: 2, hostTimeoutSec: 5, passthrough,
+    outPath: (t) => join(dir, `${t}.json`), deps: deps(sc), ...(notes ? { notes } : {}),
   });
 }
 const cov = (db: Db) => db.raw.prepare('SELECT target, tool, seen_at FROM tool_coverage').all();
@@ -126,6 +127,192 @@ describe('ffufHosts coverage', () => {
   });
 });
 
+describe('ffufHosts coverage and the origin of open findings', () => {
+  const EARLIER = '2026-11-10T10:00:00.000Z';
+  const open = (db: Db, matched: string) => db.insertFinding({
+    tool: 'ffuf', target: 'a.example', category: 'path-200', severity: 'medium', title: `200 ${matched}`, matched_at: matched, meta: {},
+  }, EARLIER, null);
+
+  it('does not cover a host with an open finding from another origin, and says so', async () => {
+    const db = openDb(':memory:');
+    open(db, 'http://a.example:8080/admin/');
+    const notes: string[] = [];
+    await scan(db, {}, true, notes);
+    expect(cov(db)).toEqual([]);
+    expect(notes).toEqual(['1 target(s) not covered: an open finding came from an origin outside this run']);
+  });
+
+  const ENV_ROW = JSON.stringify({ results: [{ url: 'https://a.example/.env', input: { FUZZ: '.env' }, status: 200, length: 90 }] });
+
+  async function blockedRun(db: Db, passthrough: string[]) {
+    const dir = join(tmpdir(), `ffuf-test-${randomBytes(6).toString('hex')}`);
+    mkdirSync(dir, { recursive: true });
+    dirs.push(dir);
+    writeFileSync(join(dir, 'wl.txt'), 'admin/\n.env\n');
+    const notes: string[] = [];
+    const runId = db.startRun('ffuf', {}, AT);
+    const res = await ffufHosts(db, [HOST], {
+      now: AT, runId, wl: join(dir, 'wl.txt'), threads: 1, timeoutSec: 2, hostTimeoutSec: 5, passthrough,
+      outPath: (t) => join(dir, `${t}.json`), deps: deps({ report: ENV_ROW }), notes,
+    });
+    finishFfufRun(db, runId, 1, res, AT, notes);
+    const logical = db.raw.prepare(currentFindingsSelect(findingsRuleOpts(db.raw))).all() as Array<{ title: string; resolved: number }>;
+    return {
+      res,
+      f: logical.find((x) => x.title === '200 http://a.example:8080/admin/')?.resolved,
+      notes: (db.raw.prepare('SELECT notes FROM runs WHERE id = ?').get(runId) as { notes: string | null }).notes,
+    };
+  }
+
+  it('marks the run partial when the origin guard blocks a host that stored rows', async () => {
+    const db = openDb(':memory:');
+    open(db, 'http://a.example:8080/admin/');
+    const r = await blockedRun(db, []);
+    expect(r.f).toBe(0);
+    expect(r.res.incomplete).toBe(1);
+    expect(r.notes).toBe('1 target(s) not covered: an open finding came from an origin outside this run; partial run: 1 host(s) incomplete');
+  });
+
+  it('marks the run partial when the paths are unknown and the host stored rows', async () => {
+    const db = openDb(':memory:');
+    open(db, 'http://a.example:8080/admin/');
+    const r = await blockedRun(db, ['-mc', '200']);
+    expect(r.f).toBe(0);
+    expect(r.res.incomplete).toBe(1);
+    expect(r.notes).toContain('coverage skipped: cannot tell which paths ffuf requests');
+    expect(r.notes).toContain('partial run: 1 host(s) incomplete');
+  });
+
+  const PATH_SEED: LiveUrl = { target: 'a.example', seed: 'https://a.example/app' };
+
+  it('does not cover a host whose seed moved from a path to the root', async () => {
+    const db = openDb(':memory:');
+    open(db, 'https://a.example/app/.env');
+    await scan(db, {}, true, [], AT, HOST, ['.env', 'app']);
+    expect(cov(db)).toEqual([]);
+  });
+
+  it('does not cover a host whose seed moved from the root to a path', async () => {
+    const db = openDb(':memory:');
+    open(db, 'https://a.example/.env');
+    await scan(db, {}, true, [], AT, PATH_SEED, ['.env']);
+    expect(cov(db)).toEqual([]);
+  });
+
+  it('covers a host whose open finding is the seed plus a wordlist entry, even one with a slash', async () => {
+    const db = openDb(':memory:');
+    open(db, 'https://a.example/app/admin/login');
+    await scan(db, {}, true, [], AT, PATH_SEED, ['admin/login']);
+    expect(cov(db)).toHaveLength(1);
+  });
+
+  it('does not cover a host whose open finding is on a word removed from the wordlist', async () => {
+    const db = openDb(':memory:');
+    open(db, 'https://a.example/old');
+    await scan(db, {}, true, [], AT, HOST, ['new']);
+    expect(cov(db)).toEqual([]);
+  });
+
+  it('counts a word plus an -e extension as requested', async () => {
+    const db = openDb(':memory:');
+    open(db, 'https://a.example/backup.zip');
+    await scan(db, {}, true, [], AT, HOST, ['backup'], ['-e', '.zip']);
+    expect(cov(db)).toHaveLength(1);
+  });
+
+  it('records no coverage, and says so, when the wordlist cannot be read', async () => {
+    const db = openDb(':memory:');
+    const notes: string[] = [];
+    await scan(db, {}, true, notes, AT, HOST, null);
+    expect(cov(db)).toEqual([]);
+    expect(notes.join(';')).toContain('coverage skipped: cannot tell which paths ffuf requests');
+  });
+
+  it('records no coverage under -recursion', async () => {
+    const db = openDb(':memory:');
+    await scan(db, {}, true, [], AT, HOST, ['admin/'], ['-recursion']);
+    expect(cov(db)).toEqual([]);
+  });
+
+  for (const flags of [['-u', 'https://b.example/FUZZ'], ['-x', 'http://127.0.0.1:8080'], ['--recursion=true'], ['-recursion=true'], ['-w=other.txt'], ['-request', 'req.txt'], ['-x-unknown'], ['-e=.zip', '-mc', '200']]) {
+    it(`records no coverage, and says so, under the passthrough ${flags.join(' ')}`, async () => {
+      const db = openDb(':memory:');
+      const notes: string[] = [];
+      await scan(db, {}, true, notes, AT, HOST, ['admin/'], flags);
+      expect(cov(db)).toEqual([]);
+      expect(notes.join(';')).toContain('coverage skipped: cannot tell which paths ffuf requests');
+    });
+  }
+
+  for (const flags of [['-rate', '10'], ['-rate=10', '-v'], ['-p', '0.1-2.0', '-maxtime', '60'], ['-replay-proxy', 'http://127.0.0.1:8080', '-c']]) {
+    it(`still covers under the allowlisted passthrough ${flags.join(' ')}`, async () => {
+      const db = openDb(':memory:');
+      await scan(db, {}, true, [], AT, HOST, ['admin/'], flags);
+      expect(cov(db)).toHaveLength(1);
+    });
+  }
+
+  it('counts a word plus an -e=ext extension as requested', async () => {
+    const db = openDb(':memory:');
+    open(db, 'https://a.example/backup.zip');
+    await scan(db, {}, true, [], AT, HOST, ['backup'], ['-e=.zip']);
+    expect(cov(db)).toHaveLength(1);
+  });
+
+  it('covers a host whose open findings all came from the seed origin', async () => {
+    const db = openDb(':memory:');
+    open(db, 'https://a.example/admin/');
+    const notes: string[] = [];
+    await scan(db, {}, true, notes);
+    expect(cov(db)).toEqual([{ target: 'a.example', tool: 'ffuf', seen_at: AT }]);
+    expect(notes).toEqual([]);
+  });
+
+  it('judges the open findings as they were before this run stored its own', async () => {
+    const db = openDb(':memory:');
+    open(db, 'http://a.example:8080/admin/');
+    await scan(db, { report: ONE_HIT });
+    expect(cov(db)).toEqual([]);
+  });
+
+  it('records no coverage and says so when the open findings cannot be read', async () => {
+    const db = openDb(':memory:');
+    db.raw.exec('DROP TABLE findings');
+    const notes: string[] = [];
+    await scan(db, {}, true, notes);
+    expect(cov(db)).toEqual([]);
+    expect(notes).toEqual(['coverage skipped: cannot read open ffuf findings']);
+  });
+});
+
+describe('ffufHosts keeps an open finding open once the pair has a coverage row', () => {
+  const T1 = '2026-11-10T10:00:00.000Z';
+  const T2 = '2026-11-18T10:00:00.000Z';
+  const seed = (db: Db) => {
+    db.insertFinding({ tool: 'ffuf', target: 'a.example', category: 'path-200', severity: 'medium', title: 'F', matched_at: 'http://a.example:8080/admin/', meta: {} }, T1, null);
+    db.recordCoverage('ffuf', ['a.example'], T1, null);
+  };
+  const state = (db: Db) => ({
+    f: (db.raw.prepare(currentFindingsSelect(findingsRuleOpts(db.raw))).all() as { title: string; resolved: number }[]).find((r) => r.title === 'F')?.resolved,
+    cov: (db.raw.prepare('SELECT seen_at FROM tool_coverage').all() as { seen_at: string }[]).map((r) => r.seen_at),
+  });
+
+  it('leaves F open when the run fetched only another origin', async () => {
+    const db = openDb(':memory:');
+    seed(db);
+    await scan(db, { report: ONE_HIT }, true, undefined, T2);
+    expect(state(db)).toEqual({ f: 0, cov: [T1] });
+  });
+
+  it('resolves F when the run fetched its origin and did not report it', async () => {
+    const db = openDb(':memory:');
+    db.insertFinding({ tool: 'ffuf', target: 'a.example', category: 'path-200', severity: 'medium', title: 'F', matched_at: 'https://a.example/old/', meta: {} }, T1, null);
+    db.recordCoverage('ffuf', ['a.example'], T1, null);
+    await scan(db, { report: ONE_HIT }, true, undefined, T2, HOST, ['admin/', 'old/']);
+    expect(state(db)).toEqual({ f: 1, cov: [T2] });
+  });
+});
+
 describe('ffuf partial runs', () => {
   const T0 = '2026-11-17T10:00:00.000Z';
   const ENV_HIT = JSON.stringify({ results: [{ url: 'https://a.example/.env', input: { FUZZ: '.env' }, status: 200, length: 90 }] });
@@ -135,6 +322,7 @@ describe('ffuf partial runs', () => {
     const dir = join(tmpdir(), `ffuf-test-${randomBytes(6).toString('hex')}`);
     mkdirSync(dir, { recursive: true });
     dirs.push(dir);
+    writeFileSync(join(dir, 'wl.txt'), 'admin/\n.env\n');
     const runId = db.startRun('ffuf', {}, at);
     const res = await ffufHosts(db, [HOST], {
       now: at, runId, wl: join(dir, 'wl.txt'), threads: 1, timeoutSec: 2, hostTimeoutSec: 5, passthrough: [],

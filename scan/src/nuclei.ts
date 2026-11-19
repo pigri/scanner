@@ -6,7 +6,7 @@ import { openDb, type Db } from './lib/db.js';
 import { fetchCanary, probeUrl, hashBody, isNearCanary, type CanaryProbe } from './lib/catchall.js';
 import { cveIdsFor } from './lib/nuclei-cve.js';
 import { NUCLEI_URL_TOOL } from './lib/nuclei-tool.js';
-import { hostOf, nucleiCoveredTargets, nucleiSkippedHosts, type NucleiRowEvidence } from './lib/nuclei-coverage.js';
+import { hostOf, nucleiCoveredTargets, nucleiInputKeys, nucleiSkippedHosts, openNucleiUrlKeys, targetsWithKeysOutside, withRowRoots, type NucleiRowEvidence } from './lib/nuclei-coverage.js';
 
 // Nuclei templates whose semantics are "did the server return a page for this
 // path?" — these fire false positives on catch-all responders that return the
@@ -185,6 +185,17 @@ Everything after '--' is passed to nuclei verbatim.`));
     ...(errorLog ? ['-elog', errorLog] : []),
     ...passthrough,
   ];
+  // Read before nuclei's rows are inserted: they would move the watermark past the old ones.
+  let openKeys: Map<string, string[]> | null = new Map();
+  if (db && fromUrls) {
+    try {
+      openKeys = openNucleiUrlKeys(db.raw, targets);
+    } catch (e) {
+      openKeys = null;
+      console.error(`WARN: cannot read open nuclei-url findings, recording no coverage: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  const inputs = nucleiInputKeys(targets, urlSample);
   console.error(`nuclei ${args.join(' ')} (scan-timeout ${scanTimeoutSec}s)`);
   // Hard cap the whole run so one bad batch can't block the pipeline; partial
   // JSONL written so far is still ingested.
@@ -223,10 +234,10 @@ Everything after '--' is passed to nuclei verbatim.`));
         const row = parsed as {
           'template-id'?: string; template_id?: string;
           info?: { name?: string; severity?: string; classification?: { 'cve-id'?: string[] } };
-          host?: string; 'matched-at'?: string; type?: string;
+          host?: string; 'matched-at'?: string; type?: string; url?: string; scheme?: string;
         };
         // Fails closed: stored flips to true only after the row's last insert.
-        ev = { type: row.type, 'matched-at': row['matched-at'], host: row.host, stored: false };
+        ev = { type: row.type, 'matched-at': row['matched-at'], host: row.host, url: row.url, scheme: row.scheme, stored: false };
         evidence.push(ev);
         const tid = row['template-id'] ?? row.template_id ?? 'unknown';
         const cves = row.info?.classification?.['cve-id'];
@@ -308,7 +319,12 @@ Everything after '--' is passed to nuclei verbatim.`));
     const skipped = nucleiSkippedHosts(r.stderr, elogLines, maxHostError);
     // An unparseable line has no known host, so no host can be called fully examined.
     if (unparseable) notes.push(`coverage skipped: ${unparseable} unparseable nuclei row(s)`);
-    const covered = unparseable ? [] : nucleiCoveredTargets(targets, evidence, { fromUrls, exitCode: r.code, skipped });
+    if (!openKeys) notes.push('coverage skipped: cannot read open nuclei-url findings');
+    else {
+      const outside = targetsWithKeysOutside(openKeys, withRowRoots(targets, inputs, evidence)).length;
+      if (outside) notes.push(`${outside} target(s) not covered: an open finding came from a URL outside this run`);
+    }
+    const covered = unparseable ? [] : nucleiCoveredTargets(targets, evidence, { fromUrls, exitCode: r.code, skipped, inputs, openKeys });
     if (covered.length && !db.recordCoverage(toolName, covered, now, runId)) {
       notes.push('tool_coverage write failed: scan.db busy');
     }

@@ -17,6 +17,7 @@ import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, requireTool, resolveOutputPath } from './lib/runner.js';
 import { openDb, type Db } from './lib/db.js';
 import { coveredTargets } from './lib/coverage.js';
+import { liveSeeds, originGuardNote, targetsOutsideSeedOrigin } from './lib/live-seed.js';
 
 type Sev = 'critical' | 'high' | 'medium' | 'low' | 'info';
 
@@ -205,19 +206,7 @@ function envFileLooksReal(b: string): boolean {
 export interface LiveUrl { target: string; seed: string }
 
 function loadLive(db: Db, targets: readonly string[]): LiveUrl[] {
-  const filter = targets.length ? `AND target IN (${targets.map(() => '?').join(',')})` : '';
-  const rows = db.raw.prepare(
-    `SELECT DISTINCT target, url FROM http_probes
-     WHERE (url LIKE 'http://%' OR url LIKE 'https://%') ${filter}`
-  ).all(...targets) as { target: string; url: string }[];
-  const bySeed = new Map<string, LiveUrl>();
-  for (const r of rows) {
-    const existing = bySeed.get(r.target);
-    if (!existing || (existing.seed.startsWith('http://') && r.url.startsWith('https://'))) {
-      bySeed.set(r.target, { target: r.target, seed: r.url.replace(/\/+$/, '') });
-    }
-  }
-  return [...bySeed.values()];
+  return liveSeeds(db, targets).map((r) => ({ target: r.target, seed: r.url.replace(/\/+$/, '') }));
 }
 
 interface Hit { target: string; url: string; sig: Sig; status: number; length: number }
@@ -264,6 +253,8 @@ export interface SigsOpts {
   hostConcurrency: number;
   write: (line: string) => void;
   probeFn?: typeof probe;
+  /** Receives run notes about coverage this run did not record. */
+  notes?: string[];
 }
 
 /**
@@ -286,6 +277,9 @@ export async function scanSigs(db: Db, live: readonly LiveUrl[], o: SigsOpts): P
   const hits: Hit[] = [];
   const outcomes: { target: string; ok: boolean }[] = [];
   let findings = 0;
+  // Before this run's rows move the watermark.
+  const outside = targetsOutsideSeedOrigin(db, 'content-sigs', live.map((l) => ({ target: l.target, url: l.seed })), { paths: SIGS.map((g) => g.path) });
+  o.notes?.push(...originGuardNote('content-sigs', outside));
 
   // Per-host worker fan-out: each host runs SIGS through its own bounded
   // pool (default 5) so we don't hammer a single host with 40 concurrent
@@ -330,7 +324,7 @@ export async function scanSigs(db: Db, live: readonly LiveUrl[], o: SigsOpts): P
     }
   }
   await Promise.all(Array.from({ length: Math.min(o.concurrency, live.length) }, hostWorker));
-  if (runId !== null && !db.recordCoverage('content-sigs', coveredTargets(outcomes), now, runId)) {
+  if (runId !== null && !db.recordCoverage('content-sigs', (outside ? coveredTargets(outcomes).filter((t) => !outside.has(t)) : []), now, runId)) {
     console.error('content-sigs: tool_coverage write failed: scan.db busy');
   }
   return findings;
@@ -398,9 +392,10 @@ Wrapper flags (before '--'):
 
   const outFile = resolveOutputPath(opts, runId, 'content-sigs.jsonl');
   const wstream = fs.createWriteStream(outFile);
-  const findings = await scanSigs(db, live, { now, runId, timeoutSec, maxKb, concurrency, hostConcurrency, write: (l) => wstream.write(l) });
+  const notes: string[] = [];
+  const findings = await scanSigs(db, live, { notes, now, runId, timeoutSec, maxKb, concurrency, hostConcurrency, write: (l) => wstream.write(l) });
   await new Promise<void>((res) => wstream.end(() => res()));
-  db.finishRun(runId, { targetsCount: live.length, findingsCount: findings, at: new Date().toISOString() });
+  db.finishRun(runId, { targetsCount: live.length, findingsCount: findings, ...(notes.length ? { notes: notes.join('; ') } : {}), at: new Date().toISOString() });
   db.close();
   console.error(`content-sigs done: +${findings} exposure(s) across ${live.length} host(s), run #${runId}`);
   console.error(`  sqlite: ${path.resolve(opts.sqlite)}`);
