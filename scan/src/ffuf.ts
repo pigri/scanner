@@ -13,6 +13,7 @@ import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run, requireTool, writeLines, resolveOutputPath } from './lib/runner.js';
 import { openDb, type Db } from './lib/db.js';
 import { isBlockedAnswer } from './lib/real-answer.js';
+import { liveSeeds, originGuardNote, targetsOutsideSeedOrigin } from './lib/live-seed.js';
 import { fetchCanary, probeUrl, hashBody, isNearCanary } from './lib/catchall.js';
 
 // Curated wordlist. Kept short so per-host runtime stays under ~15s: one
@@ -75,20 +76,7 @@ function severityForPath(p: string): 'critical' | 'high' | 'medium' | 'low' | 'i
 export interface LiveUrl { target: string; seed: string }
 
 function loadLive(db: Db, targets: readonly string[]): LiveUrl[] {
-  if (!targets.length) return [];
-  const p = targets.map(() => '?').join(',');
-  const rows = db.raw.prepare(
-    `SELECT DISTINCT target, url FROM http_probes
-     WHERE target IN (${p}) AND (url LIKE 'http://%' OR url LIKE 'https://%')`
-  ).all(...targets) as { target: string; url: string }[];
-  const bySeed = new Map<string, LiveUrl>();
-  for (const r of rows) {
-    const existing = bySeed.get(r.target);
-    if (!existing || (existing.seed.startsWith('http://') && r.url.startsWith('https://'))) {
-      bySeed.set(r.target, { target: r.target, seed: r.url.replace(/\/+$/, '') });
-    }
-  }
-  return [...bySeed.values()];
+  return liveSeeds(db, targets).map((r) => ({ target: r.target, seed: r.url.replace(/\/+$/, '') }));
 }
 
 const STOPPED_EARLY = /Maximum running time|Receiving spurious errors|unusual amount of 403/i;
@@ -109,6 +97,8 @@ export interface FfufOpts {
   passthrough: string[];
   outPath: (target: string) => string;
   deps?: FfufDeps;
+  /** Receives run notes about coverage this run did not record. */
+  notes?: string[];
 }
 
 export async function ffufHosts(db: Db, live: readonly LiveUrl[], o: FfufOpts): Promise<{ findings: number; reviewFindings: number }> {
@@ -117,6 +107,9 @@ export async function ffufHosts(db: Db, live: readonly LiveUrl[], o: FfufOpts): 
   const covered: string[] = [];
   let findings = 0;
   let reviewFindings = 0;
+  // Before this run's rows move the watermark.
+  const outside = targetsOutsideSeedOrigin(db, 'ffuf', live.map((l) => ({ target: l.target, url: l.seed })));
+  o.notes?.push(...originGuardNote('ffuf', outside));
   for (const { target, seed } of live) {
     // Canary: fetch an unlikely-to-exist path first. If the host is a catch-all
     // responder (Zorp/decoy/SPA-that-serves-index-html-for-everything), the
@@ -306,7 +299,7 @@ export async function ffufHosts(db: Db, live: readonly LiveUrl[], o: FfufOpts): 
       // unreachable hosts (empty report); the canary rules out the latter.
       // A blocked or rate-limited canary means ffuf's empty or uniform report
       // came from the block, not from the app.
-      if (canary && !isBlockedAnswer(canary.status, canary.mitigated === true) && r.code === 0 && !STOPPED_EARLY.test(r.stderr)) covered.push(target);
+      if (canary && !isBlockedAnswer(canary.status, canary.mitigated === true) && r.code === 0 && !STOPPED_EARLY.test(r.stderr) && outside && !outside.has(target)) covered.push(target);
     } catch (e) {
       console.error(`  ${target}: parse error: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -376,11 +369,12 @@ Wrapper flags (before '--'):
   const wl = resolveOutputPath({ ...opts, outFile: null }, runId, 'ffuf-wordlist.txt');
   writeLines(wl, [...CURATED_PATHS]);
 
+  const notes: string[] = [];
   const { findings, reviewFindings } = await ffufHosts(db, live, {
-    now, runId, wl, threads, timeoutSec, hostTimeoutSec, passthrough,
+    notes, now, runId, wl, threads, timeoutSec, hostTimeoutSec, passthrough,
     outPath: (target) => resolveOutputPath({ ...opts, outFile: null }, runId, `ffuf-${target.replace(/[^a-z0-9._-]/gi, '_')}.json`),
   });
-  db.finishRun(runId, { targetsCount: live.length, findingsCount: findings, at: new Date().toISOString() });
+  db.finishRun(runId, { targetsCount: live.length, findingsCount: findings, ...(notes.length ? { notes: notes.join('; ') } : {}), at: new Date().toISOString() });
   db.close();
   console.error(
     `ffuf done: +${findings} finding(s) across ${live.length} host(s), ` +

@@ -28,14 +28,14 @@ function deps(sc: Scenario): FfufDeps {
   };
 }
 
-async function scan(db: Db, sc: Scenario, withRun = true) {
+async function scan(db: Db, sc: Scenario, withRun = true, notes?: string[]) {
   const dir = join(tmpdir(), `ffuf-test-${randomBytes(6).toString('hex')}`);
   mkdirSync(dir, { recursive: true });
   dirs.push(dir);
   const runId = withRun ? db.startRun('ffuf', {}, AT) : null;
   return ffufHosts(db, [HOST], {
     now: AT, runId, wl: join(dir, 'wl.txt'), threads: 1, timeoutSec: 2, hostTimeoutSec: 5, passthrough: [],
-    outPath: (t) => join(dir, `${t}.json`), deps: deps(sc),
+    outPath: (t) => join(dir, `${t}.json`), deps: deps(sc), ...(notes ? { notes } : {}),
   });
 }
 const cov = (db: Db) => db.raw.prepare('SELECT target, tool, seen_at FROM tool_coverage').all();
@@ -122,5 +122,46 @@ describe('ffufHosts coverage', () => {
     db.raw.exec("CREATE TRIGGER t BEFORE INSERT ON findings BEGIN SELECT RAISE(ABORT,'database is locked'); END");
     await scan(db, { report: ONE_HIT });
     expect(cov(db)).toEqual([]);
+  });
+});
+
+describe('ffufHosts coverage and the origin of open findings', () => {
+  const EARLIER = '2026-11-10T10:00:00.000Z';
+  const open = (db: Db, matched: string) => db.insertFinding({
+    tool: 'ffuf', target: 'a.example', category: 'path-200', severity: 'medium', title: `200 ${matched}`, matched_at: matched, meta: {},
+  }, EARLIER, null);
+
+  it('does not cover a host with an open finding from another origin, and says so', async () => {
+    const db = openDb(':memory:');
+    open(db, 'http://a.example:8080/admin/');
+    const notes: string[] = [];
+    await scan(db, {}, true, notes);
+    expect(cov(db)).toEqual([]);
+    expect(notes).toEqual(['1 target(s) not covered: an open finding came from an origin outside this run']);
+  });
+
+  it('covers a host whose open findings all came from the seed origin', async () => {
+    const db = openDb(':memory:');
+    open(db, 'https://a.example/admin/');
+    const notes: string[] = [];
+    await scan(db, {}, true, notes);
+    expect(cov(db)).toEqual([{ target: 'a.example', tool: 'ffuf', seen_at: AT }]);
+    expect(notes).toEqual([]);
+  });
+
+  it('judges the open findings as they were before this run stored its own', async () => {
+    const db = openDb(':memory:');
+    open(db, 'http://a.example:8080/admin/');
+    await scan(db, { report: ONE_HIT });
+    expect(cov(db)).toEqual([]);
+  });
+
+  it('records no coverage and says so when the open findings cannot be read', async () => {
+    const db = openDb(':memory:');
+    db.raw.exec('DROP TABLE findings');
+    const notes: string[] = [];
+    await scan(db, {}, true, notes);
+    expect(cov(db)).toEqual([]);
+    expect(notes).toEqual(['coverage skipped: cannot read open ffuf findings']);
   });
 });
