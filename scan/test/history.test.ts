@@ -298,12 +298,13 @@ describe('computeAttendance — nuclei passes', () => {
     });
 
     it('URL pass latest window has it, host pass latest does not: persistent', () => {
-      const ws = [w('nuclei', H(1), E(1)), w('nuclei-url', H(2), E(2)), w('nuclei', H(3), E(3)), w('nuclei-url', H(4), E(4))];
+      const ws = [w('nuclei', H(1), E(1)), w('nuclei-url', H(2), E(2)), w('nuclei', H(3), E(3)), w('nuclei-url', H(4), E(4)), w('nuclei', H(5), E(5))];
       const row = one([
         obs({ title: 'x', tool: 'nuclei', seen_at: at(1) }),
         obs({ title: 'x', tool: 'nuclei-url', seen_at: at(2) }),
         obs({ title: 'x', tool: 'nuclei-url', seen_at: at(4) }),
       ], ws);
+      expect(row.presence[4]).toBe('absent');
       expect(row.status).toBe('persistent');
       expect(row.flapping).toBe(false);
     });
@@ -315,6 +316,15 @@ describe('computeAttendance — nuclei passes', () => {
         obs({ title: 'x', tool: 'nuclei-url', seen_at: at(2) }),
       ], ws);
       expect(row.status).toBe('resolved');
+    });
+
+    it('a pass with no completed window keeps the key unknown, not resolved', () => {
+      const ws = [w('nuclei-url', H(2), E(2)), w('nuclei-url', H(4), E(4))];
+      const row = one([
+        obs({ title: 'x', tool: 'nuclei', seen_at: at(9) }),
+        obs({ title: 'x', tool: 'nuclei-url', seen_at: at(2) }),
+      ], ws);
+      expect(row.status).toBe('unknown');
     });
 
     it('flapping needs two transitions within one pass', () => {

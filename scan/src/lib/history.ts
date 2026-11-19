@@ -109,6 +109,7 @@ function perToolOutcome(
 ): { status: Status; flapping: boolean } {
   let persistent = false;
   let resolved = false;
+  let unknown = false;
   let flapping = false;
   for (const tool of tools) {
     const own = windows.filter((w) => w.tool === tool || w.tool === 'scan-all');
@@ -120,9 +121,10 @@ function perToolOutcome(
     const st = computeStatus(seq);
     if (st === 'persistent') persistent = true;
     else if (st === 'resolved') resolved = true;
+    else unknown = true;
     if (countTransitions(seq) >= 2) flapping = true;
   }
-  return { status: persistent ? 'persistent' : resolved ? 'resolved' : 'unknown', flapping };
+  return { status: persistent ? 'persistent' : unknown ? 'unknown' : resolved ? 'resolved' : 'unknown', flapping };
 }
 
 /**
