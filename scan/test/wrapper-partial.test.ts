@@ -18,11 +18,11 @@ function fake(name: string, body: string): void {
   fs.chmodSync(p, 0o755);
 }
 
-function runWrapper(script: string, targets: string[], env: Record<string, string> = {}): { notes: string | null; partialRows: number; status: number | null; stderr: string } {
+function runWrapper(script: string, targets: string[], env: Record<string, string> = {}, extra: string[] = []): { notes: string | null; partialRows: number; status: number | null; stderr: string } {
   const tf = path.join(dir, 'targets.txt');
   fs.writeFileSync(tf, targets.join('\n') + '\n');
   const dbFile = path.join(dir, 'scan.db');
-  const r = spawnSync(path.join(SCAN, 'node_modules/.bin/tsx'), [path.join(SCAN, 'src', script), '--targets', tf, '--sqlite', dbFile, '--run-dir', path.join(dir, 'runs')], {
+  const r = spawnSync(path.join(SCAN, 'node_modules/.bin/tsx'), [path.join(SCAN, 'src', script), '--targets', tf, '--sqlite', dbFile, '--run-dir', path.join(dir, 'runs'), '--', ...extra], {
     cwd: dir, encoding: 'utf8', env: { ...process.env, ...env, PATH: `${path.join(dir, 'bin')}:${process.env['PATH']}` },
   });
   const db = new Database(dbFile, { readonly: true });
@@ -126,5 +126,18 @@ describe('testssl partial runs', () => {
     const r = runWrapper('testssl.ts', ['a.example']);
     expect(r.notes ?? '').not.toContain('partial');
     expect(r.partialRows).toBe(0);
+  });
+});
+
+describe('ffuf main partial runs', () => {
+  const report = JSON.stringify({ results: [{ url: 'https://a.example/admin', input: { FUZZ: 'admin' }, status: 200, length: 1234, words: 10, lines: 5 }] });
+  const ffuf = (code: number) => fake('ffuf', `out=; while [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done\ncat > "$out" <<'EOF'\n${report}\nEOF\nexit ${code}`);
+  const go = () => runWrapper('ffuf.ts', ['a.example'], {}, ['--no-live-only', '--timeout', '1', '--host-timeout', '5']);
+
+  it('is partial when ffuf exits non-zero after writing rows', () => {
+    ffuf(2);
+    const r = go();
+    expect(r.notes).toContain('partial run: 1 host(s) incomplete');
+    expect(r.partialRows).toBeGreaterThan(0);
   });
 });
