@@ -73,21 +73,55 @@ export function inputKey(url: string | null | undefined): string {
 
 /**
  * Keys of what a `--from-urls` run feeds nuclei before it runs: the sample URLs
- * and, per bare target, a `self:` key for rows that carry no URL (dns, tcp,
- * ssl). A bare host's root URL is not here: nuclei probes it and scans one
+ * with the authority each one examines, and, per bare target, its `self:` key
+ * (dns). A bare host's root URL is not here: nuclei probes it and scans one
  * scheme, so `withRowRoots` reads that scheme from the run's own rows.
  */
 export function nucleiInputKeys(targets: readonly string[], urlSample: readonly string[]): Set<string> {
   const keys = new Set<string>();
   for (const t of targets) keys.add(selfKey(t));
-  for (const u of urlSample) keys.add(inputKey(u));
+  for (const u of urlSample) {
+    keys.add(inputKey(u));
+    keys.add(authorityKey(u));
+  }
   keys.delete('');
   return keys;
 }
 
-/** Key of an open row that has no `url`: the target itself. */
+/** Key of a target's own rows: dns, and a non-http row with no port. */
 export function selfKey(target: string): string {
   return `self:${target}`;
+}
+
+const DEFAULT_PORT: Record<string, string> = { 'http:': '80', 'https:': '443' };
+
+/**
+ * `self:host[:port]` of a URL or host[:port]. The port is the explicit one, else
+ * the default of an explicit scheme, else `fallbackPort`. Empty when unparseable.
+ */
+function authorityKey(value: string, fallbackPort = ''): string {
+  const m = /^(?:([a-z][a-z0-9+.-]*):\/\/)?([^/?#]*)/i.exec(value.trim());
+  const authority = (m?.[2] ?? '').toLowerCase();
+  const port = /^(.+):(\d+)$/.exec(authority);
+  const host = port ? port[1]! : authority;
+  if (!host) return '';
+  const p = port?.[2] ?? DEFAULT_PORT[`${(m?.[1] ?? '').toLowerCase()}:`] ?? fallbackPort;
+  return selfKey(p ? `${host}:${p}` : host);
+}
+
+export interface RowShape { type?: string | null | undefined; url?: string | null | undefined; matchedAt?: string | null | undefined }
+
+/**
+ * Key of a row: its input URL for an http row; `self:<target>` for dns; for any
+ * other type `self:host:port` from its url, else its matched-at (ssl defaults
+ * to 443, the other types have no default port).
+ */
+export function rowKey(target: string, r: RowShape): string {
+  const type = (r.type ?? 'http').toLowerCase();
+  if (type === 'dns') return selfKey(target);
+  if (type === 'http') return r.url ? inputKey(r.url) : selfKey(target);
+  const src = r.url || r.matchedAt;
+  return src ? authorityKey(src, type === 'ssl' ? '443' : '') : selfKey(target);
 }
 
 function authorityOf(t: string): string {
@@ -104,13 +138,18 @@ function rowInputKey(r: NucleiRowEvidence): string {
 
 /**
  * `inputs` plus the root URL of each bare target on the scheme this run's rows
- * show. A bare host with no row of its own gets none, so its open root
- * findings stay outside.
+ * show, plus the authority of each non-http row this run stored. A bare host
+ * with no row of its own gets none, so its open root findings stay outside.
  */
 export function withRowRoots(targets: readonly string[], inputs: ReadonlySet<string>, rows: readonly NucleiRowEvidence[]): Set<string> {
   const out = new Set(inputs);
   const authorities = new Set(targets.map(authorityOf));
   for (const r of rows) {
+    const type = (r.type ?? 'http').toLowerCase();
+    if (r.stored && type !== 'http' && type !== 'dns') {
+      const k = rowKey('', { type, url: r.url, matchedAt: r['matched-at'] });
+      if (k && k !== selfKey('')) out.add(k);
+    }
     const k = rowInputKey(r);
     if (!k) continue;
     try {
@@ -122,22 +161,22 @@ export function withRowRoots(targets: readonly string[], inputs: ReadonlySet<str
 }
 
 /**
- * Input keys of each target's open nuclei-url rows: nuclei's `url` (the input it
- * scanned), else `self:<target>`: dns, tcp and ssl rows have no url, and their
- * `matched-at` is a host or host:port, not an input. Read before this run
+ * Keys of each target's open nuclei-url rows, by `rowKey`: an http row's `url`
+ * (the input it scanned); every other type by its host:port. Read before this run
  * inserts anything, or its rows would move the watermark past the old ones.
  * Throws when the read fails.
  */
 export function openNucleiUrlKeys(raw: Database.Database, targets: readonly string[]): Map<string, string[]> {
   const stmt = raw.prepare(
-    `SELECT DISTINCT json_extract(f.meta_json, '$.url') AS u
+    `SELECT DISTINCT json_extract(f.meta_json, '$.url') AS u, json_extract(f.meta_json, '$.type') AS type, f.matched_at AS m
      FROM findings f JOIN (${watermarkSelect({ ...findingsRuleOpts(raw), targetParam: '@t' })}) wm
        ON wm.target = f.target AND wm.tool = f.tool
      WHERE f.target = @t AND f.tool = '${NUCLEI_URL_TOOL}' AND f.seen_at >= wm.w`,
   );
   const out = new Map<string, string[]>();
   for (const t of new Set(targets)) {
-    const keys = (stmt.all({ t }) as { u: string | null }[]).map((r) => (r.u ? inputKey(r.u) : selfKey(t)));
+    const keys = (stmt.all({ t }) as { u: string | null; type: string | null; m: string | null }[])
+      .map((r) => rowKey(t, { type: r.type, url: r.u, matchedAt: r.m }));
     if (keys.length) out.set(t, keys);
   }
   return out;

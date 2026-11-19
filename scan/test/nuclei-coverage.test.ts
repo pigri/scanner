@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { nucleiCoveredTargets, nucleiSkippedHosts, parseMatched, hostOf, nucleiInputKeys, selfKey, inputKey, targetsWithKeysOutside } from '../src/lib/nuclei-coverage.js';
+import { rowKey, nucleiCoveredTargets, nucleiSkippedHosts, parseMatched, hostOf, nucleiInputKeys, selfKey, inputKey, targetsWithKeysOutside } from '../src/lib/nuclei-coverage.js';
 
 const T = 'www.example.test';
 const ssl = { type: 'ssl', 'matched-at': `${T}:443`, stored: true };
@@ -147,6 +147,31 @@ describe('open findings outside this run\'s inputs', () => {
   it('adds no root key from a row whose url and scheme field name no scheme', () => {
     expect(nucleiCoveredTargets([T], [bareRow('http'), js], { ...opts, openKeys: open(`https://${T}`) })).toEqual([]);
     expect(nucleiCoveredTargets([T], [bareRow('http'), tcp(`${T}:443`)], { ...opts, openKeys: open(`https://${T}`) })).toEqual([]);
+  });
+
+  it('keys a non-http row by its authority, from the url or else matched-at', () => {
+    expect(rowKey(T, { type: 'tcp', url: `${T}:22`, matchedAt: null })).toBe(`self:${T}:22`);
+    expect(rowKey(T, { type: 'ssl', url: null, matchedAt: `${T}:8443` })).toBe(`self:${T}:8443`);
+    expect(rowKey(T, { type: 'ssl', url: null, matchedAt: T })).toBe(`self:${T}:443`);
+    expect(rowKey(T, { type: 'javascript', url: T, matchedAt: T })).toBe(`self:${T}`);
+    expect(rowKey(T, { type: 'dns', url: null, matchedAt: `ns.${T}` })).toBe(`self:${T}`);
+    expect(rowKey(T, { type: 'http', url: `https://${T}/a`, matchedAt: null })).toBe(`https://${T}/a`);
+  });
+
+  it('examines an authority only through an input url or a stored row on it', () => {
+    const ssl8443 = new Map([[T, [rowKey(T, { type: 'ssl', url: null, matchedAt: `${T}:8443` })]]]);
+    expect(nucleiCoveredTargets([T], [http], { ...opts, openKeys: ssl8443 })).toEqual([]);
+    const sample = nucleiInputKeys([T], [`https://${T}:8443/app`]);
+    expect(nucleiCoveredTargets([T], [http], { ...opts, inputs: sample, openKeys: ssl8443 })).toEqual([T]);
+    const row = { type: 'ssl', 'matched-at': `${T}:8443`, stored: true };
+    expect(nucleiCoveredTargets([T], [http, row], { ...opts, openKeys: ssl8443 })).toEqual([T]);
+  });
+
+  it('covers a tcp finding on :22 only when this run stored a row on :22', () => {
+    const open22 = new Map([[T, [rowKey(T, { type: 'tcp', url: `${T}:22`, matchedAt: null })]]]);
+    expect(nucleiCoveredTargets([T], [http], { ...opts, openKeys: open22 })).toEqual([]);
+    expect(nucleiCoveredTargets([T], [http, tcp(`${T}:22`)], { ...opts, openKeys: open22 })).toEqual([T]);
+    expect(nucleiCoveredTargets([T], [http, tcp(`${T}:2222`)], { ...opts, openKeys: open22 })).toEqual([]);
   });
 
   it('counts an open row with no url as inside when the bare target was an input', () => {

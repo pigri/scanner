@@ -267,14 +267,26 @@ describe('nuclei-url coverage and the source of open findings', () => {
     expect(state(r.db).cov).toEqual([HOST]);
   }, 100_000);
 
-  const noUrl = (matchedAt: string) => `
+  // The stored shape of each kind: ssl rows have no url, tcp rows carry host:port and no scheme.
+  const noUrl = (type: string, matchedAt: string, url: string | null) => `
     INSERT INTO findings(tool, target, category, severity, title, matched_at, meta_json, seen_at)
-    VALUES ('nuclei-url', '${HOST}', 'cve', 'high', 'older finding', '${matchedAt}', '${JSON.stringify({ type: 'x' })}', '${OLDER}')`;
+    VALUES ('nuclei-url', '${HOST}', 'cve', 'high', 'older finding', '${matchedAt}', '${JSON.stringify({ type, 'matched-at': matchedAt, ...(url ? { url } : {}) })}', '${OLDER}')`;
+  const tcpRow = (url: string) => JSON.stringify({
+    'template-id': 't-tcp', type: 'tcp', info: { name: 'T', severity: 'info' }, host: HOST, url, 'matched-at': url,
+  });
 
-  for (const [kind, matchedAt] of [['dns', HOST], ['tcp', `${HOST}:22`], ['ssl', `${HOST}:8443`], ['ssl', `${HOST}:443`]] as const) {
-    it(`covers a target whose open ${kind} finding (${matchedAt}) has no url, when its bare host was scanned`, async () => {
-      const r = await runNuclei(['--from-urls'], [hit], 0, { trigger: noUrl(matchedAt) });
-      expect(state(r.db).cov).toEqual([HOST]);
+  const cases: [string, string, string | null, string[], boolean][] = [
+    ['dns', HOST, null, [], true],
+    ['ssl', `${HOST}:443`, null, [], true],
+    ['ssl', `${HOST}:8443`, null, [], false],
+    ['tcp', `${HOST}:22`, `${HOST}:22`, [], false],
+    ['tcp', `${HOST}:22`, `${HOST}:22`, [tcpRow(`${HOST}:22`)], true],
+    ['tcp', `${HOST}:22`, `${HOST}:22`, [tcpRow(`${HOST}:2222`)], false],
+  ];
+  for (const [kind, matchedAt, url, extraRows, covers] of cases) {
+    it(`${covers ? 'covers' : 'does not cover'} a target whose open ${kind} finding (${matchedAt}) has ${extraRows.length ? 'a stored row on its authority' : 'no run evidence for its authority'}`, async () => {
+      const r = await runNuclei(['--from-urls'], [hit, ...extraRows], 0, { trigger: noUrl(kind, matchedAt, url) });
+      expect(state(r.db).cov).toEqual(covers ? [HOST] : []);
     }, 100_000);
   }
 
