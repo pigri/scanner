@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   computeAttendance,
   observationsForKey,
+  withOpenKeys,
   type Observation,
   type ScanWindow,
 } from '../src/lib/history.js';
@@ -336,5 +337,20 @@ describe('computeAttendance — nuclei passes', () => {
       ], ws);
       expect(row.flapping).toBe(true);
     });
+  });
+});
+
+describe('withOpenKeys', () => {
+  const rows = () => computeAttendance([obs({ title: 'x', seen_at: '2026-08-01T00:30:00.000Z' })], W);
+  it('turns resolved into open when the shared rule keeps the key open', () => {
+    const [r] = rows();
+    expect(r!.status).toBe('resolved');
+    const [o] = withOpenKeys([r!], new Set([r!.key]));
+    expect(o!.status).toBe('open');
+    expect(o!.firstSeen).toBe(r!.firstSeen);
+    expect(o!.presence).toEqual(r!.presence);
+  });
+  it('leaves resolved alone when the rule agrees', () => {
+    expect(withOpenKeys(rows(), new Set())[0]!.status).toBe('resolved');
   });
 });

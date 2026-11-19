@@ -31,7 +31,7 @@ export interface ScanWindow {
 }
 
 export type PresenceState = 'present' | 'absent' | 'n/a';
-export type Status = 'persistent' | 'resolved' | 'unknown';
+export type Status = 'persistent' | 'resolved' | 'unknown' | 'open';
 
 export interface KeyAttendance {
   key: Key;
@@ -125,6 +125,15 @@ function perToolOutcome(
     if (countTransitions(seq) >= 2) flapping = true;
   }
   return { status: persistent ? 'persistent' : unknown ? 'unknown' : resolved ? 'resolved' : 'unknown', flapping };
+}
+
+/**
+ * A key absent from its latest applicable window is `resolved` only when the
+ * shared closing rule agrees. When the rule still calls it open (a partial run,
+ * a tool that wrote nothing) the status is `open`. History stays as it was.
+ */
+export function withOpenKeys(rows: readonly KeyAttendance[], openKeys: ReadonlySet<Key>): KeyAttendance[] {
+  return rows.map((r) => (r.status === 'resolved' && openKeys.has(r.key) ? { ...r, status: 'open' } : r));
 }
 
 /**
