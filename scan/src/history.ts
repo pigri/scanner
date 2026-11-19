@@ -14,7 +14,7 @@ import { openKeysFor } from './lib/open-keys.js';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
 import {
   computeAttendance,
-  withOpenKeys,
+  attendanceWithOpenKeys,
   observationsForKey,
   type Observation,
   type ScanWindow,
@@ -256,7 +256,7 @@ function main(): void {
     process.exit(1);
   }
   const observations = findingsFor(db, opts.target, opts.tool);
-  let rows = withOpenKeys(computeAttendance(observations, windows), openKeysFor(db.raw, opts.target));
+  let rows = attendanceWithOpenKeys(computeAttendance(observations, windows), openKeysFor(db.raw, opts.target));
   if (opts.category) rows = rows.filter((r) => r.category === opts.category);
   if (opts.tool) rows = rows.filter((r) => r.tool === opts.tool);
 

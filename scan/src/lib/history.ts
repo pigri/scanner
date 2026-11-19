@@ -132,7 +132,7 @@ function perToolOutcome(
  * shared closing rule agrees. When the rule still calls it open (a partial run,
  * a tool that wrote nothing) the status is `open`. History stays as it was.
  */
-export function withOpenKeys(rows: readonly KeyAttendance[], openKeys: ReadonlySet<Key>): KeyAttendance[] {
+export function attendanceWithOpenKeys(rows: readonly KeyAttendance[], openKeys: ReadonlySet<Key>): KeyAttendance[] {
   return rows.map((r) => (r.status === 'resolved' && openKeys.has(r.key) ? { ...r, status: 'open' } : r));
 }
 

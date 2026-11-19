@@ -21,7 +21,7 @@ import { openDb } from './lib/db.js';
 import { openKeysFor } from './lib/open-keys.js';
 import { resolveDbArg, isDbFlag } from './lib/db-arg.js';
 import {
-  diffAgainstScan, classifyHost, isMeaningful, withOpenKeys,
+  diffAgainstScan, classifyHost, isMeaningful, diffWithOpenKeys,
   type Observation, type ScanWindow, type Diff, type HostStatus,
 } from './lib/resolved.js';
 
@@ -165,7 +165,7 @@ function findingsFor(db: ReturnType<typeof openDb>, target: string): Observation
 }
 
 function diffFor(db: ReturnType<typeof openDb>, w: ScanWindow): Diff {
-  return withOpenKeys(diffAgainstScan(findingsFor(db, w.target), w), openKeysFor(db.raw, w.target));
+  return diffWithOpenKeys(diffAgainstScan(findingsFor(db, w.target), w), openKeysFor(db.raw, w.target));
 }
 
 function fmtObs(o: Observation): string {

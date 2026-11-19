@@ -52,7 +52,7 @@ export interface Diff {
   // Key seen only in the window. Value = last during observation.
   novel: Observation[];
   // Absent from the latest window, yet open under the shared closing rule
-  // (lib/current-findings.ts), e.g. after a partial run. Set by withOpenKeys.
+  // (lib/current-findings.ts), e.g. after a partial run. Set by diffWithOpenKeys.
   stillOpen?: Observation[];
 }
 
@@ -136,7 +136,7 @@ export function diffAgainstScan(
  * to `stillOpen`, so this window-based view never calls resolved what the UI
  * shows as open.
  */
-export function withOpenKeys(diff: Diff, openKeys: ReadonlySet<Key>): Diff {
+export function diffWithOpenKeys(diff: Diff, openKeys: ReadonlySet<Key>): Diff {
   const resolved: Observation[] = [];
   const stillOpen: Observation[] = [];
   for (const o of diff.resolved) (openKeys.has(keyOf(o)) ? stillOpen : resolved).push(o);
