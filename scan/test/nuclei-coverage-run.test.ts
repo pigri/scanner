@@ -278,6 +278,15 @@ describe('nuclei-url coverage and the source of open findings', () => {
     }, 100_000);
   }
 
+  it('does not let a closed finding outside the inputs block coverage', async () => {
+    const closed = `${seed(`https://${HOST}/gone`)};
+      INSERT INTO findings(tool, target, category, severity, title, matched_at, meta_json, seen_at)
+      VALUES ('nuclei-url', '${HOST}', 'other', 'low', 'newer finding', 'https://${HOST}/app/login', '${JSON.stringify({ url: `https://${HOST}/app/login` })}', '2026-01-02T00:00:00.000Z');
+      INSERT INTO tool_coverage(target, tool, seen_at, run_id) VALUES ('${HOST}', 'nuclei-url', '2026-01-02T00:00:00.000Z', NULL)`;
+    const r = await runNuclei(['--from-urls'], [hit], 0, { trigger: closed });
+    expect(coverage(r.db).rows.filter((x) => x.run_id !== null).map((x) => x.target)).toEqual([HOST]);
+  }, 100_000);
+
   it('records no coverage, and says so, when the open findings cannot be read', async () => {
     const bad = `INSERT INTO findings(tool, target, category, severity, title, matched_at, meta_json, seen_at)
       VALUES ('nuclei-url', '${HOST}', 'cve', 'high', 'bad row', 'x', 'not json', '${OLDER}')`;
