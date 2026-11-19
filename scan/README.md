@@ -405,6 +405,8 @@ Runs `wpscan` per URL. Emits per-host JSON to `wpscan.jsonl`. Parses `interestin
 
 Set `WPSCAN_API_TOKEN` (from wpscan.com) for CVE lookups.
 
+Known limit: wpscan reports no per-request errors. With an API token, one flaky run that returns an empty `config_backups` is a clean run to the partial-run rules, so it closes an open config-backup finding. The finding reopens on the next run that sees the file again.
+
 ### masscan
 
 ```

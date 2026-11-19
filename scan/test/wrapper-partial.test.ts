@@ -109,6 +109,49 @@ describe('wpscan findings from real output', () => {
   });
 });
 
+describe('wpscan enumeration keys', () => {
+  const fx = (name: string): string => fs.readFileSync(path.join(SCAN, 'test/fixtures/wpscan', name), 'utf8').trimEnd();
+  const keyRows = (): { category: string; severity: string; title: string; cve: string | null; matched_at: string | null }[] => {
+    const db = new Database(path.join(dir, 'scan.db'), { readonly: true });
+    const rows = db.prepare("SELECT category, severity, title, cve, matched_at FROM findings WHERE tool = 'wpscan' AND category IN ('config-backup','db-export','timthumb','timthumb-vulnerability','wordpress-users') ORDER BY category, id").all() as { category: string; severity: string; title: string; cve: string | null; matched_at: string | null }[];
+    db.close();
+    return rows;
+  };
+  const logicalKeys = (): string[] => {
+    const db = new Database(path.join(dir, 'scan.db'), { readonly: true });
+    const rows = db.prepare("SELECT DISTINCT target, tool, severity, category, title FROM findings WHERE tool = 'wpscan' ORDER BY 1,2,3,4,5").all();
+    db.close();
+    return rows.map((r) => JSON.stringify(r));
+  };
+
+  it('stores every enumeration key of a real run', () => {
+    wpFake(fx('keys-enumerate-pretty.json'), 5);
+    runWrapper('wpscan.ts', ['wp.example']);
+    expect(keyRows().map((r) => [r.category, r.severity, r.title, r.cve, r.matched_at])).toEqual([
+      ['config-backup', 'high', 'config backup exposed: http://wp.example/wp-config.php~', null, 'http://wp.example/wp-config.php~'],
+      ['db-export', 'high', 'db export exposed: http://wp.example/1.sql', null, 'http://wp.example/1.sql'],
+      ['timthumb', 'medium', 'timthumb exposed: http://wp.example/timthumb.php', null, 'http://wp.example/timthumb.php'],
+      ['timthumb-vulnerability', 'high', 'http://wp.example/timthumb.php: Timthumb <= 2.8.13 WebShot Remote Code Execution', 'CVE-2014-4663', 'http://wp.example/timthumb.php'],
+      ['wordpress-users', 'info', 'WordPress users (2): admin-example, editor-example', null, 'https://wp.example'],
+    ]);
+  });
+
+  it('a target with only a config backup stores only that', () => {
+    wpFake(fx('keys-wrapper-flags-pretty.json'), 5);
+    runWrapper('wpscan.ts', ['wp.example']);
+    expect(keyRows().map((r) => r.category)).toEqual(['config-backup']);
+  });
+
+  it('a rescan keeps the same logical keys, so rows group instead of multiplying', () => {
+    wpFake(fx('keys-enumerate-pretty.json'), 5);
+    runWrapper('wpscan.ts', ['wp.example']);
+    const first = logicalKeys();
+    runWrapper('wpscan.ts', ['wp.example']);
+    expect(logicalKeys()).toEqual(first);
+    expect(first.length).toBeGreaterThan(5);
+  });
+});
+
 describe('takeover partial runs', () => {
   const row = (host: string) => JSON.stringify({ 'template-id': 'x-takeover', info: { name: 'takeover', severity: 'high' }, host, 'matched-at': host });
   const nuclei = (rows: string[], stderr: string, code = 0) => fake('nuclei',
