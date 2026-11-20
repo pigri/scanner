@@ -9,7 +9,7 @@ export function wpTargetsFromHttpx(texts: string[], batch: string[]): string[] {
     for (const line of text.split('\n')) {
       const row = parseHttpxRow(line);
       if (!row || !row.url || !inBatch.has(row.target)) continue;
-      const isWp = (row.tech ?? []).some((t) => typeof t === 'string' && t.toLowerCase().includes('wordpress'));
+      const isWp = Array.isArray(row.tech) && row.tech.some((t) => typeof t === 'string' && t.toLowerCase().includes('wordpress'));
       if (isWp) seen.add(row.url);
     }
   }

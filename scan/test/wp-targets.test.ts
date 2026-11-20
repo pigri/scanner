@@ -38,4 +38,9 @@ describe('wpTargetsFromHttpx', () => {
     const text = ['{not json', '', '[1]', wp('a.example.com')].join('\n');
     expect(wpTargetsFromHttpx([text], ['a.example.com'])).toEqual(['https://a.example.com']);
   });
+
+  it('skips a row whose tech is not a list instead of throwing', () => {
+    const text = [line({ host: 'a.example.com', url: 'https://a.example.com', tech: 'WordPress' }), wp('b.example.com')].join('\n');
+    expect(wpTargetsFromHttpx([text], ['a.example.com', 'b.example.com'])).toEqual(['https://b.example.com']);
+  });
 });
