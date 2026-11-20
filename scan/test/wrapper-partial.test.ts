@@ -96,7 +96,7 @@ describe('wpscan findings from real output', () => {
     const fixture = fs.readFileSync(path.join(SCAN, 'test/fixtures/wpscan/not-wordpress-pretty.json'), 'utf8');
     wpFake(fixture.trimEnd(), 4);
     const r = runWrapper('wpscan.ts', ['plain.example']);
-    expect(r.stderr).toContain('wpscan done: 1 ok, 0 failed');
+    expect(r.stderr).toContain('wpscan done: 1 ok, 0 aborted, 0 failed');
   });
 
   it('stores vulnerabilities with a CVE id in the CVE-YYYY-N form', () => {

@@ -40,9 +40,9 @@ export interface SpawnResult {
   stderr: string;
 }
 
-export async function run(cmd: string, args: string[], opts: { timeoutMs?: number; stdin?: string } = {}): Promise<SpawnResult> {
+export async function run(cmd: string, args: string[], opts: { timeoutMs?: number; stdin?: string; env?: NodeJS.ProcessEnv } = {}): Promise<SpawnResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'], ...(opts.env ? { env: opts.env } : {}) });
     let stdout = '', stderr = '';
     child.stdout.on('data', (d: Buffer) => (stdout += d.toString()));
     child.stderr.on('data', (d: Buffer) => (stderr += d.toString()));

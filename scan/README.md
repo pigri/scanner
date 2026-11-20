@@ -65,7 +65,7 @@ External binaries expected on `$PATH`:
 - **wpscan** (`gem install wpscan`)
 - **httpx**, **nuclei**, **gowitness** (`go install ...`, via `install-tools.sh`)
 
-Optional env var: `WPSCAN_API_TOKEN` unlocks CVE data in wpscan output.
+Optional env var: `WPSCAN_API_TOKEN` unlocks CVE data in wpscan output. Unset or empty, wpscan runs without the vuln API and reports no vulnerability data.
 
 ## Per-run output layout
 
@@ -436,7 +436,7 @@ npm run wpscan -- --targets wp-hosts.txt --scope scope.txt --sqlite scan.db
 ```
 Runs `wpscan` per URL. Emits per-host JSON to `wpscan.jsonl`. Parses `interesting_findings`, `version.vulnerabilities`, and each plugin's vulnerabilities into `findings` (tool='wpscan', category='core-vulnerability'/'plugin-vulnerability'/'interesting').
 
-Set `WPSCAN_API_TOKEN` (from wpscan.com) for CVE lookups.
+Set `WPSCAN_API_TOKEN` (from wpscan.com) for CVE lookups. An empty value is dropped from wpscan's environment, because wpscan would otherwise call the API with it and abort on the 401.
 
 Known limit: wpscan reports no per-request errors. With an API token, one flaky run that returns an empty `config_backups` is a clean run to the partial-run rules, so it closes an open config-backup finding. The finding reopens on the next run that sees the file again.
 
