@@ -21,6 +21,15 @@ function answeringIp(row: HttpxRow): string | null {
   return null;
 }
 
+// Bare lowercase hostname of a host, URL or host:port string.
+export function normalizeHost(raw: string): string {
+  return raw
+    .replace(/^https?:\/\//i, '')
+    .replace(/[/:?#].*$/, '')
+    .replace(/\.$/, '')
+    .toLowerCase();
+}
+
 // Parses one httpx JSONL line into a probe row; null for a blank or malformed line.
 export function parseHttpxRow(line: string): HttpProbeRow | null {
   if (!line.trim()) return null;
@@ -35,12 +44,7 @@ export function parseHttpxRow(line: string): HttpProbeRow | null {
   // is scheme-prefixed. Storing it verbatim broke every downstream join
   // (report-worker, risk.ts, sslyze/headers/ffuf live-only filters,
   // synthesize-eol, graph-export) because they all key on the bare host.
-  const rawTarget = str(row.host ?? row.input ?? row.url);
-  const target = rawTarget
-    .replace(/^https?:\/\//i, '')
-    .replace(/[/:?#].*$/, '')
-    .replace(/\.$/, '')
-    .toLowerCase();
+  const target = normalizeHost(str(row.host ?? row.input ?? row.url));
   if (!target) return null;
   return {
     target,

@@ -1,8 +1,10 @@
 #!/usr/bin/env -S node --loader tsx
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { parseCommonCli, commonUsage, prepareTargets, run } from './lib/runner.js';
 import { DEFAULT_NVD_DB } from './version-match.js';
+import { wpTargetsFromHttpx } from './lib/wp-targets.js';
 
 async function step(name: string, cmd: string, args: string[]): Promise<number> {
   const start = Date.now();
@@ -171,16 +173,18 @@ Env vars:
   // Stage 3: wpscan (needs httpx from stage 1) + SMB tools (need nmap ports
   // from stage 2). They share no data with each other so run in parallel.
   const stage3: Array<[string, string[]]> = [];
+  let wpDir: string | undefined;
 
   if (runOne('wpscan')) {
-    const wpTargets = extractWpTargets();
+    const wpTargets = extractWpTargets(targets);
     if (wpTargets.length) {
-      const wpFile = path.resolve('wp-targets.txt');
+      wpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wp-targets-'));
+      const wpFile = path.join(wpDir, 'wp-targets.txt');
       fs.writeFileSync(wpFile, wpTargets.join('\n') + '\n');
       const wpCommon = ['--targets', wpFile, ...scopeArg, ...strictArg, ...sqliteArg];
       stage3.push([`wpscan (${wpTargets.length} WP hosts)`, ['tsx', 'src/wpscan.ts', ...wpCommon]]);
     } else {
-      console.error('\n=== wpscan === skipped (no WordPress hosts detected in httpx)');
+      console.error('\n=== wpscan === skipped (no WordPress hosts in this batch)');
     }
   }
 
@@ -246,13 +250,17 @@ Env vars:
   if (!smbSkip && runOne('smbmap'))        stage3.push(['smbmap',        smbCmd('smbmap')]);
   if (!smbSkip && runOne('rpcclient'))     stage3.push(['rpcclient',     smbCmd('rpcclient')]);
 
-  if (stage3.length) {
-    console.error(`\n>>> STAGE 3 (${sequential ? 'sequential' : 'parallel'}): ${stage3.map((s) => s[0]).join(', ')}`);
-    if (sequential) {
-      for (const [name, args] of stage3) await step(name, tsx, args);
-    } else {
-      await Promise.all(stage3.map(([name, args]) => step(name, tsx, args)));
+  try {
+    if (stage3.length) {
+      console.error(`\n>>> STAGE 3 (${sequential ? 'sequential' : 'parallel'}): ${stage3.map((s) => s[0]).join(', ')}`);
+      if (sequential) {
+        for (const [name, args] of stage3) await step(name, tsx, args);
+      } else {
+        await Promise.all(stage3.map(([name, args]) => step(name, tsx, args)));
+      }
     }
+  } finally {
+    if (wpDir) fs.rmSync(wpDir, { recursive: true, force: true });
   }
 
   // data-integrity — self-heal (report_queue orphans + cve rollup drift).
@@ -267,10 +275,9 @@ Env vars:
   console.error(`\nscan-all pipeline finished in ${totalDt}s`);
 }
 
-// Find all httpx.jsonl outputs across run dirs (default runs/<id>/httpx.jsonl)
-// so wpscan sees fresh data even when we're resuming an interrupted pipeline.
-function extractWpTargets(): string[] {
-  const seen = new Set<string>();
+// WordPress URLs of this batch, from every runs/<id>/httpx.jsonl plus the cwd
+// httpx.jsonl, so a resumed pipeline (SKIP=httpx) still sees earlier probes.
+function extractWpTargets(batch: string[]): string[] {
   const candidates: string[] = ['httpx.jsonl'];
   const runsDir = path.resolve('runs');
   if (fs.existsSync(runsDir)) {
@@ -279,21 +286,8 @@ function extractWpTargets(): string[] {
       if (fs.existsSync(p)) candidates.push(p);
     }
   }
-  for (const file of candidates) {
-    if (!fs.existsSync(file)) continue;
-    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
-      if (!line.trim()) continue;
-      try {
-        const row = JSON.parse(line) as { url?: string; tech?: string[]; technologies?: string[] };
-        const tech = [...(row.tech ?? []), ...(row.technologies ?? [])].map((t) => t.toLowerCase());
-        if (tech.some((t) => t.includes('wordpress'))) {
-          const url = row.url ?? '';
-          if (url) seen.add(url);
-        }
-      } catch { /* ignore */ }
-    }
-  }
-  return [...seen];
+  const texts = candidates.filter((f) => fs.existsSync(f)).map((f) => fs.readFileSync(f, 'utf8'));
+  return wpTargetsFromHttpx(texts, batch);
 }
 
 main().catch((err: unknown) => {
