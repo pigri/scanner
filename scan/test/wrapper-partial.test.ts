@@ -37,6 +37,7 @@ const wpJson = (extra: Record<string, unknown>) => JSON.stringify({
   interesting_findings: [{ to_s: 'readme', type: 'readme', url: 'https://a.example/readme.html' }], ...extra,
 }, null, 2);
 const wpFake = (json: string, code: number) => fake('wpscan', `cat <<'EOF'\n${json}\nEOF\nexit ${code}`);
+const NO_TOKEN_NOTICE = 'No WPScan API Token given, as a result vulnerability data has not been output.\nYou can get a free API token with 25 daily requests by registering at https://wpscan.com/register';
 const API_OK = { vuln_api: { plan: 'free', requests_done_during_scan: 1, requests_remaining: 20 } };
 
 describe('wpscan partial runs', () => {
@@ -47,7 +48,7 @@ describe('wpscan partial runs', () => {
     ['a scan_aborted key on exit 0', 0, wpJson({ ...API_OK, scan_aborted: 'boom' })],
     ['an exhausted vuln api quota', 0, wpJson({ vuln_api: { plan: 'free', requests_done_during_scan: 25, requests_remaining: 0 } })],
     ['a vuln api http_error', 0, wpJson({ vuln_api: { http_error: 'HTTP 500' } })],
-    ['a missing api token', 0, wpJson({ vuln_api: { error: 'No WPScan API Token given' } })],
+    ['a vuln api error', 0, wpJson({ vuln_api: { error: 'HTTP Error: 401 Unauthorized' } })],
   ])('is partial on %s', (_n, code, json) => {
     wpFake(json, code);
     const r = runWrapper('wpscan.ts', ['a.example']);
@@ -66,6 +67,13 @@ describe('wpscan partial runs', () => {
     wpFake(wpJson(API_OK), 0);
     const r = runWrapper('wpscan.ts', ['a.example']);
     expect(r.notes ?? '').not.toContain('partial');
+    expect(r.partialRows).toBe(0);
+  });
+
+  it('the no-token notice on a free run is complete', () => {
+    wpFake(wpJson({ vuln_api: { error: NO_TOKEN_NOTICE } }), 0);
+    const r = runWrapper('wpscan.ts', ['a.example']);
+    expect(r.notes ?? '').not.toContain('partial run');
     expect(r.partialRows).toBe(0);
   });
 

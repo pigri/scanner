@@ -75,11 +75,14 @@ export function testsslAborted(findings: unknown, code: number): boolean {
   });
 }
 
+const NO_TOKEN_PREFIX = 'No WPScan API Token given';
+
 /**
  * wpscan (cms_scanner) exits 0 clean and 5 when vulnerable; 1 to 4 are CLI error,
  * interrupt, exception and unfinished scan. A scan_aborted key can accompany exit 0.
- * An empty vuln_api reply (no token, 429, http error, exhausted quota) leaves the
- * vulnerability rows missing while the exit stays 0.
+ * An empty vuln_api reply (429, http error, exhausted quota) leaves the vulnerability
+ * rows missing while the exit stays 0. The no-token notice is not a failure: the run
+ * is deliberately without the vuln API.
  */
 export function wpscanFailed(code: number, parsed: unknown): boolean {
   if (code !== 0 && code !== 5) return true;
@@ -88,5 +91,6 @@ export function wpscanFailed(code: number, parsed: unknown): boolean {
   if (p.scan_aborted !== undefined) return true;
   const api = p.vuln_api;
   if (!api || typeof api !== 'object') return false;
-  return api.error !== undefined || api.http_error !== undefined || api.requests_remaining === 0;
+  const noToken = typeof api.error === 'string' && api.error.startsWith(NO_TOKEN_PREFIX);
+  return (api.error !== undefined && !noToken) || api.http_error !== undefined || api.requests_remaining === 0;
 }

@@ -101,6 +101,8 @@ describe('testsslAborted', () => {
   });
 });
 
+const NO_TOKEN_NOTICE = 'No WPScan API Token given, as a result vulnerability data has not been output.\nYou can get a free API token with 25 daily requests by registering at https://wpscan.com/register';
+
 describe('wpscanFailed', () => {
   const ok = { vuln_api: { plan: 'free', requests_remaining: 20 } };
   it('treats exit 0 and exit 5 as normal', () => {
@@ -117,6 +119,13 @@ describe('wpscanFailed', () => {
     expect(wpscanFailed(0, { vuln_api: { error: 'No token' } })).toBe(true);
     expect(wpscanFailed(0, { vuln_api: { http_error: 'HTTP 500' } })).toBe(true);
     expect(wpscanFailed(0, { vuln_api: { requests_remaining: 0 } })).toBe(true);
+  });
+  it('treats the no-token notice as a complete scan on exit 0 and 5', () => {
+    expect(wpscanFailed(0, { vuln_api: { error: NO_TOKEN_NOTICE } })).toBe(false);
+    expect(wpscanFailed(5, { vuln_api: { error: NO_TOKEN_NOTICE } })).toBe(false);
+  });
+  it('is still failed on the no-token notice with scan_aborted', () => {
+    expect(wpscanFailed(0, { scan_aborted: 'x', vuln_api: { error: NO_TOKEN_NOTICE } })).toBe(true);
   });
   it('accepts unlimited quota and a missing vuln_api block as not failed by the api', () => {
     expect(wpscanFailed(0, { vuln_api: { requests_remaining: 'Unlimited' } })).toBe(false);
