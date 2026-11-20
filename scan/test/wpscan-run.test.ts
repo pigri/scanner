@@ -18,11 +18,11 @@ if [ "\${WPSCAN_API_TOKEN+set}" = set ]; then
   echo '{"scan_aborted":"HTTP Error: https://wpscan.com/api/v3/status (status: 401)","target_url":"https://a.example.com/"}'
   exit 4
 fi
-echo '{"target_url":"https://a.example.com/","users":{"admin":{"id":1,"found_by":"Rss Generator (Passive Detection)"}}}'
+echo '{"target_url":"https://a.example.com/","vuln_api":{"error":"No WPScan API Token given, as a result vulnerability data has not been output.\\\\nYou can get a free API token with 25 daily requests by registering at https://wpscan.com/register"},"users":{"admin":{"id":1,"found_by":"Rss Generator (Passive Detection)"}}}'
 exit 0
 `;
 
-function runWpscan(token: string): { rows: { title: string }[]; args: string[]; stderr: string } {
+function runWpscan(token: string): { rows: { title: string }[]; args: string[]; stderr: string; notes: string } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wpscan-run-'));
   dirs.push(dir);
   fs.writeFileSync(path.join(dir, 'wpscan'), FAKE, { mode: 0o755 });
@@ -36,15 +36,17 @@ function runWpscan(token: string): { rows: { title: string }[]; args: string[]; 
   expect(r.status).toBe(0);
   const db = openDb(dbPath);
   const rows = db.raw.prepare("SELECT title FROM findings WHERE tool = 'wpscan'").all() as { title: string }[];
+  const run = db.raw.prepare("SELECT notes FROM runs WHERE tool = 'wpscan' ORDER BY rowid DESC LIMIT 1").get() as { notes: string | null } | undefined;
   db.close();
-  return { rows, args: fs.readFileSync(path.join(dir, 'args.txt'), 'utf8').trim().split('\n'), stderr: r.stderr };
+  return { notes: run?.notes ?? '', rows, args: fs.readFileSync(path.join(dir, 'args.txt'), 'utf8').trim().split('\n'), stderr: r.stderr };
 }
 
 describe('wpscan run', () => {
   it('runs without the vuln API when the token is empty', () => {
-    const { rows, args } = runWpscan('');
+    const { rows, args, notes } = runWpscan('');
     expect(rows.map((r) => r.title)).toEqual(['WordPress users (1): admin']);
     expect(args).not.toContain('--api-token');
+    expect(notes).not.toContain('partial run');
   });
 
   it('passes a real token on, and counts the API abort', () => {
