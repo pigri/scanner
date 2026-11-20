@@ -1,18 +1,19 @@
 #!/usr/bin/env node
-// After a risk recompute, find every target whose latest score differs from
-// its previous score and push it into report_queue so scan-report-worker
-// re-renders its per-host .md file. Called from scan-risk.service after the
-// risk step. Cheap (~ms on a 5k-target corpus) — no scoring or DNS work.
+// After a risk recompute, find every target the newest risk run scored whose
+// score differs from its previous score, or that has no previous score, and
+// push it into report_queue so scan-report-worker re-renders its per-host .md
+// file. Called from scan-risk.service after the risk step. Cheap (~ms on a
+// 5k-target corpus) — no scoring or DNS work.
 import Database from '../node_modules/better-sqlite3/lib/index.js';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const scanDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const db = new Database(path.join(scanDir, 'scan.db'));
+const db = new Database(process.argv[2] ?? path.join(scanDir, 'scan.db'));
 
 const rows = db.prepare(`
   WITH ranked AS (
-    SELECT target, score, computed_at,
+    SELECT target, score, computed_at, run_id,
            ROW_NUMBER() OVER (PARTITION BY target ORDER BY computed_at DESC) rn
     FROM risk_scores
   )
@@ -20,6 +21,7 @@ const rows = db.prepare(`
   FROM ranked a
   LEFT JOIN ranked b ON b.target = a.target AND b.rn = 2
   WHERE a.rn = 1 AND (b.score IS NULL OR a.score != b.score)
+    AND a.run_id = (SELECT MAX(run_id) FROM risk_scores)
 `).all();
 
 const upsert = db.prepare(`
